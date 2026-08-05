@@ -50,6 +50,12 @@ public class PanelSessionStore
             _sessions.TryRemove(token, out _);
     }
 
+    /// <summary>清除所有会话（修改密码后强制全部重新登录）。</summary>
+    public void ClearAll()
+    {
+        _sessions.Clear();
+    }
+
     private void Cleanup()
     {
         foreach (var kv in _sessions)
