@@ -1,3 +1,4 @@
+using System.Globalization;
 using QQBot.ConsoleHost.Services;
 using QQBot.ConsoleHost.Tui;
 
@@ -11,6 +12,31 @@ public static class Program
 {
     public static async Task Main(string[] args)
     {
+        // 无感迁移：固定与 Windows 版一致的运行时环境，避免客户感知差异。
+        // 1) 文化固定为 zh-CN——保证百分比/数字等格式化与 Windows 版一致
+        //    （否则 invariant/其他 locale 会把 "12%" 渲染成 "12 %"）。
+        // 2) 时区固定为 Asia/Shanghai——保证依赖本地日界的逻辑（如"今日消息数"统计
+        //    的 DateTime.Today）按北京时间零点计算，而不是服务器时区（可能是 UTC）。
+        try
+        {
+            var zhCn = new CultureInfo("zh-CN");
+            CultureInfo.DefaultThreadCurrentCulture = zhCn;
+            CultureInfo.DefaultThreadCurrentUICulture = zhCn;
+            CultureInfo.CurrentCulture = zhCn;
+            CultureInfo.CurrentUICulture = zhCn;
+        }
+        catch (CultureNotFoundException)
+        {
+            // 缺少 ICU 时退回系统默认（见 deploy 说明：需安装 libicu）
+        }
+        TimeZoneInfo.ClearCachedData();
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TZ")))
+        {
+            // 仅在未显式指定时区时兜底为北京时间；Linux 下 TimeZoneInfo.Local 读取 TZ 变量
+            Environment.SetEnvironmentVariable("TZ", "Asia/Shanghai");
+            TimeZoneInfo.ClearCachedData();
+        }
+
         var headless = Array.Exists(args, a => a is "--headless" or "-h");
 
         var serviceManager = new HostedServiceManager();

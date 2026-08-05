@@ -24,7 +24,10 @@ PrivateTmp=true
 
 # 环境变量
 Environment=DOTNET_ROOT=/usr/share/dotnet
-Environment=DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+# 时区固定为北京时间：保证"今日消息数"等按本地日界统计的逻辑与 Windows 版一致。
+# 注意：不要设置 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1，
+# 否则百分比等格式化会与 Windows(zh-CN) 产生差异（如 "12%" 变 "12 %"），破坏无感迁移。
+Environment=TZ=Asia/Shanghai
 Environment=ASPNETCORE_ENVIRONMENT=Production
 
 [Install]

@@ -39,7 +39,21 @@ mkdir -p "$INSTALL_DIR/logs"
 chown qqbot:qqbot "$INSTALL_DIR"
 
 echo "[3/6] 复制文件..."
+# 保护已有的运行数据库：若安装目录已有 qqbot.db，先备份，且不被 publish 中的旧库覆盖
+if [ -f "$INSTALL_DIR/qqbot.db" ]; then
+    BACKUP="$INSTALL_DIR/qqbot.db.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$INSTALL_DIR/qqbot.db" "$BACKUP"
+    echo "  已备份现有数据库 -> $BACKUP"
+    # 临时移走 publish 中的数据库，避免覆盖线上数据（首次安装无此文件则跳过）
+    if [ -f "$PUBLISH_DIR/qqbot.db" ]; then
+        mv "$PUBLISH_DIR/qqbot.db" "$PUBLISH_DIR/.qqbot.db.skip"
+    fi
+fi
 cp -r "$PUBLISH_DIR"/* "$INSTALL_DIR/"
+# 还原 publish 中被临时移走的数据库文件
+if [ -f "$PUBLISH_DIR/.qqbot.db.skip" ]; then
+    mv "$PUBLISH_DIR/.qqbot.db.skip" "$PUBLISH_DIR/qqbot.db"
+fi
 chown -R qqbot:qqbot "$INSTALL_DIR"
 chmod +x "$INSTALL_DIR/QQBot"
 
