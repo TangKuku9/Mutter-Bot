@@ -30,6 +30,10 @@ artifacts/
 *.sqlite
 *.sqlite3
 
+# Migration database: track only the approved, canonical data snapshot.
+!data/
+!data/qqbot.db
+
 # Environment-specific settings (keep appsettings.json, ignore environment overrides)
 appsettings.*.json
 
