@@ -1,0 +1,31 @@
+[Unit]
+Description=QQBot Linux Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qqbot
+ExecStart=/opt/qqbot/QQBot --headless
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+
+# 安全加固
+User=qqbot
+Group=qqbot
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/qqbot/logs /opt/qqbot
+PrivateTmp=true
+
+# 环境变量
+Environment=DOTNET_ROOT=/usr/share/dotnet
+Environment=DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+Environment=ASPNETCORE_ENVIRONMENT=Production
+
+[Install]
+WantedBy=multi-user.target
