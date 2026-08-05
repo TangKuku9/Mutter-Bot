@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
@@ -40,6 +41,15 @@ public class MessageEventHandler
     /// </summary>
     private readonly ConcurrentDictionary<string, DateTime> _recentContentKeys = new();
     private const int ContentDedupWindowSeconds = 30;
+
+    /// <summary>
+    /// 机器人回复去重：防止短时间内对同一群/用户重复发送相同内容的回复。
+    /// 用于应对 QQ 服务端用不同 msgId/不同 @ 段格式重复投递同一条用户消息，
+    /// 导致前级去重失败时，作为最后一道防线避免用户看到重复回复。
+    /// Key = scope:contentHash，Value = 首次发送时间。
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTime> _recentBotReplies = new();
+    private const int BotReplyDedupWindowSeconds = 8;
 
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
@@ -94,11 +104,15 @@ public class MessageEventHandler
 
     /// <summary>
     /// 内容级去重检查：同群+同用户+同内容在窗口期内视为重复。
+    /// 指纹使用规范化文本（剥离所有 @ 段、合并空白），避免 QQ 服务端
+    /// 用不同 @ 段格式（如 &lt;@!123&gt; vs &lt;@123&gt;）重复投递时绕过去重。
     /// </summary>
     private bool IsContentDuplicate(string groupId, string senderId, string content)
     {
+        var contentFingerprint = NormalizeForFingerprint(content);
         // 截取前 100 字符作为指纹，避免长文本占用过多内存
-        var contentFingerprint = content.Length > 100 ? content[..100] : content;
+        if (contentFingerprint.Length > 100)
+            contentFingerprint = contentFingerprint[..100];
         var key = $"{groupId}:{senderId}:{contentFingerprint}";
         var now = DateTime.UtcNow;
 
@@ -123,6 +137,85 @@ public class MessageEventHandler
 
                 // 窗口期已过，更新时间
                 _recentContentKeys[key] = now;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 规范化消息文本用于指纹比对：剥离所有 &lt;...&gt; 段（@ 提及、表情等），
+    /// 合并多余空白。这样 QQ 服务端用不同 @ 段格式重复投递同一消息时，
+    /// 指纹保持一致，能被 <see cref="IsContentDuplicate"/> 识别。
+    /// </summary>
+    private static string NormalizeForFingerprint(string content)
+    {
+        if (string.IsNullOrEmpty(content)) return string.Empty;
+
+        var sb = new StringBuilder(content.Length);
+        var inSegment = false;
+        foreach (var c in content)
+        {
+            if (c == '<') { inSegment = true; continue; }
+            if (inSegment)
+            {
+                if (c == '>') inSegment = false;
+                continue;
+            }
+            sb.Append(c);
+        }
+
+        // 合并连续空白并 Trim，避免首尾空格差异导致指纹不一致
+        var text = sb.ToString().Trim();
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+
+        var normalized = new StringBuilder(text.Length);
+        var lastWasSpace = false;
+        foreach (var c in text)
+        {
+            if (char.IsWhiteSpace(c))
+            {
+                if (!lastWasSpace) normalized.Append(' ');
+                lastWasSpace = true;
+            }
+            else
+            {
+                normalized.Append(c);
+                lastWasSpace = false;
+            }
+        }
+        return normalized.ToString();
+    }
+
+    /// <summary>
+    /// 机器人回复去重检查：同群/同用户在窗口期内已发送过相同内容则跳过。
+    /// 这是最后一道防线，防止前级用户消息去重失败时用户看到重复回复。
+    /// </summary>
+    private bool ShouldSkipDuplicateReply(string scope, string content)
+    {
+        var contentFingerprint = content.Length > 100 ? content[..100] : content;
+        var key = $"{scope}:{contentFingerprint}";
+        var now = DateTime.UtcNow;
+
+        // 清理过期条目（低频执行）
+        if (_recentBotReplies.Count > 200)
+        {
+            var cutoff = now.AddSeconds(-BotReplyDedupWindowSeconds);
+            foreach (var kv in _recentBotReplies)
+            {
+                if (kv.Value < cutoff)
+                    _recentBotReplies.TryRemove(kv.Key, out _);
+            }
+        }
+
+        if (!_recentBotReplies.TryAdd(key, now))
+        {
+            if (_recentBotReplies.TryGetValue(key, out var firstSent))
+            {
+                if ((now - firstSent).TotalSeconds < BotReplyDedupWindowSeconds)
+                    return true; // 重复，跳过
+
+                _recentBotReplies[key] = now;
             }
         }
 
@@ -614,6 +707,20 @@ public class MessageEventHandler
 
     private async Task SendReplyAsync(string? groupOpenId, string? userOpenId, string? msgId, string content)
     {
+        // 回复去重：同群/同用户在窗口期内已发送过相同内容则跳过，
+        // 防止 QQ 服务端用不同 msgId/不同 @ 段格式重复投递时用户看到重复回复。
+        // 注意：仅在 msgId 不为空（即被动回复场景）时启用，避免影响主动推送。
+        if (msgId is not null)
+        {
+            var scope = groupOpenId is not null ? $"g:{groupOpenId}" : $"u:{userOpenId}";
+            if (ShouldSkipDuplicateReply(scope, content))
+            {
+                _logger.LogWarning("检测到重复回复，跳过发送: Scope={Scope}, MsgId={MsgId}, Content={Content}",
+                    scope, msgId, content.Length > 50 ? content[..50] + "..." : content);
+                return;
+            }
+        }
+
         try
         {
             if (groupOpenId is not null)
