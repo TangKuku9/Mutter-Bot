@@ -34,6 +34,13 @@ public class MessageEventHandler
     private readonly ConcurrentDictionary<string, DateTime> _processedMsgIds = new();
     private readonly ConcurrentDictionary<string, int> _msgSeq = new();
 
+    /// <summary>
+    /// 内容级去重：防止 QQ 服务端用不同 msgId 重复投递同一条消息。
+    /// Key = groupId:senderId:contentHash，Value = 首次处理时间。
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTime> _recentContentKeys = new();
+    private const int ContentDedupWindowSeconds = 30;
+
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public MessageEventHandler(
@@ -83,6 +90,43 @@ public class MessageEventHandler
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// 内容级去重检查：同群+同用户+同内容在窗口期内视为重复。
+    /// </summary>
+    private bool IsContentDuplicate(string groupId, string senderId, string content)
+    {
+        // 截取前 100 字符作为指纹，避免长文本占用过多内存
+        var contentFingerprint = content.Length > 100 ? content[..100] : content;
+        var key = $"{groupId}:{senderId}:{contentFingerprint}";
+        var now = DateTime.UtcNow;
+
+        // 清理过期条目（低频执行）
+        if (_recentContentKeys.Count > 500)
+        {
+            var cutoff = now.AddSeconds(-ContentDedupWindowSeconds);
+            foreach (var kv in _recentContentKeys)
+            {
+                if (kv.Value < cutoff)
+                    _recentContentKeys.TryRemove(kv.Key, out _);
+            }
+        }
+
+        if (!_recentContentKeys.TryAdd(key, now))
+        {
+            // Key 已存在，检查是否在窗口期内
+            if (_recentContentKeys.TryGetValue(key, out var firstSeen))
+            {
+                if ((now - firstSeen).TotalSeconds < ContentDedupWindowSeconds)
+                    return true; // 重复
+
+                // 窗口期已过，更新时间
+                _recentContentKeys[key] = now;
+            }
+        }
+
+        return false;
     }
 
     private int? NextSeq(string? msgId)
@@ -205,10 +249,18 @@ public class MessageEventHandler
         var parsed = _parser.Parse(evt.Content, evt.Attachments);
         if (isAtBot) parsed.HasAtBot = true;
 
+        // 内容级去重：QQ 服务端可能用不同 msgId 重复投递同一消息
+        var senderId = evt.Author?.MemberOpenid ?? string.Empty;
+        if (IsContentDuplicate(evt.GroupOpenid, senderId, parsed.PlainText))
+        {
+            _logger.LogWarning("检测到重复投递，跳过: GroupId={GroupId}, Sender={SenderId}, Content={Content}",
+                evt.GroupOpenid, senderId, parsed.PlainText.Length > 50 ? parsed.PlainText[..50] + "..." : parsed.PlainText);
+            return;
+        }
+
         var shouldProcess = await _router.ShouldProcessGroupAsync(evt.GroupOpenid, isAtBot, parsed.PlainText);
         if (!shouldProcess) return;
 
-        var senderId = evt.Author?.MemberOpenid ?? string.Empty;
         var senderName = evt.Author?.MemberOpenid ?? "Member";
         var role = evt.Author?.MemberRole;
 
