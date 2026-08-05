@@ -15,6 +15,7 @@ using QQBot.Infrastructure.Services;
 using QQBot.Web;
 using QQBot.Web.Hubs;
 using QQBot.Web.Middleware;
+using QQBot.Web.Services;
 
 namespace QQBot.ConsoleHost.Services;
 
@@ -72,6 +73,9 @@ public sealed class HostedServiceManager
         builder.Services.AddCoreServices();
         builder.Services.AddInfrastructureServices();
         builder.Services.AddQQBotWeb();
+
+        // 管理面板会话存储（与 QQBot.Web/Program.cs 保持一致）
+        builder.Services.AddSingleton(new PanelSessionStore(TimeSpan.FromMinutes(120)));
 
         _webApp = builder.Build();
         _webApp.UseMiddleware<ApiAuthMiddleware>();
