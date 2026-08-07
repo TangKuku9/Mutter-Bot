@@ -34,4 +34,8 @@ public class PlayerProfileEntity
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
     public bool IsActive { get; set; } = true;
+
+    /// <summary>乐观并发令牌：每次存档自增，配合 EF IsConcurrencyToken，
+    /// 令并发覆写（用旧值整行写回）直接抛 DbUpdateConcurrencyException 而非静默回退。</summary>
+    public int Version { get; set; }
 }

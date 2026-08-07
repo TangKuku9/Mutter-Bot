@@ -39,21 +39,35 @@ mkdir -p "$INSTALL_DIR/logs"
 chown qqbot:qqbot "$INSTALL_DIR"
 
 echo "[3/6] 复制文件..."
-# 保护已有的运行数据库：若安装目录已有 qqbot.db，先备份，且不被 publish 中的旧库覆盖
+# 先停止运行中的服务：让 SQLite 干净关闭并对 WAL 做检查点，
+# 避免未落盘的写（如最近一次突破）在复制/覆盖过程中丢失。
+systemctl stop qqbot 2>/dev/null || true
+
+# 保护已有的运行数据库及 WAL/SHM 辅助文件：
+# 若安装目录已有 qqbot.db，先备份，且不被 publish 中的旧库及其 WAL/SHM 覆盖。
+# 注意：SQLite 在 WAL 模式下，最近未 checkpoint 的写存在于 qqbot.db-wal；
+#       用开发机的 -wal/-shm 覆盖线上文件会让这些写丢失（典型表现：
+#       PlayerProfiles 的最近突破被回退，而已 checkpoint 的背包保留）。
 if [ -f "$INSTALL_DIR/qqbot.db" ]; then
     BACKUP="$INSTALL_DIR/qqbot.db.bak.$(date +%Y%m%d%H%M%S)"
     cp "$INSTALL_DIR/qqbot.db" "$BACKUP"
+    if [ -f "$INSTALL_DIR/qqbot.db-wal" ]; then cp "$INSTALL_DIR/qqbot.db-wal" "$BACKUP-wal"; fi
+    if [ -f "$INSTALL_DIR/qqbot.db-shm" ]; then cp "$INSTALL_DIR/qqbot.db-shm" "$BACKUP-shm"; fi
     echo "  已备份现有数据库 -> $BACKUP"
-    # 临时移走 publish 中的数据库，避免覆盖线上数据（首次安装无此文件则跳过）
-    if [ -f "$PUBLISH_DIR/qqbot.db" ]; then
-        mv "$PUBLISH_DIR/qqbot.db" "$PUBLISH_DIR/.qqbot.db.skip"
-    fi
+    # 临时移走 publish 中的数据库及 WAL/SHM，避免覆盖线上数据（首次安装无此文件则跳过）
+    for f in qqbot.db qqbot.db-wal qqbot.db-shm; do
+        if [ -f "$PUBLISH_DIR/$f" ]; then
+            mv "$PUBLISH_DIR/$f" "$PUBLISH_DIR/.$f.skip"
+        fi
+    done
 fi
 cp -r "$PUBLISH_DIR"/* "$INSTALL_DIR/"
-# 还原 publish 中被临时移走的数据库文件
-if [ -f "$PUBLISH_DIR/.qqbot.db.skip" ]; then
-    mv "$PUBLISH_DIR/.qqbot.db.skip" "$PUBLISH_DIR/qqbot.db"
-fi
+# 还原 publish 中被临时移走的数据库及 WAL/SHM 文件
+for f in qqbot.db qqbot.db-wal qqbot.db-shm; do
+    if [ -f "$PUBLISH_DIR/.$f.skip" ]; then
+        mv "$PUBLISH_DIR/.$f.skip" "$PUBLISH_DIR/$f"
+    fi
+done
 chown -R qqbot:qqbot "$INSTALL_DIR"
 chmod +x "$INSTALL_DIR/QQBot"
 

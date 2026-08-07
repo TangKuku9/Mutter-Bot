@@ -93,6 +93,11 @@ public class CultivationRepository : ICultivationRepository
         e.UpdatedAt = DateTime.UtcNow;
         e.IsActive = player.IsActive;
 
+        // 自增乐观并发令牌：若该行在本次加载后被其它写改过（Version 已变），
+        // 下面的 SaveChanges 会因 WHERE Version=<旧值> 命中 0 行而抛
+        // DbUpdateConcurrencyException，从而"失败抛错"而非"静默整行覆盖回退"。
+        e.Version += 1;
+
         await _db.SaveChangesAsync(ct);
     }
 

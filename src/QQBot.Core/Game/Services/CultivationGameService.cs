@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -24,6 +25,13 @@ public class CultivationGameService
     private readonly EventGenerator _eventGenerator;
     private readonly ActionReferee _referee;
     private readonly ILogger<CultivationGameService> _logger;
+
+    /// <summary>
+    /// 按 (groupId, memberOpenId) 串行化同一玩家的游戏指令，避免读-改-写 PlayerProfiles
+    /// 时的并发整行覆盖（丢失更新，典型表现：突破成功后被并发指令用旧值覆盖回去）。
+    /// 不同玩家互不阻塞，仅同一玩家的指令串行执行。
+    /// </summary>
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _playerLocks = new();
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
 
@@ -54,20 +62,36 @@ public class CultivationGameService
     public async Task<string> HandleAsync(
         string groupId, string memberOpenId, string nickname, GameCommand command, CancellationToken ct = default)
     {
+        // 帮助：纯静态文本，无需存档与串行化
+        if (command.Action == GameAction.Help)
+            return GameTextFormatter.FormatHelp();
+
+        // 排行：只读，不修改存档，无需按玩家串行化
+        if (command.Action == GameAction.Leaderboard)
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var repo = scope.ServiceProvider.GetRequiredService<ICultivationRepository>();
+                var entries = await repo.GetGroupLeaderboardAsync(groupId, 10, ct);
+                return GameTextFormatter.FormatLeaderboard(entries);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Cultivation game handle failed group={GroupId} action={Action}", groupId, command.Action);
+                return "天道动荡，操作失败，请稍后再试。";
+            }
+        }
+
+        // 其余动作会读-改-写 PlayerProfiles，按 (groupId, memberOpenId) 串行化，
+        // 防止同一玩家的并发指令互相用旧值整行覆盖（如突破被回退）造成丢失更新。
+        var playerKey = $"{groupId}:{memberOpenId}";
+        var gate = _playerLocks.GetOrAdd(playerKey, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
         try
         {
             using var scope = _scopeFactory.CreateScope();
             var repo = scope.ServiceProvider.GetRequiredService<ICultivationRepository>();
-
-            // 帮助与排行不需要存档
-            if (command.Action == GameAction.Help)
-                return GameTextFormatter.FormatHelp();
-
-            if (command.Action == GameAction.Leaderboard)
-            {
-                var entries = await repo.GetGroupLeaderboardAsync(groupId, 10, ct);
-                return GameTextFormatter.FormatLeaderboard(entries);
-            }
 
             // 获取/创建存档
             var existing = await repo.GetPlayerAsync(groupId, memberOpenId, ct);
@@ -113,6 +137,10 @@ public class CultivationGameService
         {
             _logger.LogError(ex, "Cultivation game handle failed group={GroupId} action={Action}", groupId, command.Action);
             return "天道动荡，操作失败，请稍后再试。";
+        }
+        finally
+        {
+            gate.Release();
         }
     }
 
@@ -744,6 +772,11 @@ public class CultivationGameService
     public async Task<GameReply?> HandleFreeActionAsync(
         string groupId, string memberOpenId, string nickname, string freeText, CancellationToken ct = default)
     {
+        // 自由行动同样会读-改-写 PlayerProfiles，与确定性指令共用同一把玩家锁，
+        // 避免自由行动与普通指令并发导致整行覆盖回退。
+        var playerKey = $"{groupId}:{memberOpenId}";
+        var gate = _playerLocks.GetOrAdd(playerKey, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
         try
         {
             using var scope = _scopeFactory.CreateScope();
@@ -811,6 +844,10 @@ public class CultivationGameService
         {
             _logger.LogError(ex, "Free action referee failed group={GroupId}", groupId);
             return new GameReply("天道动荡，判定失败，请稍后再试。");
+        }
+        finally
+        {
+            gate.Release();
         }
     }
 

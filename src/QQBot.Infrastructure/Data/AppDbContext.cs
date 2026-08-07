@@ -79,6 +79,9 @@ public class AppDbContext : DbContext
             e.HasKey(x => x.Id);
             e.HasIndex(x => new { x.GroupId, x.MemberOpenId }).IsUnique();
             e.HasIndex(x => new { x.GroupId, x.CultivationPoints });
+            // 乐观并发令牌：UPDATE/DELETE 时把 Version 加入 WHERE，
+            // 一旦该行被其它写改过即 0 行受影响 -> DbUpdateConcurrencyException
+            e.Property(x => x.Version).IsConcurrencyToken();
         });
 
         modelBuilder.Entity<GroupWorldEntity>(e =>
@@ -263,6 +266,16 @@ public class AppDbContext : DbContext
         {
             await Database.ExecuteSqlRawAsync(
                 "ALTER TABLE \"PlayerProfiles\" ADD COLUMN \"PendingBreakthroughBonus\" REAL NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // PlayerProfiles 表增加乐观并发令牌列（兼容已有数据库）
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"PlayerProfiles\" ADD COLUMN \"Version\" INTEGER NOT NULL DEFAULT 0", ct);
         }
         catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
         {
