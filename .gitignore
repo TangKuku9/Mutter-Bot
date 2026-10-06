@@ -23,19 +23,19 @@ artifacts/
 !**/[Pp]ackages/build/
 *.nupkg
 
-# SQLite database files
+# SQLite database files (never track runtime/production databases)
 *.db
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
 
-# Migration database: track only the approved, canonical data snapshot.
-!data/
-!data/qqbot.db
-
 # Environment-specific settings (keep appsettings.json, ignore environment overrides)
 appsettings.*.json
+!src/QQBot.Web/appsettings.example.json
+
+# Node
+node_modules/
 
 # User secrets
 secrets.json
