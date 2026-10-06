@@ -14,6 +14,9 @@ public class AppDbContext : DbContext
     public DbSet<KnownGroupEntity> KnownGroups => Set<KnownGroupEntity>();
     public DbSet<KnownUserEntity> KnownUsers => Set<KnownUserEntity>();
     public DbSet<ActiveMessageQuotaEntity> ActiveMessageQuotas => Set<ActiveMessageQuotaEntity>();
+    public DbSet<CustomCharacterEntity> CustomCharacters => Set<CustomCharacterEntity>();
+    public DbSet<ProactiveChatConfigEntity> ProactiveChatConfigs => Set<ProactiveChatConfigEntity>();
+    public DbSet<ProactiveChatLogEntity> ProactiveChatLogs => Set<ProactiveChatLogEntity>();
 
     // 修仙RPG 游戏域
     public DbSet<PlayerProfileEntity> PlayerProfiles => Set<PlayerProfileEntity>();
@@ -73,6 +76,11 @@ public class AppDbContext : DbContext
             e.HasKey(x => new { x.Key, x.Scope, x.Month });
         });
 
+        modelBuilder.Entity<CustomCharacterEntity>(e =>
+        {
+            e.HasKey(x => x.Name);
+        });
+
         // 修仙RPG 游戏域
         modelBuilder.Entity<PlayerProfileEntity>(e =>
         {
@@ -107,10 +115,28 @@ public class AppDbContext : DbContext
             e.HasIndex(x => new { x.GroupId, x.MemberOpenId, x.CreatedAt });
             e.HasIndex(x => new { x.GroupId, x.EventType, x.CreatedAt });
         });
+
+        modelBuilder.Entity<ProactiveChatConfigEntity>(e =>
+        {
+            e.HasKey(x => x.Id);
+        });
+
+        modelBuilder.Entity<ProactiveChatLogEntity>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => x.EvaluatedAt);
+            e.HasIndex(x => new { x.GroupId, x.EvaluatedAt });
+        });
     }
 
     public async Task EnsureSchemaUpgradedAsync(CancellationToken ct = default)
     {
+        // 历史遗留修复：GroupConfigs / PrivateChatConfigs 是从 Windows 版带过来的，主键建成了
+        // INTEGER AUTOINCREMENT（那时的群号是纯数字）。QQ 官方现在下发的是十六进制 openid，
+        // 而 EF 按 string 映射这两个键 → 任何新群/新好友的配置写入都会 "datatype mismatch" 500。
+        await RepairIntegerKeyAsync("GroupConfigs", "GroupId", ct);
+        await RepairIntegerKeyAsync("PrivateChatConfigs", "UserId", ct);
+
         await Database.ExecuteSqlRawAsync(
             """
             CREATE TABLE IF NOT EXISTS "KnownGroups" (
@@ -159,6 +185,19 @@ public class AppDbContext : DbContext
         catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
         {
         }
+
+        // 自定义人设表（兼容已有数据库）
+        await Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "CustomCharacters" (
+                "Name" TEXT NOT NULL CONSTRAINT "PK_CustomCharacters" PRIMARY KEY,
+                "DisplayName" TEXT NOT NULL DEFAULT '',
+                "Description" TEXT NOT NULL DEFAULT '',
+                "SystemPrompt" TEXT NOT NULL DEFAULT '',
+                "CreatedAt" TEXT NOT NULL,
+                "UpdatedAt" TEXT NOT NULL
+            );
+            """, ct);
 
         // ===== 修仙RPG 游戏域建表（兼容已有数据库） =====
         await Database.ExecuteSqlRawAsync(
@@ -271,6 +310,147 @@ public class AppDbContext : DbContext
         {
         }
 
+        // ===== 择机主动发言 =====
+        await Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "ProactiveChatConfigs" (
+                "Id" INTEGER NOT NULL CONSTRAINT "PK_ProactiveChatConfigs" PRIMARY KEY,
+                "Enabled" INTEGER NOT NULL DEFAULT 0,
+                "WindowSeconds" INTEGER NOT NULL DEFAULT 60,
+                "WindowMaxMessages" INTEGER NOT NULL DEFAULT 12,
+                "CooldownMinutes" INTEGER NOT NULL DEFAULT 45,
+                "MaxPerGroupPerDay" INTEGER NOT NULL DEFAULT 3,
+                "MaxGlobalPerDay" INTEGER NOT NULL DEFAULT 12,
+                "QuietStartHour" INTEGER NOT NULL DEFAULT 23,
+                "QuietEndHour" INTEGER NOT NULL DEFAULT 8,
+                "Liveliness" INTEGER NOT NULL DEFAULT 1,
+                "AllowActiveChannel" INTEGER NOT NULL DEFAULT 1,
+                "ActivePerGroupPerMinute" INTEGER NOT NULL DEFAULT 3,
+                "ActivePerGroupPerDay" INTEGER NOT NULL DEFAULT 20,
+                "ActivePerAccountPerMinute" INTEGER NOT NULL DEFAULT 20,
+                "UpdatedAt" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00'
+            );
+            """, ct);
+
+        await Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "ProactiveChatLogs" (
+                "Id" INTEGER NOT NULL CONSTRAINT "PK_ProactiveChatLogs" PRIMARY KEY AUTOINCREMENT,
+                "GroupId" TEXT NOT NULL,
+                "EvaluatedAt" TEXT NOT NULL,
+                "MessageCount" INTEGER NOT NULL DEFAULT 0,
+                "ImageCount" INTEGER NOT NULL DEFAULT 0,
+                "Outcome" TEXT NOT NULL DEFAULT '',
+                "ShouldSpeak" INTEGER NOT NULL DEFAULT 0,
+                "Topic" TEXT,
+                "Line" TEXT,
+                "Reason" TEXT,
+                "Detail" TEXT,
+                "SentMessageId" TEXT,
+                "Model" TEXT,
+                "PromptTokens" INTEGER NOT NULL DEFAULT 0,
+                "CompletionTokens" INTEGER NOT NULL DEFAULT 0
+            );
+            """, ct);
+        await Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS \"IX_ProactiveChatLogs_EvaluatedAt\" ON \"ProactiveChatLogs\" (\"EvaluatedAt\")", ct);
+        await Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS \"IX_ProactiveChatLogs_GroupId_EvaluatedAt\" ON \"ProactiveChatLogs\" (\"GroupId\", \"EvaluatedAt\")", ct);
+
+        // ChatMessages 标记“Bot 主动插话”，面板据此把择机发言与被动应答分开展示
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ChatMessages\" ADD COLUMN \"IsProactive\" INTEGER NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 择机发言的群级参与位
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"AiProactiveEnabled\" INTEGER NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 发言倾向（0 克制 / 1 正常 / 2 主动）。老库补成"正常"，不改用户已保存的值
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatConfigs\" ADD COLUMN \"Liveliness\" INTEGER NOT NULL DEFAULT 1", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 私聊 bot 回复的对话对象：没有它就无法把某条回复归到具体某段私聊，多个私聊对象会串味
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ChatMessages\" ADD COLUMN \"PeerUserId\" TEXT", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 机器人群内 @ 识别码：全量模式下这是判断"有没有人 @ 我"的唯一依据，没有就永远不回话
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"BotMentionOpenId\" TEXT", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 决策留痕记下这次评估实际附带了几张图，否则"bot 看着图却说不清"无从分辨
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"ImageCount\" INTEGER NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 关键词触发/关键词搭话两条旁路已被择机发言取代，列一并删除（这两项配置在整数主键年代
+        // 就没能写进现役群，实际从未生效）。AI 自报的置信度同样删掉：它不是概率、不可校准，
+        // 真实拦截力全在 should_speak 这个布尔上，留着一个旋钮只会让人去拧没用的那颗。
+        // DROP 失败（列已不存在）按幂等忽略。
+        foreach (var ddl in new[]
+        {
+            "ALTER TABLE \"GroupConfigs\" DROP COLUMN \"Keywords\"",
+            "ALTER TABLE \"GroupConfigs\" DROP COLUMN \"ProactiveKeywords\"",
+            "ALTER TABLE \"GroupConfigs\" DROP COLUMN \"ProactiveEnabled\"",
+            "ALTER TABLE \"ProactiveChatConfigs\" DROP COLUMN \"PersistObservedMessages\"",
+            "ALTER TABLE \"ProactiveChatConfigs\" DROP COLUMN \"MinConfidence\"",
+            "ALTER TABLE \"ProactiveChatLogs\" DROP COLUMN \"Confidence\""
+        })
+        {
+            try
+            {
+                await Database.ExecuteSqlRawAsync(ddl, ct);
+            }
+            catch (Exception ex) when (ex.Message.Contains("no such column")
+                                       || ex.Message.Contains("drop column"))
+            {
+            }
+        }
+
+        // 为已在册但从未有配置行的群补一条默认配置（等价于原来的“无配置”行为：仅 @ 响应、
+        // 不参与择机发言）。补上后面板才有地方写群级开关，也避免各处 null 判断分叉。
+        await Database.ExecuteSqlRawAsync(
+            """
+            INSERT INTO "GroupConfigs" ("GroupId", "IsEnabled", "TriggerMode", "AiProactiveEnabled")
+            SELECT k."GroupOpenId", 1, 0, 0
+            FROM "KnownGroups" k
+            WHERE NOT EXISTS (SELECT 1 FROM "GroupConfigs" g WHERE g."GroupId" = k."GroupOpenId");
+            """, ct);
+
         // PlayerProfiles 表增加乐观并发令牌列（兼容已有数据库）
         try
         {
@@ -279,6 +459,131 @@ public class AppDbContext : DbContext
         }
         catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
         {
+        }
+
+        await BackfillFacePlaceholdersAsync(ct);
+    }
+
+    /// <summary>
+    /// 把历史上按原文存进库的 &lt;faceType=...&gt; 表情段回填成可读占位。这些原文还会作为
+    /// 背景上下文喂给模型，且下游剥 &lt;...&gt; 的规范化会把它变成空串，等于白占 token 又丢信息。
+    /// 回填过的行不再匹配 WHERE，所以只跑一次。
+    /// </summary>
+    private async Task BackfillFacePlaceholdersAsync(CancellationToken ct)
+    {
+        var connection = Database.GetDbConnection();
+        var openedHere = connection.State != System.Data.ConnectionState.Open;
+        if (openedHere) await connection.OpenAsync(ct);
+
+        try
+        {
+            var rows = new List<(long Id, string Text, bool HasImage)>();
+            using (var read = connection.CreateCommand())
+            {
+                read.CommandText = """
+                    SELECT "Id", "PlainText", "HasImage" FROM "ChatMessages" WHERE "PlainText" LIKE '%<faceType=%'
+                    """;
+                using var reader = await read.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                    rows.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt32(2) == 1));
+            }
+
+            foreach (var (id, text, hasImage) in rows)
+            {
+                var normalized = QQBot.Core.Services.MessageParser.NormalizeFaceTags(text, hasImage);
+                if (normalized == text) continue;
+
+                using var update = connection.CreateCommand();
+                update.CommandText = "UPDATE \"ChatMessages\" SET \"PlainText\" = $text WHERE \"Id\" = $id";
+                var pText = update.CreateParameter();
+                pText.ParameterName = "$text";
+                pText.Value = normalized;
+                var pId = update.CreateParameter();
+                pId.ParameterName = "$id";
+                pId.Value = id;
+                update.Parameters.Add(pText);
+                update.Parameters.Add(pId);
+                await update.ExecuteNonQueryAsync(ct);
+            }
+        }
+        finally
+        {
+            if (openedHere) await connection.CloseAsync();
+        }
+    }
+
+    /// <summary>
+    /// 把主键被建成 INTEGER 的表重建为 TEXT 主键（保留原行，键值转为字符串）。
+    /// 表名与列名均为调用方写死的内部常量，不接受外部输入，故拼接 DDL 安全。
+    /// </summary>
+    private async Task RepairIntegerKeyAsync(string table, string pkColumn, CancellationToken ct)
+    {
+        var connection = Database.GetDbConnection();
+        var openedHere = connection.State != System.Data.ConnectionState.Open;
+        if (openedHere) await connection.OpenAsync(ct);
+
+        try
+        {
+            var ddl = await ScalarTextAsync(connection,
+                $"SELECT \"sql\" FROM sqlite_master WHERE type='table' AND name='{table}'", ct);
+            // 表还不存在（全新库由 EnsureCreated 按模型建 TEXT 主键）或已是 TEXT → 不动
+            if (string.IsNullOrEmpty(ddl) || !ddl.Contains($"\"{pkColumn}\" INTEGER", StringComparison.Ordinal))
+                return;
+
+            var columns = new List<(string Name, string Type, bool NotNull, string? Default)>();
+            using (var read = connection.CreateCommand())
+            {
+                read.CommandText = $"PRAGMA table_info(\"{table}\")";
+                using var reader = await read.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    columns.Add((
+                        reader.GetString(reader.GetOrdinal("name")),
+                        reader.IsDBNull(reader.GetOrdinal("type")) ? "TEXT" : reader.GetString(reader.GetOrdinal("type")),
+                        reader.GetInt32(reader.GetOrdinal("notnull")) == 1,
+                        reader.IsDBNull(reader.GetOrdinal("dflt_value")) ? null : reader.GetString(reader.GetOrdinal("dflt_value"))));
+                }
+            }
+
+            var repaired = $"{table}__textkey";
+            var definitions = columns.Select(c => c.Name == pkColumn
+                ? $"\"{c.Name}\" TEXT NOT NULL CONSTRAINT \"PK_{table}\" PRIMARY KEY"
+                : $"\"{c.Name}\" {c.Type}"
+                  + (c.NotNull ? " NOT NULL" : string.Empty)
+                  + (string.IsNullOrEmpty(c.Default) ? string.Empty : $" DEFAULT {c.Default}"));
+            var columnList = string.Join(", ", columns.Select(c => $"\"{c.Name}\""));
+            var selectList = string.Join(", ", columns.Select(c => c.Name == pkColumn
+                ? $"CAST(\"{c.Name}\" AS TEXT)"
+                : $"\"{c.Name}\""));
+
+            using var tx = await connection.BeginTransactionAsync(ct);
+            await ExecuteAsync(connection, tx, $"CREATE TABLE \"{repaired}\" ({string.Join(", ", definitions)})", ct);
+            await ExecuteAsync(connection, tx,
+                $"INSERT INTO \"{repaired}\" ({columnList}) SELECT {selectList} FROM \"{table}\"", ct);
+            await ExecuteAsync(connection, tx, $"DROP TABLE \"{table}\"", ct);
+            await ExecuteAsync(connection, tx, $"ALTER TABLE \"{repaired}\" RENAME TO \"{table}\"", ct);
+            await tx.CommitAsync(ct);
+        }
+        finally
+        {
+            if (openedHere) await connection.CloseAsync();
+        }
+
+        static async Task ExecuteAsync(System.Data.Common.DbConnection conn, System.Data.Common.DbTransaction tx,
+            string sql, CancellationToken ct)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = sql;
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        static async Task<string?> ScalarTextAsync(System.Data.Common.DbConnection conn, string sql, CancellationToken ct)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            var value = await cmd.ExecuteScalarAsync(ct);
+            return value as string ?? (value is System.DBNull or null ? null : value.ToString());
         }
     }
 }

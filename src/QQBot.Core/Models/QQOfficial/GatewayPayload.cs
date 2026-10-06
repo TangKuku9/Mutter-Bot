@@ -33,4 +33,10 @@ public static class GatewayOp
     public const int HeartbeatAck = 11;
 
     public const int GroupAndC2CIntent = 1 << 25;
+
+    /// <summary>
+    /// INTERACTION 事件（INTERACTION_CREATE：按钮点击/快捷菜单/赞踩/授权）。
+    /// ⚠ 需平台授权，未授权却订阅会导致 Identify 报错断连。
+    /// </summary>
+    public const int InteractionIntent = 1 << 26;
 }

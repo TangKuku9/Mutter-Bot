@@ -65,27 +65,141 @@ public class AiChatService : IAiChatService
         foreach (var (role, msgContent, imageUrl) in conversationHistory)
         {
             if (!string.IsNullOrEmpty(imageUrl))
-            {
-                var contentParts = new List<object>
-                {
-                    new { type = "text", text = msgContent }
-                };
-
-                var resolvedUrl = await ResolveImageUrlAsync(imageUrl);
-                if (!string.IsNullOrEmpty(resolvedUrl))
-                {
-                    contentParts.Add(new { type = "image_url", image_url = new { url = resolvedUrl } });
-                }
-
-                messages.Add(new { role, content = contentParts });
-            }
+                messages.Add(new { role, content = await BuildContentPartsAsync(msgContent, new[] { imageUrl }) });
             else
-            {
                 messages.Add(new { role, content = msgContent });
-            }
         }
 
         return await SendRequestAsync(messages, config, null, ct);
+    }
+
+    public async Task<AiChatResponse> ChatWithImagesAsync(
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyList<string> imageUrls,
+        AiConfig config,
+        string? responseFormat = null,
+        CancellationToken ct = default)
+    {
+        var messages = new List<object>();
+
+        if (!string.IsNullOrWhiteSpace(systemPrompt))
+        {
+            messages.Add(new { role = "system", content = systemPrompt });
+        }
+
+        messages.Add(new
+        {
+            role = "user",
+            content = await BuildContentPartsAsync(userPrompt, imageUrls)
+        });
+
+        return await SendRequestAsync(messages, config, responseFormat, ct);
+    }
+
+    /// <summary>图文混排的一条消息：正文在前，图片按给定顺序附在后面。不可读的图片跳过。</summary>
+    private async Task<List<object>> BuildContentPartsAsync(string text, IReadOnlyList<string> imageUrls)
+    {
+        var parts = new List<object> { new { type = "text", text } };
+
+        foreach (var url in imageUrls)
+        {
+            var resolved = await AttachableAsync(url, CancellationToken.None);
+            if (resolved is not null)
+                parts.Add(new { type = "image_url", image_url = new { url = resolved } });
+        }
+
+        return parts;
+    }
+
+    /// <summary>
+    /// 调用方预筛：返回真正能附进请求的图片（顺序不变）。
+    /// 先问一遍再写提示词，prompt 里"附了几张"才不会和实际发出的不符。
+    /// </summary>
+    public async Task<IReadOnlyList<string>> AttachableImagesAsync(
+        IReadOnlyList<string> imageUrls, CancellationToken ct = default)
+    {
+        var keep = new List<string>(imageUrls.Count);
+        foreach (var url in imageUrls)
+            if (await AttachableAsync(url, ct) is not null)
+                keep.Add(url);
+        return keep;
+    }
+
+    /// <summary>能附则返回最终送出的 URL（本地文件已转 base64），否则 null。</summary>
+    private async Task<string?> AttachableAsync(string url, CancellationToken ct)
+    {
+        var resolved = await ResolveImageUrlAsync(url);
+        if (string.IsNullOrEmpty(resolved)) return null;
+
+        // 模型是按 URL 自行取图的，类型我们无法替换。QQ 表情包大量是 GIF，而 Gemini 收到
+        // image/gif 会把整次请求打成 500 —— 一张动图连带毁掉整条回复/评估；官方图链又有一小时
+        // 时效。所以先花一个极小的 Range 请求确认类型与存活，不合格就只留文字占位。
+        if (!IsRemoteUrl(resolved)) return resolved;
+
+        if (SupportedImageMime(await SniffImageMimeAsync(resolved, ct)))
+            return resolved;
+
+        _logger.LogInformation("图片未随请求附带（模型不收该类型或链接已失效）url={Url}", TruncateUrl(resolved));
+        return null;
+    }
+
+    /// <summary>模型侧确认支持的类型才附：png/jpeg。gif、webp、未知一律不附，避免整次调用被打成 500。</summary>
+    public static bool SupportedImageMime(string? mime) =>
+        mime is "image/png" or "image/jpeg";
+
+    /// <summary>按文件头判断图片类型，认不出返回 null。</summary>
+    public static string? DetectImageMime(ReadOnlySpan<byte> head)
+    {
+        if (head.Length >= 4 && head[0] == 0x89 && head[1] == 0x50 && head[2] == 0x4E && head[3] == 0x47)
+            return "image/png";
+        if (head.Length >= 3 && head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF)
+            return "image/jpeg";
+        if (head.Length >= 12 &&
+            head[0] == (byte)'R' && head[1] == (byte)'I' && head[2] == (byte)'F' && head[3] == (byte)'F' &&
+            head[8] == (byte)'W' && head[9] == (byte)'E' && head[10] == (byte)'B' && head[11] == (byte)'P')
+            return "image/webp";
+        if (head.Length >= 3 && head[0] == (byte)'G' && head[1] == (byte)'I' && head[2] == (byte)'F')
+            return "image/gif";
+        return null;
+    }
+
+    private static bool IsRemoteUrl(string url) =>
+        url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+        || url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+
+    private static string TruncateUrl(string url) => url.Length <= 80 ? url : url[..80] + "…";
+
+    /// <summary>只取头部若干字节，同时兼作链接存活探测。QQ 的图链不支持 HEAD，用带 Range 的 GET。</summary>
+    private async Task<string?> SniffImageMimeAsync(string url, CancellationToken ct)
+    {
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(SniffTimeout);
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, HeadBytes);
+
+            var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var buffer = new byte[HeadBytes + 1];
+            await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+            var read = 0;
+            while (read < buffer.Length)
+            {
+                var n = await stream.ReadAsync(buffer.AsMemory(read), timeout.Token);
+                if (n <= 0) break;
+                read += n;
+            }
+            return DetectImageMime(buffer.AsSpan(0, read));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "图片嗅探失败 url={Url}", TruncateUrl(url));
+            return null;
+        }
     }
 
     private async Task<AiChatResponse> SendRequestAsync(List<object> messages, AiConfig config, string? responseFormat, CancellationToken ct)
@@ -192,6 +306,10 @@ public class AiChatService : IAiChatService
                 .GetProperty("message")
                 .GetProperty("content").GetString() ?? "";
 
+            // 出口统一清理：代理按列宽硬折进来的换行与行首空格，既弄丑了发进群的话，
+            // 也是结构化输出里那些"裸换行让 JSON 解析失败"的同一个源头。
+            content = CjkTextFixer.Cleanse(content);
+
             model = json.GetProperty("model").GetString();
 
             if (json.TryGetProperty("usage", out var usage))
@@ -226,6 +344,11 @@ public class AiChatService : IAiChatService
     }
 
     private const long MaxImageSizeBytes = 10 * 1024 * 1024; // 10MB
+
+    /// <summary>嗅探只需要文件头，12 字节够认 PNG/JPEG/GIF/WEBP。</summary>
+    private const int HeadBytes = 12;
+
+    private static readonly TimeSpan SniffTimeout = TimeSpan.FromSeconds(5);
 
     private async Task<string> ResolveImageUrlAsync(string imageUrl)
     {

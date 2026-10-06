@@ -1,141 +1,240 @@
-using System.Text;
 using QQBot.Core.Game.Engines;
 using QQBot.Core.Game.Interfaces;
 using QQBot.Core.Game.Models;
+using QQBot.Core.Game.Ui;
 
 namespace QQBot.Core.Game.Services;
 
 /// <summary>
-/// 纯文本面板渲染（QQ 不渲染 Markdown，用符号+换行排版）。
+/// 修仙面板文本层。所有面板以 <see cref="GamePanel"/> 结构化描述为唯一数据源，
+/// 同时产出纯文本与 markdown 两个版本：
+/// 纯文本沿用既有 14 汉字当量手工排版符号（由 tools/UiGolden 做逐字节回归校验），
+/// markdown 交给客户端排版并挂载按钮/文字链。
+/// 注：QQ 的 markdown 能力需平台授权，未开通时全链路自动走纯文本分支。
 /// </summary>
 public static class GameTextFormatter
 {
-    public static string FormatStatus(PlayerProfile p, string idleSummary)
+    /// <summary>被动回复时 QQ 自动在消息前渲染 @发送者，估算其首行占宽（@ + 昵称 + 空格），
+    /// 封顶 10 防止超长昵称毁掉排版。</summary>
+    public static double MentionReserve(string? nickname) =>
+        Math.Min(10, 0.78 + TextLayout.Width(nickname ?? string.Empty) + 0.35);
+
+    // ===================== 面板构建（单一数据源） =====================
+
+    public static GamePanel BuildStatus(PlayerProfile p, string idleSummary)
     {
         var threshold = BreakthroughEngine.ThresholdFor(p.RealmIndex);
-        var progress = Realm.IsMax(p.RealmIndex)
-            ? "已达巅峰"
-            : $"{p.CultivationPoints:N0} / {threshold:N0}";
+        var isMax = Realm.IsMax(p.RealmIndex);
+        var pct = isMax ? "已达巅峰"
+            : $"{Math.Min(100, (int)(p.CultivationPoints * 100.0 / Math.Max(1, threshold)))}%";
 
-        var sb = new StringBuilder();
-        sb.AppendLine("══════ 修仙面板 ══════");
-        sb.AppendLine($"道号：{DisplayName(p)}");
-        sb.AppendLine($"境界：{p.RealmName}");
-        sb.AppendLine($"灵根：{p.SpiritRootName}（{GradeText(p.SpiritRootGrade)}）");
+        var panel = GamePanel.New()
+            .Title("修仙面板")
+            .Kv("道号", DisplayName(p))
+            .Kv("境界", p.RealmName)
+            .Kv("灵根", $"{p.SpiritRootName}（{GradeText(p.SpiritRootGrade)}）");
+
         var techTier = Technique.TierOf(p.TechniqueId);
-        sb.AppendLine($"功法：{p.TechniqueName}" + (techTier > 0 ? $"（{Technique.TierName(techTier)}）" : ""));
-        sb.AppendLine($"修为：{progress}");
-        sb.AppendLine($"灵石：{p.SpiritStones:N0}");
-        sb.AppendLine($"寿元：{p.Lifespan} 载");
+        panel.Kv("功法", p.TechniqueName + (techTier > 0 ? $"（{Technique.TierName(techTier)}）" : ""));
+        panel.Kv("修为", $"{p.CultivationPoints:N0}（{pct}）");
+        if (!isMax)
+        {
+            // 卡片里补一条进度条（纯文本分支会自动省略，不影响 14 当量排版）
+            panel.Progress("修为", Math.Clamp(p.CultivationPoints / (double)Math.Max(1L, threshold), 0d, 1d));
+            panel.Kv("突破需", $"{threshold:N0}");
+        }
+        panel.Kv("灵石", $"{p.SpiritStones:N0}")
+             .Kv("寿元", $"{p.Lifespan} 载");
         if (p.PendingBreakthroughBonus > 0)
-            sb.AppendLine($"丹药加成：突破 +{p.PendingBreakthroughBonus:P0}（待消耗）");
+            panel.Kv("丹药加成", $"+{p.PendingBreakthroughBonus:P0}");
+
+        // 每日诗句：按日期确定性抽取，全群当日一致，面板点睛不喂噪
+        var poem = FlavorText.Pick("daily_poem", DateTime.UtcNow.AddHours(8).ToString("yyyyMMdd"));
+        if (poem.Length > 0)
+            panel.Kv("今日诗云", poem);
         if (!string.IsNullOrEmpty(idleSummary))
-            sb.AppendLine($"──── 挂机 ────\n{idleSummary}");
-        sb.Append("════════════════════");
-        return sb.ToString();
+            panel.SubTitle("挂机").Line(idleSummary);
+
+        return panel.Bottom();
     }
 
-    public static string FormatLeaderboard(List<LeaderboardEntry> entries)
+    public static GamePanel BuildLeaderboard(List<LeaderboardEntry> entries, bool atTags = false)
     {
-        if (entries.Count == 0)
-            return "本群尚无修士上榜，快来 @我 修炼成为第一人！";
-
-        var sb = new StringBuilder();
-        sb.AppendLine("════ 群修为榜 ════");
+        var panel = GamePanel.New().Title("群修为榜");
         for (var i = 0; i < entries.Count; i++)
         {
             var e = entries[i];
             var medal = i switch { 0 => "①", 1 => "②", 2 => "③", _ => $"{i + 1}." };
-            sb.AppendLine($"{medal} {DisplayName(e.Nickname, e.MemberOpenId)}　{Realm.NameOf(e.RealmIndex)}　{e.CultivationPoints:N0}修为");
+            var who = GameKeyboard.AtUser(e.MemberOpenId, DisplayName(e.Nickname, e.MemberOpenId), atTags);
+            panel.Line($"{medal} {who}　{Realm.NameOf(e.RealmIndex)}　{e.CultivationPoints:N0}");
         }
-        sb.Append("══════════════════");
-        return sb.ToString();
+        return panel.Bottom();
     }
 
-    public static string FormatHelp()
+    /// <summary>玩法条目：Head 为指令行，Tail 为被 14 当量拆开的尾句（null=无尾句）。
+    /// 纯文本两行输出与历史逐字节一致，卡片里由 Item 合并为一行。</summary>
+    private static readonly (string Head, string? Tail)[] HelpItems =
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("══════ 修仙RPG 玩法 ══════");
-        sb.AppendLine("@我 修炼  —— 查看面板并结算挂机修为");
-        sb.AppendLine("@我 签到  —— 每日签到领灵石/修为（20h冷却）");
-        sb.AppendLine("@我 修行  —— 闭关一次获取大量修为（8h冷却）");
-        sb.AppendLine("@我 突破  —— 修为达标则冲击下一境界（8h冷却）");
-        sb.AppendLine("@我 护法  —— 为正在渡劫的道友护法，增加其成功率");
-        sb.AppendLine("@我 探索  -- 外出历练获取材料/修为/功法（1h冷却）");
-        sb.AppendLine("@我 事件  -- 查看群级奇遇事件，AI动态生成");
-        sb.AppendLine("@我 选 <序号>  —— 选择事件选项参与抉择");
-        sb.AppendLine("@我 炼丹  —— 查看丹方；炼丹 <丹名> 炼制（30min冷却）");
-        sb.AppendLine("@我 背包  -- 查看物品");
-        sb.AppendLine("@我 使用 <丹药名>  -- 服用丹药获得即时效果");
-        sb.AppendLine("@我 商店  -- 灵石坊，购买材料/重置冷却");
-        sb.AppendLine("@我 排行  —— 查看本群修为榜");
-        sb.AppendLine("@我 帮助  —— 显示本帮助");
-        sb.AppendLine("────────────────────────");
-        sb.AppendLine("挂机即可累积修为，每次 @我 都会自动结算。");
-        sb.AppendLine("灵根品级影响修炼速度，越高境界突破越难。");
-        sb.AppendLine("突破分两步：先发起渡劫，群友可护法，再次突破执行。");
-        sb.Append("@我 行动 <描述>  -- AI裁判判定自由行动（5min冷却）");
-        return sb.ToString();
+        ("@我 修炼 —— 查看面板、", "　　结算挂机修为"),
+        ("@我 签到 —— 每日领灵石", "　　（20h冷却）"),
+        ("@我 修行 —— 闭关获取", "　　大量修为（8h冷却）"),
+        ("@我 突破 —— 冲击下一", "　　境界（8h冷却）"),
+        ("@我 护法 —— 助渡劫道友", "　　提升成功率"),
+        ("@我 探索 —— 历练得材料", "　　修为功法（1h冷却）"),
+        ("@我 事件 —— 查看群奇遇", null),
+        ("@我 选 <序号> —— 参与", "　　事件抉择"),
+        ("@我 炼丹 <丹名> —— 炼药", "　　（30min冷却）"),
+        ("@我 切磋 [道友名] ——", "　　斗法赢彩头（30min）"),
+        ("@我 任务 —— 今日功课", "　　与奖励"),
+        ("@我 背包 —— 查看物品", null),
+        ("@我 使用 <丹药名> ——", "　　服用丹药"),
+        ("@我 商店 —— 购买材料", "　　/重置冷却"),
+        ("@我 出售 <材料名> ——", "　　回收材料（75%）"),
+        ("@我 排行 —— 本群修为榜", null),
+        ("@我 行动 <描述> —— AI", "　　判定自由行动（5min）"),
+    };
+
+    private static readonly string[] HelpTips =
+    {
+        "挂机即涨修为，每次@我",
+        "自动结算。灵根定快慢，",
+        "境界越高突破越难。",
+        "渡劫分两步：先发起渡",
+        "劫邀护法，再突破执行。",
+    };
+
+    public static GamePanel BuildHelp()
+    {
+        var panel = GamePanel.New().Title("修仙玩法");
+        foreach (var (head, tail) in HelpItems)
+            panel.Item(head, tail);
+        panel.Divider();
+        foreach (var tip in HelpTips)
+            panel.Line(tip);
+        return panel;
     }
 
-    public static string FormatInventory(List<PlayerInventoryItem> inv)
+    public static GamePanel BuildInventory(List<PlayerInventoryItem> inv)
     {
-        if (inv.Count == 0)
-            return "背包空空如也，去 @我 探索 收集材料吧。";
-
-        var sb = new StringBuilder();
-        sb.AppendLine("══════ 背包 ══════");
+        var panel = GamePanel.New().Title("背包");
         foreach (var i in inv)
         {
             var type = i.ItemType == "dan" ? "丹" : "材";
-            sb.AppendLine($"[{type}] {i.ItemName} ×{i.Quantity}");
+            panel.Line($"[{type}] {i.ItemName} ×{i.Quantity}");
         }
-        sb.Append("════════════════════");
-        return sb.ToString();
+        return panel.Bottom();
     }
 
-    public static string FormatRecipes()
+    public static GamePanel BuildRecipes()
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("══════ 丹方录 ══════");
+        var panel = GamePanel.New().Title("丹方录");
         foreach (var r in Models.AlchemyRecipe.Recipes)
         {
             var mats = string.Join("、", r.Materials.Select(m => $"{AlchemyRecipe.MaterialName(m.Key)}×{m.Value}"));
-            sb.AppendLine($"· {r.Name}（{r.Element}系，成功率{r.BaseSuccess * 100:F0}%）");
-            sb.AppendLine($"  材料：{mats}");
-            sb.AppendLine($"  效用：{r.Desc}");
+            panel.Bullet($"{r.Name}（{r.Element}系·{r.BaseSuccess * 100:F0}%）");
+            panel.Line($"　 材料：{mats}");
+            panel.Line($"　 效用：{r.Desc}");
         }
-        sb.AppendLine("用法：@我 炼丹 <丹名>");
-        sb.Append("════════════════════");
-        return sb.ToString();
+        panel.Line("注：括号内为成功率");
+        panel.Line("用法：@我 炼丹 <丹名>");
+        return panel.Bottom();
     }
 
-    public static string FormatNewPlayer(PlayerProfile p)
+    public static GamePanel BuildNewPlayer(PlayerProfile p)
     {
-        return $"天地灵气汇聚，你已踏入修仙之路！\n" +
-               $"灵根：{p.SpiritRootName}（{GradeText(p.SpiritRootGrade)}）\n" +
-               $"当前境界：{p.RealmName}\n" +
-               $"输入 \"@我 帮助\" 查看玩法。";
+        var blessing = FlavorText.Pick("new_player", $"{p.MemberOpenId}|{DateTime.UtcNow:yyyyMMdd}");
+        var panel = GamePanel.New()
+            .Line("天地灵气汇聚，\n你已踏入修仙之路！")
+            .Kv("灵根", $"{p.SpiritRootName}（{GradeText(p.SpiritRootGrade)}）")
+            .Kv("当前境界", p.RealmName);
+        if (blessing.Length > 0)
+            panel.Line(blessing);
+        return panel.Footer("输入 @我 帮助 查看玩法");
     }
 
-    public static string FormatShop(long playerStones)
+    /// <summary>每日任务面板。justClaimed：本次调用刚刚发放奖励。</summary>
+    public static GamePanel BuildQuest(
+        List<(Models.DailyQuests.QuestDef Quest, int Progress)> quests,
+        bool allDone, bool claimed, bool justClaimed, long rewardStones)
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("══════ 灵石坊 ══════");
-        sb.AppendLine($"你的灵石：{playerStones:N0}");
-        sb.AppendLine("──────────────────");
-        sb.AppendLine($"· 灵草　 {GameConstants.ShopPriceLingcao} 灵石/株");
-        sb.AppendLine($"· 药草　 {GameConstants.ShopPriceYaocao} 灵石/株");
-        sb.AppendLine($"· 灵矿　 {GameConstants.ShopPriceLingkuang} 灵石/块");
-        sb.AppendLine($"· 玄冰露 {GameConstants.ShopPriceXuanbing} 灵石/瓶");
-        sb.AppendLine($"· 火焰晶 {GameConstants.ShopPriceHuoyan} 灵石/颗");
-        sb.AppendLine("──────────────────");
-        sb.AppendLine($"· 重置突破冷却 {GameConstants.BtCooldownResetPrice} 灵石");
-        sb.AppendLine("用法：@我 购买 <材料名> <数量>");
-        sb.AppendLine("　　　@我 购买 重置冷却");
-        sb.Append("════════════════════");
-        return sb.ToString();
+        var panel = GamePanel.New().Title("今日功课");
+        foreach (var (q, progress) in quests)
+        {
+            var done = progress >= q.Target;
+            panel.Line($"{(done ? "☑" : "☐")} {q.Name}（{Math.Min(progress, q.Target)}/{q.Target}）");
+        }
+        panel.Divider();
+        if (justClaimed)
+        {
+            panel.Line($"功课圆满！灵石 +{rewardStones}");
+            panel.Line("已自动发放。");
+        }
+        else if (claimed)
+            panel.Line("今日奖励已领，明日再来。");
+        else
+        {
+            panel.Line("全部完成可得：");
+            panel.Line($"　 灵石 +{rewardStones}");
+        }
+        return panel.Bottom();
     }
+
+    public static GamePanel BuildShop(long playerStones)
+    {
+        static long SellPrice(long p) => (long)Math.Floor(p * GameConstants.ShopSellPriceRatio);
+
+        var panel = GamePanel.New()
+            .Title("灵石坊")
+            .Kv("你的灵石", $"{playerStones:N0}")
+            .Divider()
+            .Bullet($"灵草　 {GameConstants.ShopPriceLingcao} 灵石/株")
+            .Bullet($"药草　 {GameConstants.ShopPriceYaocao} 灵石/株")
+            .Bullet($"灵矿　 {GameConstants.ShopPriceLingkuang} 灵石/块")
+            .Bullet($"玄冰露 {GameConstants.ShopPriceXuanbing} 灵石/瓶")
+            .Bullet($"火焰晶 {GameConstants.ShopPriceHuoyan} 灵石/颗")
+            .Divider()
+            .Bullet($"重置突破冷却 {GameConstants.BtCooldownResetPrice} 灵石")
+            .Divider()
+            .Line("回收价（购入75%）：")
+            .Line($"　 灵草{SellPrice(GameConstants.ShopPriceLingcao)} 药草{SellPrice(GameConstants.ShopPriceYaocao)}")
+            .Line($"　 灵矿{SellPrice(GameConstants.ShopPriceLingkuang)} 玄冰露{SellPrice(GameConstants.ShopPriceXuanbing)}")
+            .Line($"　 火焰晶{SellPrice(GameConstants.ShopPriceHuoyan)}")
+            .Divider()
+            .Line("用法：@我 购买 <材料名>")
+            .Line("　　　@我 出售 <材料名>")
+            .Line("　　　@我 购买 重置冷却");
+        return panel.Bottom();
+    }
+
+    // ===================== 纯文本出口（历史调用点，输出与基线逐字节一致） =====================
+
+    public static string FormatStatus(PlayerProfile p, string idleSummary) =>
+        BuildStatus(p, idleSummary).RenderPlain();
+
+    public static string FormatLeaderboard(List<LeaderboardEntry> entries) =>
+        entries.Count == 0
+            ? "本群尚无修士上榜，快来 @我 修炼成为第一人！"
+            : BuildLeaderboard(entries).RenderPlain();
+
+    public static string FormatHelp() => BuildHelp().RenderPlain();
+
+    public static string FormatInventory(List<PlayerInventoryItem> inv) =>
+        inv.Count == 0
+            ? "背包空空如也，去 @我 探索 收集材料吧。"
+            : BuildInventory(inv).RenderPlain();
+
+    public static string FormatRecipes() => BuildRecipes().RenderPlain();
+
+    public static string FormatNewPlayer(PlayerProfile p) => BuildNewPlayer(p).RenderPlain();
+
+    public static string FormatQuest(
+        List<(Models.DailyQuests.QuestDef Quest, int Progress)> quests,
+        bool allDone, bool claimed, bool justClaimed, long rewardStones) =>
+        BuildQuest(quests, allDone, claimed, justClaimed, rewardStones).RenderPlain();
+
+    public static string FormatShop(long playerStones) => BuildShop(playerStones).RenderPlain();
+
+    // ===================== 通用工具 =====================
 
     private static string GradeText(int grade) => grade switch
     {

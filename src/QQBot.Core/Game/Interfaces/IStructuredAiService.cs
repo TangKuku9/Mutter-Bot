@@ -23,6 +23,17 @@ public interface IStructuredAiService
         AiConfig config,
         CancellationToken ct = default) where T : class;
 
+    /// <summary>
+    /// 带图片版：图片作为多模态内容与正文一起提交，仍然是一次调用。
+    /// 用于需要看懂群友转发的图片再判断的场景。
+    /// </summary>
+    Task<StructuredResult<T>?> GetStructuredAsync<T>(
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyList<string> imageUrls,
+        AiConfig config,
+        CancellationToken ct = default) where T : class;
+
     /// <summary>AI 配置是否可用（ApiBaseUrl/ApiKey/ModelName 齐全）。</summary>
     Task<bool> IsAiConfiguredAsync(CancellationToken ct = default);
 }

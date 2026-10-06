@@ -24,7 +24,7 @@ public static class SpiritRoot
 
     public static bool IsVariant(int type) => type is 5 or 6;
 
-    /// <summary>挂机效率系数：品级越小越快。grade1=2.0, grade5=0.6。</summary>
+    /// <summary>挂机效率系数：品级越小越快。grade1=1.8, grade5=0.2。</summary>
     public static double RateFactor(int grade)
     {
         var g = Math.Clamp(grade, 1, 5);

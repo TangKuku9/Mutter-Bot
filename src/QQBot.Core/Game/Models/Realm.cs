@@ -19,6 +19,8 @@ public static class Realm
         new("合体", 194_400, 0.25),
         new("大乘", 583_200, 0.20),
         new("渡劫", 1_749_600, 0.15),
+        new("真仙", 5_248_800, 0.12),
+        new("金仙", 15_746_400, 0.10),
     };
 
     public static int MaxIndex => Realms.Length - 1;

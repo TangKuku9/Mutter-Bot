@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using QQBot.Core.Configuration;
+using QQBot.Core.Game.Ui;
 using QQBot.Core.Interfaces;
 using QQBot.Core.Models.QQOfficial;
 
@@ -16,11 +17,23 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
     private readonly ILogger<QqGatewayWebSocketClient> _logger;
     private readonly string _apiBaseUrl;
 
+    // INTERACTION intent 安全网：订阅未获授权的 intent 会导致 Identify 直接断连（全站离线），
+    // 故带上后若仍秒断，自动摘除该 intent 重连。
+    private readonly bool _interactionIntentRequested;
+    private readonly RichUiCapability _richUi;
+    private volatile bool _interactionIntentEnabled;
+    private DateTime _lastIdentifyAt = DateTime.MinValue;
+    private int _intentQuickFailStreak;
+    private static readonly TimeSpan IntentQuickFailWindow = TimeSpan.FromSeconds(5);
+
     private static readonly HttpClient _http = new();
 
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
+    private int _disposed;
     private Task? _heartbeatTask;
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _eventCounts = new();
 
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly object _seqLock = new();
@@ -61,11 +74,31 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
     public event EventHandler<bool>? ConnectionStateChanged;
     public event EventHandler<QqDispatch>? DispatchReceived;
 
-    public QqGatewayWebSocketClient(AccessTokenManager tokenManager, IOptions<QQBotOptions> options, ILogger<QqGatewayWebSocketClient> logger)
+    /// <summary>
+    /// 本次进程启动以来各事件类型的到达计数。面板用它区分“平台没下发全量消息”
+    /// 与“下发了我们没落库”——这两种故障在群里看起来一模一样。
+    /// </summary>
+    public IReadOnlyDictionary<string, long> EventCounts => CloneEventCounts();
+
+    private Dictionary<string, long> CloneEventCounts()
+    {
+        var snapshot = new Dictionary<string, long>(_eventCounts.Count);
+        foreach (var kv in _eventCounts) snapshot[kv.Key] = kv.Value;
+        return snapshot;
+    }
+
+    public QqGatewayWebSocketClient(
+        AccessTokenManager tokenManager, IOptions<QQBotOptions> options,
+        RichUiCapability richUi, ILogger<QqGatewayWebSocketClient> logger)
     {
         _tokenManager = tokenManager;
         _logger = logger;
         _apiBaseUrl = options.Value.ApiBaseUrl;
+        _richUi = richUi;
+        _interactionIntentRequested = options.Value.RichUi.InteractionIntent;
+        _interactionIntentEnabled = _interactionIntentRequested;
+        if (_interactionIntentRequested)
+            _logger.LogInformation("RichUi: 已配置订阅 INTERACTION intent（1<<26），未获平台授权时会自动降级");
     }
 
     public async Task ConnectAsync(CancellationToken ct = default)
@@ -136,6 +169,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
             {
                 IsConnected = false;
                 _logger.LogWarning(ex, "QQ Gateway 连接断开，{Delay}ms 后重连", _reconnectDelay);
+                MaybeDegradeInteractionIntent("连接断开");
                 try
                 {
                     await Task.Delay(_reconnectDelay, ct);
@@ -345,6 +379,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
             _identified = true;
             _reconnectDelay = 1000;
             IsConnected = true;
+            NoteIdentifySucceeded();
         }
         else if (payload.T == "RESUMED")
         {
@@ -358,6 +393,11 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
         if (payload.D is not null && payload.T is not null)
         {
             var dispatch = new QqDispatch(payload.T, payload.Id, payload.S ?? 0, payload.D.Value);
+            var arrived = _eventCounts.AddOrUpdate(payload.T, 1, (_, c) => c + 1);
+            if (payload.T == "GROUP_MESSAGE_CREATE" && arrived == 1)
+                _logger.LogInformation("首次收到 GROUP_MESSAGE_CREATE：群全量消息下发已打通，围观与择机发言有数据可用");
+            if (payload.T == "GROUP_AT_MESSAGE_CREATE" && arrived == 1)
+                _logger.LogInformation("首次收到 GROUP_AT_MESSAGE_CREATE：@ 机器人事件正常下发");
             try
             {
                 DispatchReceived?.Invoke(this, dispatch);
@@ -382,7 +422,39 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
         {
             _logger.LogInformation("收到 InvalidSession(9)，可恢复，尝试 Resume");
         }
+        MaybeDegradeInteractionIntent("InvalidSession");
         TriggerReconnect();
+    }
+
+    /// <summary>Identify 成功后清零快断计数（证明当前 intents 组合被平台接受）。</summary>
+    private void NoteIdentifySucceeded()
+    {
+        Volatile.Write(ref _intentQuickFailStreak, 0);
+    }
+
+    /// <summary>
+    /// 若本次连接是“发出 Identify 后 5 秒内就断”，且当时带了 INTERACTION intent，
+    /// 连续两次则判定为 intent 未授权，自动摘除后重连，避免机器人因配置错误整体离线。
+    /// </summary>
+    private void MaybeDegradeInteractionIntent(string where)
+    {
+        if (!_interactionIntentEnabled) return;
+
+        var last = _lastIdentifyAt;
+        if (last == DateTime.MinValue) return;
+        var since = DateTime.UtcNow - last;
+        if (since > IntentQuickFailWindow) return;
+
+        var streak = Interlocked.Increment(ref _intentQuickFailStreak);
+        if (streak < 2) return;
+
+        _interactionIntentEnabled = false;
+        // 告知 UI 层：收不到互动事件了，不得再下发回调按钮（会自动退回指令按钮/文字链）
+        _richUi.ReportInteractionUnavailable();
+        _logger.LogError(
+            "RichUi: {Where} 发生在 Identify 后 {Sec:F1}s 内（连续 {N} 次），判定 INTERACTION intent 未获授权，"
+            + "已自动降级为基础 intents。请先在开放平台申请事件权限，再开启 QQBot:RichUi:InteractionIntent",
+            where, since.TotalSeconds, streak);
     }
 
     private void TriggerReconnect()
@@ -463,18 +535,22 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
 
     private async Task SendIdentifyAsync(string token, CancellationToken ct)
     {
+        var intents = GatewayOp.GroupAndC2CIntent
+            | (_interactionIntentEnabled ? GatewayOp.InteractionIntent : 0);
         var payload = new
         {
             op = GatewayOp.Identify,
             d = new IdentifyData
             {
                 Token = $"QQBot {token}",
-                Intents = GatewayOp.GroupAndC2CIntent,
+                Intents = intents,
                 Shard = new[] { 0, 1 }
             }
         };
+        _lastIdentifyAt = DateTime.UtcNow;
         await SendJsonAsync(payload, ct);
-        _logger.LogInformation("已发送 Identify，intents={Intents}", GatewayOp.GroupAndC2CIntent);
+        _logger.LogInformation("已发送 Identify，intents={Intents}（含 INTERACTION={WithInteraction}）",
+            intents, _interactionIntentEnabled);
     }
 
     private async Task SendResumeAsync(string token, CancellationToken ct)
@@ -531,7 +607,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
 
     public async Task DisconnectAsync(CancellationToken ct = default)
     {
-        _cts?.Cancel();
+        CancelCts();
 
         if (_ws?.State == WebSocketState.Open)
         {
@@ -552,10 +628,26 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
 
     public void Dispose()
     {
-        _cts?.Cancel();
+        // 主机停机路径上可能被调用两次（Host.DisposeAsync 与 DI 作用域释放）；
+        // 第二次对已释放的 CTS 调 Cancel 会抛 ObjectDisposedException 并让进程 abort。
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+        CancelCts();
         _cts?.Dispose();
         _ws?.Dispose();
         _sendLock.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private void CancelCts()
+    {
+        try
+        {
+            _cts?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // CTS 已被并发释放，取消意图已达成，忽略
+        }
     }
 }

@@ -11,8 +11,8 @@ public class GroupWorld
     public string? PendingEventJson { get; set; }
     public DateTime? PendingEventExpiresAt { get; set; }
     public int PendingEventParticipants { get; set; }
-    public DateTime LastEventGeneratedAt { get; set; } = DateTime.UtcNow;
-    public DateTime LeaderboardSnapshotAt { get; set; } = DateTime.UtcNow;
+    public DateTime LastEventGeneratedAt { get; set; } = DateTime.MinValue;
+    public DateTime LeaderboardSnapshotAt { get; set; } = DateTime.MinValue;
     public string? TribulationSessionJson { get; set; }
 
     /// <summary>群灵气浓度对全员挂机效率的乘数：1 + level*0.1。</summary>

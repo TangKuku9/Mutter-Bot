@@ -38,4 +38,20 @@ public class AiCharacter
             SystemPromptOverride = "你是一位严谨的学者。用词精确，注重推理，解释详尽透彻。"
         }
     };
+
+    /// <summary>
+    /// 名称是否与内置人设冲突（内置人设不可覆盖）。
+    /// </summary>
+    public static bool IsReservedName(string name) =>
+        GetDefaults().Any(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// 在内置人设 + 自定义人设中按名称解析（内置优先）。
+    /// </summary>
+    public static AiCharacter? Resolve(string? name, IEnumerable<AiCharacter> customCharacters)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        return GetDefaults().FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))
+            ?? customCharacters.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+    }
 }

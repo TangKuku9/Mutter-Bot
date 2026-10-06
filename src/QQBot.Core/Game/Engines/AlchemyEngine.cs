@@ -18,7 +18,7 @@ public class AlchemyEngine
         var recipe = AlchemyRecipe.Find(recipeKey);
         if (recipe is null)
             return new AlchemyResult("unknown", null, null, 0, 0, 0,
-                $"未知丹方。可炼：{string.Join("、", AlchemyRecipe.Recipes.Select(r => r.Name))}");
+                $"未知丹方。可炼：\n{string.Join("、", AlchemyRecipe.Recipes.Select(r => r.Name))}");
 
         // 校验材料
         foreach (var (matId, need) in recipe.Materials)
@@ -26,7 +26,7 @@ public class AlchemyEngine
             var have = inventory.FirstOrDefault(i => i.ItemId == matId)?.Quantity ?? 0;
             if (have < need)
                 return new AlchemyResult("insufficient", recipe.ItemId, recipe.Name, 0, 0, 0,
-                    $"材料不足：{AlchemyRecipe.MaterialName(matId)} 需 {need}（持有 {have}）。");
+                    $"材料不足：{AlchemyRecipe.MaterialName(matId)}×{need}\n持有仅 {have}。");
         }
 
         // 基础成功率 + 灵根五行契合加成
@@ -41,17 +41,20 @@ public class AlchemyEngine
             _ => "变"
         };
         var affinity = rootElement == recipe.Element ? 0.10 : 0;
-        var chance = Math.Clamp(baseRate + affinity, 0.05, 0.97);
+        // 境界加成：修为越高炼丹越稳（每境界 +2%），成功率封顶 90%
+        var realmBonus = player.RealmIndex * GameConstants.AlchemyRealmBonusPerRealm;
+        var chance = Math.Clamp(baseRate + affinity + realmBonus, 0.05, GameConstants.AlchemyMaxSuccessRate);
 
-        // 种子化 RNG
-        var seed = DeterministicSeed(player.MemberOpenId, recipe.ItemId, now);
+        // 种子化 RNG（混入背包状态：每次成/败都会消耗材料，
+        // 同一小时窗口内重试掷点必然不同，避免"同小时重试必败/必成"的确定性结果）
+        var seed = DeterministicSeed(player.MemberOpenId, recipe.ItemId, now, inventory);
         var rng = new Random(seed);
         var roll = rng.NextDouble();
         var success = roll < chance;
 
         if (!success)
             return new AlchemyResult("failure", recipe.ItemId, recipe.Name, 0, 0, chance,
-                $"炼制 {recipe.Name} 失败，材料尽毁。再接再厉。");
+                $"炼制【{recipe.Name}】失败\n材料尽毁，再接再厉。");
 
         // 成丹品质（确定性 RNG 续掷）
         var qRoll = rng.NextDouble();
@@ -65,7 +68,7 @@ public class AlchemyEngine
 
         return new AlchemyResult("success", recipe.ItemId, recipe.Name, quality,
             recipe.OutputCount, chance,
-            $"炼制成功！获得 {QualityText(quality)}{recipe.Name} ×{recipe.OutputCount}。");
+            $"炼制成功！\n获得 {QualityText(quality)}{recipe.Name} ×{recipe.OutputCount}。");
     }
 
     private static string QualityText(int q) => q switch
@@ -76,9 +79,10 @@ public class AlchemyEngine
         _ => ""
     };
 
-    private static int DeterministicSeed(string memberOpenId, string itemId, DateTime now)
+    private static int DeterministicSeed(string memberOpenId, string itemId, DateTime now, List<PlayerInventoryItem> inventory)
     {
-        var key = $"{memberOpenId}|{itemId}|{now:yyyy-MM-dd HH}";
+        var invFingerprint = string.Join(",", inventory.OrderBy(i => i.ItemId).Select(i => $"{i.ItemId}:{i.Quantity}"));
+        var key = $"{memberOpenId}|{itemId}|{now:yyyy-MM-dd HH}|{invFingerprint}";
         var hash = 5381;
         foreach (var c in key)
             hash = ((hash << 5) + hash) ^ c;

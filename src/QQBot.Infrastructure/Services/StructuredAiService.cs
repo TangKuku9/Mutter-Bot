@@ -45,12 +45,20 @@ public class StructuredAiService : IStructuredAiService
         string userPrompt,
         AiConfig config,
         CancellationToken ct = default) where T : class
+        => await GetStructuredAsync<T>(systemPrompt, userPrompt, Array.Empty<string>(), config, ct);
+
+    public async Task<StructuredResult<T>?> GetStructuredAsync<T>(
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyList<string> imageUrls,
+        AiConfig config,
+        CancellationToken ct = default) where T : class
     {
         // ① 优先 json_object 模式
-        var (resp1, usedJsonMode) = await CallAsync(systemPrompt, userPrompt, config, "json_object", ct);
+        var (resp1, _) = await CallAsync(systemPrompt, userPrompt, imageUrls, config, "json_object", ct);
         if (resp1 is not null)
         {
-            var parsed = TryParse<T>(resp1.Content, out var fail1);
+            var parsed = Deserialize<T>(resp1.Content);
             if (parsed is not null)
                 return new StructuredResult<T>(parsed, resp1.Model, resp1.PromptTokens, resp1.CompletionTokens);
             _logger.LogWarning("json_object 模式解析失败，降级 prompt 引导。raw={Raw}", Truncate(resp1.Content, 200));
@@ -58,16 +66,12 @@ public class StructuredAiService : IStructuredAiService
 
         // ② prompt 引导 + 正则提取 {...}
         var fallbackPrompt = systemPrompt + "\n\n注意：只输出一个合法的 JSON 对象，不要 Markdown、不要多余文字。";
-        var (resp2, _) = await CallAsync(fallbackPrompt, userPrompt, config, null, ct);
+        var (resp2, _) = await CallAsync(fallbackPrompt, userPrompt, imageUrls, config, null, ct);
         if (resp2 is not null)
         {
-            var extracted = ExtractJsonObject(resp2.Content);
-            if (extracted is not null)
-            {
-                var parsed = TryParse<T>(extracted, out _);
-                if (parsed is not null)
-                    return new StructuredResult<T>(parsed, resp2.Model, resp2.PromptTokens, resp2.CompletionTokens);
-            }
+            var parsed = Deserialize<T>(resp2.Content);
+            if (parsed is not null)
+                return new StructuredResult<T>(parsed, resp2.Model, resp2.PromptTokens, resp2.CompletionTokens);
         }
 
         // ③ 返回 null，由调用方走预设模板兜底
@@ -76,19 +80,68 @@ public class StructuredAiService : IStructuredAiService
     }
 
     private async Task<(AiChatResponse? Response, bool UsedJsonMode)> CallAsync(
-        string systemPrompt, string userPrompt, AiConfig config, string? responseFormat, CancellationToken ct)
+        string systemPrompt, string userPrompt, IReadOnlyList<string> imageUrls,
+        AiConfig config, string? responseFormat, CancellationToken ct)
     {
         try
         {
-            var history = new List<(string Role, string Content)> { ("user", userPrompt) };
-            var resp = await _ai.ChatAsync(systemPrompt, history, config, responseFormat, ct);
+            var resp = imageUrls.Count > 0
+                ? await _ai.ChatWithImagesAsync(systemPrompt, userPrompt, imageUrls, config, responseFormat, ct)
+                : await _ai.ChatAsync(systemPrompt,
+                    new List<(string Role, string Content)> { ("user", userPrompt) }, config, responseFormat, ct);
             return (resp, responseFormat is not null);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "AI 结构化调用失败 responseFormat={Fmt}", responseFormat ?? "null");
+            _logger.LogWarning(ex, "AI 结构化调用失败 responseFormat={Fmt} images={Images}",
+                responseFormat ?? "null", imageUrls.Count);
             return (null, false);
         }
+    }
+
+    private T? Deserialize<T>(string? raw) where T : class
+    {
+        var candidate = ExtractRepairableJson(raw);
+        return candidate is null ? null : TryParse<T>(candidate, out _);
+    }
+
+    /// <summary>
+    /// 取出模型输出里的 JSON 对象并修成可解析形态：剥掉 ```json 围栏，再把字符串值里的裸
+    /// 换行/制表符转义。代理层（faroapi→gemini 这类）常在长中文值中间折行，裸换行会让整份
+    /// JSON 变成非法；此前严格解析直接判失败，既浪费一次降级调用，也把整条链路打成 null。
+    /// </summary>
+    public static string? ExtractRepairableJson(string? raw)
+    {
+        var obj = string.IsNullOrEmpty(raw) ? null : ExtractJsonObject(raw);
+        return obj is null ? null : EscapeStringControlChars(obj);
+    }
+
+    private static string EscapeStringControlChars(string json)
+    {
+        var sb = new System.Text.StringBuilder(json.Length + 16);
+        var inStr = false;
+        var escape = false;
+        foreach (var c in json)
+        {
+            if (inStr)
+            {
+                if (escape) { escape = false; sb.Append(c); continue; }
+                if (c == '\\') { escape = true; sb.Append(c); continue; }
+                if (c == '"') { inStr = false; sb.Append(c); continue; }
+                switch (c)
+                {
+                    case '\n': sb.Append("\\n"); continue;
+                    case '\r': sb.Append("\\r"); continue;
+                    case '\t': sb.Append("\\t"); continue;
+                }
+                sb.Append(c);
+                continue;
+            }
+
+            if (c == '"') inStr = true;
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     private static T? TryParse<T>(string json, out bool failed) where T : class

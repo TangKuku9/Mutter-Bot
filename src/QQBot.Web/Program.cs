@@ -21,6 +21,7 @@ builder.Services.AddQQBotWeb();
 var sessionTimeout = TimeSpan.FromMinutes(
     builder.Configuration.GetValue("PanelAuth:SessionTimeoutMinutes", 120));
 builder.Services.AddSingleton(new PanelSessionStore(sessionTimeout));
+builder.Services.AddSingleton<PanelLoginGuard>();
 
 var app = builder.Build();
 

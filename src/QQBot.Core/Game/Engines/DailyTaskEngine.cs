@@ -7,7 +7,7 @@ namespace QQBot.Core.Game.Engines;
 /// </summary>
 public class DailyTaskEngine
 {
-    /// <summary>签到。streak 连续判定窗口 48h（冷却由服务层强制 20h）。</summary>
+    /// <summary>签到。streak 连续判定窗口 48h（服务层冷却为北京时间次日0点，非固定 20h）。</summary>
     public CheckinResult Checkin(PlayerProfile player, DateTime now)
     {
         var streak = 1;
@@ -21,7 +21,7 @@ public class DailyTaskEngine
         var lifespanGain = 3 + streakBonus;
 
         return new CheckinResult(streak, stones, cultivation, lifespanGain,
-            $"签到成功，连续签到 {streak} 天。获得灵石 +{stones}，修为 +{cultivation}，寿元 +{lifespanGain}。");
+            $"签到成功，连续 {streak} 天\n灵石 +{stones}，修为 +{cultivation}\n寿元 +{lifespanGain}");
     }
 
     /// <summary>修行：一次性大量修为。冷却由服务层强制 8h。</summary>
@@ -32,7 +32,7 @@ public class DailyTaskEngine
             GameConstants.PracticeBaseCultivation * (1 + player.RealmIndex * 0.05) * rootFactor);
 
         return new PracticeResult(gained,
-            $"闭关修行一番，修为 +{gained:N0}。");
+            $"闭关修行一番，\n修为 +{gained:N0}。");
     }
 }
 

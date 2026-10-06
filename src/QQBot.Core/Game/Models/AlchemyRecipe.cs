@@ -16,6 +16,7 @@ public static class AlchemyRecipe
         new("lingkuang", "灵矿"),
         new("xuanbing_lu", "玄冰露"),
         new("huoyan_jing", "火焰晶"),
+        new("zijing_zhi", "紫晶芝"),
     };
 
     public static readonly Recipe[] Recipes =
@@ -28,6 +29,12 @@ public static class AlchemyRecipe
             new() { ["lingkuang"] = 3, ["xuanbing_lu"] = 1 }, 1, "破开瓶颈，大幅提升突破成功率"),
         new("huoyan_dan", "火焰丹", "火", 0.40,
             new() { ["huoyan_jing"] = 2, ["yaocao"] = 3 }, 1, "烈焰淬体，提升修行收益"),
+        new("ningqi_dan", "凝气丹", "水", 0.70,
+            new() { ["lingcao"] = 2, ["xuanbing_lu"] = 1 }, 1, "凝练灵力，温补修为"),
+        new("zijing_dan", "紫晶丹", "土", 0.45,
+            new() { ["zijing_zhi"] = 2, ["lingkuang"] = 2 }, 1, "紫晶芝炼就的珍贵丹药，大补灵力"),
+        new("huichun_dan", "回春丹", "木", 0.55,
+            new() { ["lingcao"] = 3, ["yaocao"] = 1 }, 1, "枯木逢春，服用可延寿元五载"),
     };
 
     public static Recipe? Find(string? itemIdOrName) =>

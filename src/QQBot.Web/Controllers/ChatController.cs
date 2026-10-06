@@ -9,25 +9,32 @@ namespace QQBot.Web.Controllers;
 public class ChatController : ControllerBase
 {
     private readonly IMessageRepository _messageRepository;
+    private readonly IConfigRepository _configRepository;
 
-    public ChatController(IMessageRepository messageRepository)
+    public ChatController(IMessageRepository messageRepository, IConfigRepository configRepository)
     {
         _messageRepository = messageRepository;
+        _configRepository = configRepository;
     }
 
     [HttpGet("history")]
     public async Task<ActionResult<PagedResult<ChatMessageDto>>> GetHistory(
         [FromQuery] string? groupId = null,
+        [FromQuery] string? source = null,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 50)
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 1, 100);
 
-        var (items, totalCount) = await _messageRepository.GetPagedMessagesAsync(groupId, page, pageSize);
+        var (items, totalCount) = await _messageRepository.GetPagedMessagesAsync(groupId, page, pageSize, source);
+
+        var groupNames = (await _configRepository.GetKnownGroupsAsync()).ToDictionary(g => g.GroupId, g => g.GroupName);
+        string? NameOf(string? id) => id is not null && groupNames.TryGetValue(id, out var n) && !string.IsNullOrEmpty(n) ? n : null;
 
         var dtos = items.Select(m => new ChatMessageDto
         {
+            GroupName = NameOf(m.GroupId),
             Id = m.Id,
             ChatType = m.ChatType,
             GroupId = m.GroupId,
@@ -37,6 +44,7 @@ public class ChatController : ControllerBase
             HasImage = m.HasImage,
             HasAtBot = m.HasAtBot,
             IsBotMessage = m.IsBotMessage,
+            IsProactive = m.IsProactive,
             CreatedAt = m.CreatedAt
         }).ToList();
 

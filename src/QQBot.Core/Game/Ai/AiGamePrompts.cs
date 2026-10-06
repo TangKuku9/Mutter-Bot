@@ -70,16 +70,18 @@ public static class AiGamePrompts
     public static string RenderGeneratedEvent(GeneratedEventDto e)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"══ 【{e.Title}】（{TypeText(e.Type)} 难度{ClampDifficulty(e.Difficulty)}）══");
-        sb.AppendLine(e.Narrative);
+        sb.AppendLine($"【{e.Title}】{TypeText(e.Type)}·难度{ClampDifficulty(e.Difficulty)}");
+        sb.AppendLine(TextLayout.Flow(e.Narrative));
         for (var i = 0; i < e.Options.Count; i++)
         {
             var o = e.Options[i];
-            sb.AppendLine($"{i + 1}. {o.Label}（{RiskText(o.Risk)}）{o.Hint}");
+            sb.AppendLine($"{i + 1}. {o.Label}（{RiskText(o.Risk)}）");
+            if (!string.IsNullOrEmpty(o.Hint))
+                sb.AppendLine($"　 {o.Hint}");
         }
         if (!string.IsNullOrEmpty(e.RewardHint))
             sb.AppendLine($"提示：{e.RewardHint}");
-        sb.Append("回复：@我 选 <序号> 参与抉择");
+        sb.Append("回复 @我 选 <序号> 参与抉择");
         return sb.ToString();
     }
 

@@ -24,6 +24,10 @@ public class CultivationRepository : ICultivationRepository
 
     public async Task<PlayerProfile> GetOrCreatePlayerAsync(string groupId, string memberOpenId, string nickname, CancellationToken ct = default)
     {
+        // 规范化：消息源可能把长 OpenId 当昵称传入，入库前清空，展示层按“道友+尾号”回退
+        if (nickname == memberOpenId)
+            nickname = string.Empty;
+
         var e = await _db.PlayerProfiles
             .FirstOrDefaultAsync(p => p.GroupId == groupId && p.MemberOpenId == memberOpenId, ct);
 
@@ -111,12 +115,20 @@ public class CultivationRepository : ICultivationRepository
             GroupId = groupId,
             WorldQiLevel = 1,
             WorldQiUpdatedAt = DateTime.UtcNow,
-            LastEventGeneratedAt = DateTime.UtcNow,
-            LeaderboardSnapshotAt = DateTime.UtcNow
+            // MinValue 使新群首个 AI 事件可立即触发（无需等最小间隔）；
+            // 月榜快照同样从 MinValue 起，保证创建当月即可收到首次推送
+            LastEventGeneratedAt = DateTime.MinValue,
+            LeaderboardSnapshotAt = DateTime.MinValue
         };
         _db.GroupWorlds.Add(e);
         await _db.SaveChangesAsync(ct);
         return ToDomain(e);
+    }
+
+    public async Task<GroupWorld?> GetGroupWorldAsync(string groupId, CancellationToken ct = default)
+    {
+        var e = await _db.GroupWorlds.FirstOrDefaultAsync(w => w.GroupId == groupId, ct);
+        return e is null ? null : ToDomain(e);
     }
 
     public async Task SaveGroupWorldAsync(GroupWorld world, CancellationToken ct = default)
@@ -186,6 +198,26 @@ public class CultivationRepository : ICultivationRepository
         return e?.AvailableAt;
     }
 
+    public async Task<Dictionary<string, DateTime>> GetActiveCooldownsAsync(
+        string groupId, string memberOpenId, IReadOnlyCollection<string> actionTypes, CancellationToken ct = default)
+    {
+        if (actionTypes.Count == 0) return new Dictionary<string, DateTime>();
+        var now = DateTime.UtcNow;
+        var keys = actionTypes.ToList();
+
+        // 单条 IN 查询：菜单要同时标注多个动作的冷却，逐个查会把一次回复放大成 N 次读库
+        var rows = await _db.GameCooldowns
+            .Where(c => c.GroupId == groupId && c.MemberOpenId == memberOpenId
+                        && keys.Contains(c.ActionType) && c.AvailableAt > now)
+            .Select(c => new { c.ActionType, c.AvailableAt })
+            .ToListAsync(ct);
+
+        var map = new Dictionary<string, DateTime>(rows.Count, StringComparer.Ordinal);
+        foreach (var r in rows)
+            map[r.ActionType] = r.AvailableAt;
+        return map;
+    }
+
     public async Task SetCooldownAsync(string groupId, string memberOpenId, string actionType, TimeSpan duration, CancellationToken ct = default)
     {
         var e = await _db.GameCooldowns
@@ -230,10 +262,22 @@ public class CultivationRepository : ICultivationRepository
     {
         return await _db.PlayerProfiles
             .Where(p => p.GroupId == groupId && p.IsActive)
-            .OrderByDescending(p => p.CultivationPoints)
-            .ThenByDescending(p => p.RealmIndex)
+            .OrderByDescending(p => p.RealmIndex)
+            .ThenByDescending(p => p.CultivationPoints)
             .Take(top)
             .Select(p => new LeaderboardEntry(p.MemberOpenId, p.Nickname, p.RealmIndex, p.CultivationPoints))
+            .ToListAsync(ct);
+    }
+
+    public async Task<List<PlayerSummary>> GetGroupPlayersAsync(string groupId, CancellationToken ct = default)
+    {
+        return await _db.PlayerProfiles
+            .Where(p => p.GroupId == groupId && p.IsActive)
+            .OrderByDescending(p => p.RealmIndex)
+            .ThenByDescending(p => p.CultivationPoints)
+            .Select(p => new PlayerSummary(
+                p.MemberOpenId, p.Nickname, p.RealmIndex, p.CultivationPoints,
+                p.SpiritStones, p.Lifespan, p.UpdatedAt))
             .ToListAsync(ct);
     }
 
@@ -256,6 +300,18 @@ public class CultivationRepository : ICultivationRepository
             .Select(p => p.GroupId)
             .Distinct()
             .ToListAsync(ct);
+    }
+
+    public async Task<Dictionary<string, int>> GetPlayerActionCountsAsync(
+        string groupId, string memberOpenId, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        var rows = await _db.CultivationEventLogs
+            .Where(e => e.GroupId == groupId && e.MemberOpenId == memberOpenId && e.CreatedAt >= sinceUtc)
+            .GroupBy(e => e.EventType)
+            .Select(g => new { g.Key, Count = g.Count() })
+            .ToListAsync(ct);
+
+        return rows.ToDictionary(r => r.Key, r => r.Count);
     }
 
     private static PlayerProfile ToDomain(PlayerProfileEntity e) => new()

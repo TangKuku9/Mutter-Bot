@@ -30,6 +30,7 @@ public class BotCommandService
         /quiz start <type> - Start quiz (riddle/idiom/brain teaser)
         /quiz answer <answer> - Submit answer
         /quiz stop - Stop current game
+        /ui - 富交互能力自检（markdown/按钮实探，仅群内生效）
         """;
 
     public BotCommandService(
@@ -86,6 +87,8 @@ public class BotCommandService
             {
                 "/char" => await HandleCharacterGroupAsync(senderId, parts, groupId, isAdmin, ct),
                 "/quiz" => await HandleQuizGroupAsync(senderId, parts, groupId, isAdmin, ct),
+                // /ui 由 MessageEventHandler 直接处理（它才持有当条消息的被动回复槽位）
+                "/ui" => "/ui 需在群内 @我 使用，会本条发回 markdown 与按钮两条探测消息。",
                 _ => $"Unknown command {cmd}."
             };
         }
@@ -172,16 +175,16 @@ public class BotCommandService
         return $"User {userId} private chat {(enable ? "allowed" : "blocked")}";
     }
 
-    private Task<string> HandleCharacterAsync(string senderId, string[] parts, CancellationToken ct)
+    private async Task<string> HandleCharacterAsync(string senderId, string[] parts, CancellationToken ct)
     {
-        if (parts.Length < 2) return Task.FromResult("Usage: /char list|set <name>|reset");
+        if (parts.Length < 2) return "Usage: /char list|set <name>|reset";
 
         var subCmd = parts[1].ToLowerInvariant();
-        return Task.FromResult(subCmd switch
+        return subCmd switch
         {
-            "list" => BuildCharacterList(),
+            "list" => await BuildCharacterListAsync(ct),
             _ => "Use /char list to see available characters."
-        });
+        };
     }
 
     private async Task<string> HandleCharacterGroupAsync(string senderId, string[] parts, string groupId, bool isAdmin, CancellationToken ct)
@@ -191,20 +194,27 @@ public class BotCommandService
         var subCmd = parts[1].ToLowerInvariant();
         return subCmd switch
         {
-            "list" => BuildCharacterList(),
+            "list" => await BuildCharacterListAsync(ct),
             "set" => await SetCharacterAsync(parts, groupId, isAdmin, ct),
             "reset" => await ResetCharacterAsync(groupId, isAdmin, ct),
             _ => "Usage: /char list|set <name>|reset"
         };
     }
 
-    private static string BuildCharacterList()
+    private async Task<string> BuildCharacterListAsync(CancellationToken ct)
     {
-        var chars = AiCharacter.GetDefaults();
+        using var scope = _scopeFactory.CreateScope();
+        var configRepo = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
+        var customs = await configRepo.GetCustomCharactersAsync(ct);
+
         var sb = new StringBuilder("Available characters:\n");
-        foreach (var c in chars)
+        foreach (var c in AiCharacter.GetDefaults())
         {
             sb.AppendLine($"  {c.Name} - {c.Description}");
+        }
+        foreach (var c in customs)
+        {
+            sb.AppendLine($"  {c.Name} - {c.Description} (custom)");
         }
         return sb.ToString().TrimEnd();
     }
@@ -215,12 +225,13 @@ public class BotCommandService
         if (parts.Length < 3) return "Usage: /char set <name>";
 
         var charName = parts[2];
-        var character = AiCharacter.GetDefaults().FirstOrDefault(c =>
-            string.Equals(c.Name, charName, StringComparison.OrdinalIgnoreCase));
-        if (character == null) return $"Unknown character: {charName}. Use /char list to see available characters.";
 
         using var scope = _scopeFactory.CreateScope();
         var configRepo = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
+        var customs = await configRepo.GetCustomCharactersAsync(ct);
+        var character = AiCharacter.Resolve(charName, customs);
+        if (character == null) return $"Unknown character: {charName}. Use /char list to see available characters.";
+
         var config = await configRepo.GetGroupConfigAsync(groupId, ct) ?? new GroupConfig { GroupId = groupId, IsEnabled = true };
         config.ActiveCharacter = character.Name;
         await configRepo.SaveGroupConfigAsync(config, ct);

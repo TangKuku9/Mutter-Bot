@@ -76,6 +76,7 @@ public sealed class HostedServiceManager
 
         // 管理面板会话存储（与 QQBot.Web/Program.cs 保持一致）
         builder.Services.AddSingleton(new PanelSessionStore(TimeSpan.FromMinutes(120)));
+        builder.Services.AddSingleton<PanelLoginGuard>();
 
         _webApp = builder.Build();
         _webApp.UseMiddleware<ApiAuthMiddleware>();

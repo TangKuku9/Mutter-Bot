@@ -25,12 +25,7 @@ public class ConfigController : ControllerBase
     public async Task<ActionResult<AiConfigDto>> GetAiConfig()
     {
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
-        var characters = AiCharacter.GetDefaults().Select(c => new CharacterDto
-        {
-            Name = c.Name,
-            DisplayName = c.DisplayName,
-            Description = c.Description
-        }).ToList();
+        var characters = await BuildCharacterListAsync();
 
         var providers = AiProviderPreset.GetDefaults().Select(p => new ProviderPresetDto
         {
@@ -101,6 +96,122 @@ public class ConfigController : ControllerBase
         await _dbContext.SaveChangesAsync();
         return NoContent();
     }
+
+    /// <summary>
+    /// 全量人设列表（内置 + 自定义）。
+    /// </summary>
+    [HttpGet("characters")]
+    public async Task<ActionResult<List<CharacterDto>>> GetCharacters()
+    {
+        return Ok(await BuildCharacterListAsync());
+    }
+
+    /// <summary>
+    /// 新增自定义人设。
+    /// </summary>
+    [HttpPost("characters")]
+    public async Task<IActionResult> CreateCharacter([FromBody] CharacterDto dto)
+    {
+        var name = (dto.Name ?? string.Empty).Trim();
+        if (!IsValidCharacterName(name))
+            return BadRequest(new { error = "人设标识需为 1-32 位字母/数字/下划线/短横线" });
+        if (AiCharacter.IsReservedName(name))
+            return BadRequest(new { error = $"标识 {name} 与内置人设冲突，请换一个" });
+        if (await _dbContext.CustomCharacters.AnyAsync(c => c.Name == name))
+            return BadRequest(new { error = $"人设 {name} 已存在" });
+        if (string.IsNullOrWhiteSpace(dto.DisplayName))
+            return BadRequest(new { error = "人设名称不能为空" });
+
+        _dbContext.CustomCharacters.Add(new CustomCharacterEntity
+        {
+            Name = name,
+            DisplayName = dto.DisplayName.Trim(),
+            Description = dto.Description ?? string.Empty,
+            SystemPrompt = dto.SystemPrompt ?? string.Empty,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        });
+        await _dbContext.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>
+    /// 更新自定义人设（标识不可修改）。
+    /// </summary>
+    [HttpPut("characters/{name}")]
+    public async Task<IActionResult> UpdateCharacter(string name, [FromBody] CharacterDto dto)
+    {
+        var entity = await _dbContext.CustomCharacters.FirstOrDefaultAsync(c => c.Name == name);
+        if (entity == null)
+            return BadRequest(new { error = $"自定义人设 {name} 不存在" });
+        if (string.IsNullOrWhiteSpace(dto.DisplayName))
+            return BadRequest(new { error = "人设名称不能为空" });
+
+        entity.DisplayName = dto.DisplayName.Trim();
+        entity.Description = dto.Description ?? string.Empty;
+        entity.SystemPrompt = dto.SystemPrompt ?? string.Empty;
+        entity.UpdatedAt = DateTime.UtcNow;
+        await _dbContext.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>
+    /// 删除自定义人设，并清理仍在引用它的配置。
+    /// </summary>
+    [HttpDelete("characters/{name}")]
+    public async Task<IActionResult> DeleteCharacter(string name)
+    {
+        var entity = await _dbContext.CustomCharacters.FirstOrDefaultAsync(c => c.Name == name);
+        if (entity == null)
+            return BadRequest(new { error = $"自定义人设 {name} 不存在" });
+
+        _dbContext.CustomCharacters.Remove(entity);
+
+        // 清理引用：全局人设与各群人设若指向被删人设则回退为空（默认）
+        var aiConfig = await _dbContext.AiConfigs.FirstOrDefaultAsync();
+        if (aiConfig != null && aiConfig.Personality == name)
+            aiConfig.Personality = string.Empty;
+
+        var groupConfigs = await _dbContext.GroupConfigs
+            .Where(g => g.ActiveCharacter == name).ToListAsync();
+        foreach (var g in groupConfigs)
+            g.ActiveCharacter = null;
+
+        await _dbContext.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>
+    /// 内置人设 + 自定义人设合并列表，内置在前。
+    /// </summary>
+    private async Task<List<CharacterDto>> BuildCharacterListAsync()
+    {
+        var list = AiCharacter.GetDefaults().Select(c => new CharacterDto
+        {
+            Name = c.Name,
+            DisplayName = c.DisplayName,
+            Description = c.Description,
+            SystemPrompt = c.SystemPromptOverride,
+            IsCustom = false
+        }).ToList();
+
+        var customs = await _dbContext.CustomCharacters
+            .OrderBy(c => c.CreatedAt)
+            .Select(c => new CharacterDto
+            {
+                Name = c.Name,
+                DisplayName = c.DisplayName,
+                Description = c.Description,
+                SystemPrompt = c.SystemPrompt,
+                IsCustom = true
+            }).ToListAsync();
+
+        list.AddRange(customs);
+        return list;
+    }
+
+    private static bool IsValidCharacterName(string name) =>
+        name.Length is >= 1 and <= 32 && name.All(c => char.IsLetterOrDigit(c) || c is '_' or '-');
 
     [HttpGet("qqbot")]
     public ActionResult<QqBotStatusDto> GetQqBotConfig(

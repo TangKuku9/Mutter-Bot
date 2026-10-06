@@ -13,21 +13,27 @@ public static class Technique
         // Tier 1 - 凡品（初始/低级）
         new("wuwei",    "无为诀",     "无", 1.00, 1),
         new("houtu",    "厚土经",     "土", 1.10, 1),
+        new("juling",   "聚灵诀",     "木", 1.05, 1),
         // Tier 2 - 灵品（常见掉落）
         new("qingmu",   "青木功",     "木", 1.15, 2),
         new("fenghuo",  "烽火诀",     "火", 1.20, 2),
         new("xuanbing", "玄冰诀",     "水", 1.20, 2),
         new("gengjin",  "庚金剑诀",   "金", 1.25, 2),
+        new("lieyan",   "烈焰焚天功", "火", 1.18, 2),
+        new("hanquan",  "寒泉引气经", "水", 1.22, 2),
         // Tier 3 - 宝品（稀有掉落）
         new("changsheng","万木长生功","木", 1.35, 3),
         new("fentian",  "焚天宝典",   "火", 1.40, 3),
         new("jiuyou",   "九幽寒霜诀", "水", 1.35, 3),
         new("taiyi",    "太乙剑经",   "金", 1.45, 3),
         new("yuandian", "大地源典",   "土", 1.30, 3),
+        new("zijian",   "紫霄剑典",   "金", 1.42, 3),
+        new("qinglian", "青莲心经",   "木", 1.38, 3),
         // Tier 4 - 仙品（极稀有掉落）
         new("hundun",   "混沌真经",   "无", 1.60, 4),
         new("leishen",  "天雷神诀",   "雷", 1.65, 4),
         new("bingpo",   "冰魄神功",   "冰", 1.65, 4),
+        new("taixu",    "太虚踏天诀", "无", 1.62, 4),
     };
 
     public static string NameOf(string? id) =>

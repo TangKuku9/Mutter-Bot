@@ -20,6 +20,8 @@ public class CharacterDto
     public string Name { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
+    public string SystemPrompt { get; set; } = string.Empty;
+    public bool IsCustom { get; set; }
 }
 
 public class ProviderPresetDto

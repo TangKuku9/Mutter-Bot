@@ -66,10 +66,9 @@ public class ActionReferee
             if (!dto.Feasible && dto.OutcomeType is "success" or "partial")
                 dto.OutcomeType = "failure";
 
-            // 计算实际修为变化：按比例，但对低修为/零修为玩家使用境界阈值保底
-            // 确保新玩家和突破后清零的玩家也能获得有意义的修为变化
-            var realmThreshold = Realm.Realms[Math.Min(player.RealmIndex, Realm.MaxIndex)].Threshold;
-            var effectiveBase = Math.Max(player.CultivationPoints, realmThreshold);
+            // 计算实际修为变化：按比例，低修为/零修为玩家使用固定小额保底。
+            // 不再按"当前境界阈值"保底——那会使突破清零后每 5 分钟可刷 ±30% 境界阈值的修为（高境界雪球漏洞）
+            var effectiveBase = Math.Max(player.CultivationPoints, (double)GameConstants.RefereeMinEffectiveBase);
             var actualDelta = (long)Math.Round(effectiveBase * clampedDelta);
 
             return new RefereeOutcome(dto, rawDelta, clampedDelta, actualDelta,

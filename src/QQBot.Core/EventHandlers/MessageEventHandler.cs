@@ -5,11 +5,15 @@ using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using QQBot.Core;
+using QQBot.Core.Configuration;
 using QQBot.Core.Game.Services;
+using QQBot.Core.Game.Ui;
 using QQBot.Core.Interfaces;
 using QQBot.Core.Models;
 using QQBot.Core.Models.Config;
 using QQBot.Core.Models.QQOfficial;
+using QQBot.Core.Proactive;
+using QQBot.Core.Services;
 
 namespace QQBot.Core.EventHandlers;
 
@@ -27,13 +31,17 @@ public class MessageEventHandler
     private readonly ChannelWriter<ChatMessage> _messageWriter;
     private readonly GameCommandRouter _gameCommandRouter;
     private readonly CultivationGameService _cultivationGameService;
+    private readonly RichUiCapability _richUi;
+    private readonly IGameRecallService _gameRecall;
+    private readonly ProactiveObserveService _observe;
+    private readonly ReplySeqTracker _seqTracker;
+    private readonly GroupMessageGate _groupGate;
     private readonly ILogger<MessageEventHandler> _logger;
     private string _botId = string.Empty;
 
     private readonly SemaphoreSlim _aiSemaphore = new(3, 3);
 
     private readonly ConcurrentDictionary<string, DateTime> _processedMsgIds = new();
-    private readonly ConcurrentDictionary<string, int> _msgSeq = new();
 
     /// <summary>
     /// 内容级去重：防止 QQ 服务端用不同 msgId 重复投递同一条消息。
@@ -51,6 +59,9 @@ public class MessageEventHandler
     private readonly ConcurrentDictionary<string, DateTime> _recentBotReplies = new();
     private const int BotReplyDedupWindowSeconds = 8;
 
+    /// <summary>游标：已回应过的互动事件 ID（官方同一 interaction_id 只能回应一次）。</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _handledInteractions = new();
+
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public MessageEventHandler(
@@ -66,6 +77,11 @@ public class MessageEventHandler
         ChannelWriter<ChatMessage> messageWriter,
         GameCommandRouter gameCommandRouter,
         CultivationGameService cultivationGameService,
+        RichUiCapability richUi,
+        IGameRecallService gameRecall,
+        ProactiveObserveService observe,
+        ReplySeqTracker seqTracker,
+        GroupMessageGate groupGate,
         ILogger<MessageEventHandler> logger)
     {
         _parser = parser;
@@ -80,6 +96,11 @@ public class MessageEventHandler
         _messageWriter = messageWriter;
         _gameCommandRouter = gameCommandRouter;
         _cultivationGameService = cultivationGameService;
+        _richUi = richUi;
+        _gameRecall = gameRecall;
+        _observe = observe;
+        _seqTracker = seqTracker;
+        _groupGate = groupGate;
         _logger = logger;
     }
 
@@ -141,6 +162,18 @@ public class MessageEventHandler
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// 指纹输入。纯图片/表情消息的文本是同一个占位，不带图片身份的话，
+    /// 同一个人 30 秒内转发的两张不同图会被判成重复投递丢掉。
+    /// </summary>
+    private static string ContentSignature(ParsedMessage parsed)
+    {
+        // 指纹只在内存里去重，进程内自洽即可，不需要跨进程稳定的摘要
+        return parsed.ImageUrls.Count == 0
+            ? parsed.PlainText
+            : $"{parsed.PlainText}#{parsed.ImageUrls[0].GetHashCode():X8}";
     }
 
     /// <summary>
@@ -220,12 +253,6 @@ public class MessageEventHandler
         }
 
         return false;
-    }
-
-    private int? NextSeq(string? msgId)
-    {
-        if (msgId is null) return null;
-        return _msgSeq.AddOrUpdate(msgId, 1, (_, c) => c + 1);
     }
 
     public async Task HandleDispatchAsync(QqDispatch dispatch)
@@ -324,6 +351,20 @@ public class MessageEventHandler
                 _logger.LogInformation("用户 {UserOpenid} 重新允许接收主动消息", e?.UserOpenid);
                 break;
             }
+            case "INTERACTION_CREATE":
+            {
+                var evt = dispatch.Data.Deserialize<InteractionCreateEvent>(JsonOptions);
+                if (evt is null || string.IsNullOrEmpty(evt.Id)) return;
+                if (evt.NeedsResponse) _richUi.ReportInteractionAvailable();   // 回调链路已实通，允许下发回调按钮
+                if (!evt.NeedsResponse)
+                {
+                    // 13 赞踩 / 14 清空会话 / 18~ 授权等无需回应，先留痕便于后续做反馈统计
+                    _logger.LogDebug("互动事件（无需回应）type={Type} scene={Scene}", evt.Type, evt.Scene);
+                    return;
+                }
+                await HandleButtonInteractionAsync(evt);
+                break;
+            }
             case "READY":
                 _logger.LogInformation("机器人已就绪 Ready");
                 break;
@@ -337,24 +378,44 @@ public class MessageEventHandler
     {
         if (evt.Author?.Bot == true) return;
         if (string.IsNullOrEmpty(evt.Id)) return;
-        if (!MarkProcessed(evt.Id)) return;
+        if (!_groupGate.ShouldHandle(evt.Id, isAtBot, out var reprocessAsAt)) return;
+
+        if (reprocessAsAt)
+            _logger.LogInformation("全量事件先到达，@ 事件补走回复链路: MsgId={MessageId}", evt.Id);
 
         var parsed = _parser.Parse(evt.Content, evt.Attachments);
-        if (isAtBot) parsed.HasAtBot = true;
 
-        // 内容级去重：QQ 服务端可能用不同 msgId 重复投递同一消息
+        // 先路由：全量模式下平台不再单独下发 @ 事件，"有没有被 @"只能靠群配置的识别码从
+        // content 里认出来。认出来就按 @ 处理（必须回话），并且像官方那样把 at 段剥掉再喂模型。
+        var route = await _router.RouteGroupAsync(evt.GroupOpenid, isAtBot, evt.Content);
+        var mention = isAtBot || route.BotMentionCode is not null;
+        if (route.BotMentionCode is not null)
+        {
+            _logger.LogInformation("按识别码判定为 @ 机器人（本次未收到 @ 事件）: GroupId={GroupId}, MsgId={MessageId}",
+                evt.GroupOpenid, evt.Id);
+            parsed.PlainText = BotMention.Strip(parsed.PlainText, route.BotMentionCode);
+        }
+        parsed.HasAtBot = mention;
+
+        // 内容级去重：QQ 服务端可能用不同 msgId 重复投递同一消息。
+        // 但游戏指令（如「突破」「修炼」）跳过此检查：去重窗口(30s)会误杀
+        // 渡劫结算等需要短时间内重复发送相同指令的玩法（2026-08-07 事故根因）。
+        // 消息 ID 级去重（GroupMessageGate）仍在，足以拦截 QQ 同 msgId 重复投递。
         var senderId = evt.Author?.MemberOpenid ?? string.Empty;
-        if (IsContentDuplicate(evt.GroupOpenid, senderId, parsed.PlainText))
+        // 优先用平台下发的真实昵称（历史上只用了 OpenId，面板只能显示“道友XXXX”）
+        var senderName = !string.IsNullOrWhiteSpace(evt.Author?.Username)
+            ? evt.Author!.Username!
+            : senderId.Length > 0 ? senderId : "Member";
+        GameCommand? gameCmd = mention ? _gameCommandRouter.TryMatch(parsed.PlainText) : null;
+        if (!reprocessAsAt && gameCmd is null && IsContentDuplicate(evt.GroupOpenid, senderId, ContentSignature(parsed)))
         {
             _logger.LogWarning("检测到重复投递，跳过: GroupId={GroupId}, Sender={SenderId}, Content={Content}",
                 evt.GroupOpenid, senderId, parsed.PlainText.Length > 50 ? parsed.PlainText[..50] + "..." : parsed.PlainText);
             return;
         }
 
-        var shouldProcess = await _router.ShouldProcessGroupAsync(evt.GroupOpenid, isAtBot, parsed.PlainText);
-        if (!shouldProcess) return;
+        if (!route.ShouldProcess && !route.ShouldObserve) return;
 
-        var senderName = evt.Author?.MemberOpenid ?? "Member";
         var role = evt.Author?.MemberRole;
 
         var chatMsg = new ChatMessage
@@ -372,18 +433,31 @@ public class MessageEventHandler
             CreatedAt = DateTime.UtcNow
         };
 
-        await _messageWriter.WriteAsync(chatMsg);
-
-        try
+        // 只有围观档（TriggerMode=2）或 @ 到才落库；纯择机观察的消息留在内存窗口，评估完即丢，
+        // 不进历史库也不推给面板 —— 群友原话要不要留，是每群的设置而不是全局开关。
+        // reprocessAsAt 时这条已由全量事件落过库，只把“被 @ 的是 bot”补上，避免重复入库与重复弹卡片。
+        if (reprocessAsAt)
         {
-            await _notificationService.NotifyNewMessageAsync(new
-            {
-                chatMsg.Id, chatMsg.ChatType, chatMsg.GroupId, chatMsg.UserId,
-                chatMsg.UserName, chatMsg.PlainText, chatMsg.HasImage,
-                chatMsg.HasAtBot, chatMsg.IsBotMessage, chatMsg.CreatedAt
-            });
+            using var scope = _scopeFactory.CreateScope();
+            var repo = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
+            try { await repo.MarkAtBotAsync(evt.Id); }
+            catch (Exception ex) { _logger.LogWarning(ex, "补记 @ 标记失败 MsgId={MessageId}", evt.Id); }
         }
-        catch (Exception ex) { _logger.LogError(ex, "Notify new message failed"); }
+        else if (route.ShouldProcess)
+        {
+            await _messageWriter.WriteAsync(chatMsg);
+
+            try
+            {
+                await _notificationService.NotifyNewMessageAsync(new
+                {
+                    chatMsg.Id, chatMsg.ChatType, chatMsg.GroupId, chatMsg.UserId,
+                    chatMsg.UserName, chatMsg.PlainText, chatMsg.HasImage,
+                    chatMsg.HasAtBot, chatMsg.IsBotMessage, chatMsg.CreatedAt
+                });
+            }
+            catch (Exception ex) { _logger.LogError(ex, "Notify new message failed"); }
+        }
 
         _logger.LogDebug("Message queued: MsgId={MessageId}, Type={MessageType}, User={UserName}",
             evt.Id, "group", senderName);
@@ -394,6 +468,14 @@ public class MessageEventHandler
             {
                 try
                 {
+                    // /ui：用当前消息的被动回复槽位实探 markdown / 按钮能力（零主动配额）
+                    if (parsed.PlainText.TrimStart().StartsWith("/ui", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var report = await ProbeRichUiAsync(evt.GroupOpenid, evt.Id);
+                        await SendReplyAsync(evt.GroupOpenid, null, evt.Id, report);
+                        return;
+                    }
+
                     var reply = await _commandService.ExecuteGroupCommandAsync(senderId, parsed.PlainText, evt.GroupOpenid, role);
                     await SendReplyAsync(evt.GroupOpenid, null, evt.Id, reply);
                 }
@@ -402,10 +484,10 @@ public class MessageEventHandler
             return;
         }
 
-        if (isAtBot)
+        if (mention)
         {
             // 游戏指令路由：命中修仙RPG 关键词则走游戏，未命中继续走 AI 回复
-            var gameCmd = _gameCommandRouter.TryMatch(parsed.PlainText);
+            // （gameCmd 已在去重检查前预匹配，确保游戏指令绕过内容级去重）
             if (gameCmd != null)
             {
                 // 自由行动：显式前缀触发 AI 裁判
@@ -414,7 +496,7 @@ public class MessageEventHandler
                     if (string.IsNullOrWhiteSpace(gameCmd.Args))
                     {
                         await SendReplyAsync(evt.GroupOpenid, null, evt.Id,
-                            "请描述你想做的事，如：@我 行动 去后山采药");
+                            "请描述你想做的事，如：@我 行动 去后山采药", recallGame: true);
                         return;
                     }
                     _ = Task.Run(async () =>
@@ -425,7 +507,7 @@ public class MessageEventHandler
                                 evt.GroupOpenid, senderId, senderName, gameCmd.Args);
                             if (gameReply is null)
                             {
-                                await SendReplyAsync(evt.GroupOpenid, null, evt.Id, "AI裁判暂不可用，请稍后再试。");
+                                await SendReplyAsync(evt.GroupOpenid, null, evt.Id, "AI裁判暂不可用，请稍后再试。", recallGame: true);
                                 return;
                             }
                             // 保存到聊天历史 + Dashboard 统计
@@ -444,7 +526,7 @@ public class MessageEventHandler
                                 }
                                 catch (Exception ex) { _logger.LogError(ex, "Notify AI complete failed"); }
                             }
-                            await SendReplyAsync(evt.GroupOpenid, null, evt.Id, gameReply.Reply);
+                            await SendReplyAsync(evt.GroupOpenid, null, evt.Id, gameReply, evt.MessageScene?.MsgIdx);
                         }
                         catch (Exception ex) { _logger.LogError(ex, "Free action failed"); }
                     });
@@ -458,8 +540,9 @@ public class MessageEventHandler
                     {
                         var reply = await _cultivationGameService.HandleAsync(
                             evt.GroupOpenid, senderId, senderName, gameCmd);
-                        await SaveBotMessageAsync(evt.GroupOpenid, reply);
-                        await SendReplyAsync(evt.GroupOpenid, null, evt.Id, reply); // 被动回复，零配额
+                        await SaveBotMessageAsync(evt.GroupOpenid, reply.Reply);
+                        // 被动回复，零配额；带面板时同一消息里挂上菜单
+                        await SendReplyAsync(evt.GroupOpenid, null, evt.Id, reply, evt.MessageScene?.MsgIdx);
                     }
                     catch (Exception ex) { _logger.LogError(ex, "Game command failed"); }
                 });
@@ -473,18 +556,9 @@ public class MessageEventHandler
                 catch (Exception ex) { _logger.LogError(ex, "AI reply failed"); }
             });
         }
-        else
+        else if (route.ShouldObserve)
         {
-            var (proactive, kw) = await _router.CheckProactiveTriggerAsync(evt.GroupOpenid, parsed.PlainText);
-            if (proactive)
-            {
-                _logger.LogInformation("Proactive trigger: GroupId={GroupId}, Keyword={Keyword}", evt.GroupOpenid, kw);
-                _ = Task.Run(async () =>
-                {
-                    try { await ProcessProactiveReplyAsync(evt.GroupOpenid, senderName, parsed, evt.Id, kw); }
-                    catch (Exception ex) { _logger.LogError(ex, "Proactive response failed"); }
-                });
-            }
+            _observe.Observe(evt.GroupOpenid, senderName, parsed.PlainText, evt.Id, parsed.ImageUrls);
         }
     }
 
@@ -499,7 +573,9 @@ public class MessageEventHandler
         if (!shouldProcess) return;
 
         var senderId = evt.Author?.UserOpenid ?? string.Empty;
-        var senderName = evt.Author?.UserOpenid ?? "User";
+        var senderName = !string.IsNullOrWhiteSpace(evt.Author?.Username)
+            ? evt.Author!.Username!
+            : senderId.Length > 0 ? senderId : "User";
 
         var chatMsg = new ChatMessage
         {
@@ -560,9 +636,11 @@ public class MessageEventHandler
 
     private async Task ProcessAiReplyAsync(string? groupOpenId, string? userOpenId, string senderId, string senderName, ParsedMessage parsed, string msgId)
     {
-        if (!await _aiSemaphore.WaitAsync(TimeSpan.FromSeconds(5)))
+        // 排队窗口 15s：单次回复通常 3~8s，5s 会把突发消息直接拒掉；等待是异步的，不占线程。
+        // 主动接话那条路径仍用 5s——它被拒时可静默跳过，不该长时间占位。
+        if (!await _aiSemaphore.WaitAsync(TimeSpan.FromSeconds(15)))
         {
-            await SendReplyAsync(groupOpenId, userOpenId, msgId, "AI is busy, please try again later~");
+            await SendReplyAsync(groupOpenId, userOpenId, msgId, "AI 繁忙，请稍后再试。");
             return;
         }
 
@@ -577,11 +655,7 @@ public class MessageEventHandler
             else
                 context = await _contextBuilder.BuildPrivateContextAsync(senderId, parsed.PlainText, senderName);
 
-            var systemPrompt = context.EffectiveConfig.BuildEffectiveSystemPrompt();
-            if (!string.IsNullOrEmpty(context.CharacterPrompt))
-                systemPrompt += "\n\n" + context.CharacterPrompt
-                    + "\n\n【重要】以上角色设定是你的核心身份，在任何情况下都不得脱离角色。"
-                    + "历史消息中可能包含系统通知或其他风格的回复，请忽略它们，始终保持你的角色设定和语气。";
+            var systemPrompt = context.ComposeSystemPrompt();
 
             AiChatResponse response;
 
@@ -608,6 +682,8 @@ public class MessageEventHandler
                 ChatType = groupOpenId is not null ? 0 : 1,
                 GroupId = groupOpenId,
                 UserId = _botId,
+                // 私聊上下文靠这个字段认领"这条回复是对谁说的"；不写就等于下次读不到自己上一轮的话
+                PeerUserId = groupOpenId is null ? userOpenId : null,
                 UserName = "Bot",
                 PlainText = response.Content,
                 IsBotMessage = true,
@@ -640,105 +716,299 @@ public class MessageEventHandler
         catch (Exception ex)
         {
             _logger.LogError(ex, "AI processing failed");
-            await SendReplyAsync(groupOpenId, userOpenId, msgId, "Sorry, AI processing failed. Please try again.");
+            await SendReplyAsync(groupOpenId, userOpenId, msgId, "AI 处理失败，请稍后再试。");
         }
         finally { _aiSemaphore.Release(); }
     }
 
-    private async Task ProcessProactiveReplyAsync(string groupOpenId, string senderName, ParsedMessage parsed, string msgId, string keyword)
-    {
-        if (!await _aiSemaphore.WaitAsync(TimeSpan.FromSeconds(5))) return;
-
-        try
-        {
-            var context = await _contextBuilder.BuildGroupContextAsync(groupOpenId, parsed.PlainText, senderName);
-
-            var systemPrompt = context.EffectiveConfig.BuildEffectiveSystemPrompt();
-            systemPrompt += $"\n\nYou noticed someone mentioned the keyword \"{keyword}\". " +
-                "You can proactively join the conversation and share your thoughts. " +
-                "Keep it natural and brief, like a regular group member chiming in.";
-
-            if (!string.IsNullOrEmpty(context.CharacterPrompt))
-                systemPrompt += "\n\n" + context.CharacterPrompt
-                    + "\n\n【重要】以上角色设定是你的核心身份，在任何情况下都不得脱离角色。"
-                    + "历史消息中可能包含系统通知或其他风格的回复，请忽略它们，始终保持你的角色设定和语气。";
-
-            var response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig);
-
-            var botMsg = new ChatMessage
-            {
-                MessageId = $"bot-{Guid.NewGuid():N}",
-                ChatType = 0,
-                GroupId = groupOpenId,
-                UserId = _botId,
-                UserName = "Bot",
-                PlainText = response.Content,
-                IsBotMessage = true,
-                AiModelUsed = response.Model,
-                PromptTokens = response.PromptTokens,
-                CompletionTokens = response.CompletionTokens,
-                CreatedAt = DateTime.UtcNow
-            };
-
-            using (var scope = _scopeFactory.CreateScope())
-            {
-                var repo = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
-                await repo.SaveMessageAsync(botMsg);
-            }
-
-            try
-            {
-                await _notificationService.NotifyAiResponseCompletedAsync(new
-                {
-                    GroupId = groupOpenId, Model = response.Model,
-                    TotalTokens = response.TotalTokens, Content = response.Content
-                });
-            }
-            catch (Exception ex) { _logger.LogError(ex, "Notify AI complete failed"); }
-
-            await SendReplyAsync(groupOpenId, null, msgId, response.Content);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Proactive response failed");
-        }
-        finally { _aiSemaphore.Release(); }
-    }
-
-    private async Task SendReplyAsync(string? groupOpenId, string? userOpenId, string? msgId, string content)
+    private async Task SendReplyAsync(string? groupOpenId, string? userOpenId, string? msgId, string content, bool recallGame = false)
     {
         // 回复去重：同群/同用户在窗口期内已发送过相同内容则跳过，
         // 防止 QQ 服务端用不同 msgId/不同 @ 段格式重复投递时用户看到重复回复。
         // 注意：仅在 msgId 不为空（即被动回复场景）时启用，避免影响主动推送。
-        if (msgId is not null)
-        {
-            var scope = groupOpenId is not null ? $"g:{groupOpenId}" : $"u:{userOpenId}";
-            if (ShouldSkipDuplicateReply(scope, content))
-            {
-                _logger.LogWarning("检测到重复回复，跳过发送: Scope={Scope}, MsgId={MsgId}, Content={Content}",
-                    scope, msgId, content.Length > 50 ? content[..50] + "..." : content);
-                return;
-            }
-        }
+        if (msgId is not null && ShouldSkipReply(groupOpenId, userOpenId, msgId, content)) return;
 
         try
         {
             if (groupOpenId is not null)
-                await _apiService.SendGroupMessageAsync(groupOpenId, content, msgId, NextSeq(msgId));
+            {
+                var sentId = await _apiService.SendGroupMessageAsync(groupOpenId, content, msgId, _seqTracker.Next(msgId));
+                if (recallGame) _gameRecall.Schedule(groupOpenId, sentId);
+            }
             else if (userOpenId is not null)
-                await _apiService.SendPrivateMessageAsync(userOpenId, content, msgId, NextSeq(msgId));
+                await _apiService.SendPrivateMessageAsync(userOpenId, content, msgId, _seqTracker.Next(msgId));
         }
         catch (QqApiException ex) when (msgId is not null && (groupOpenId is not null || userOpenId is not null))
         {
             _logger.LogWarning("被动回复失败，降级主动消息 err={ErrCode}", ex.ErrCode);
             if (groupOpenId is not null)
-                await _activeMessage.SendGroupActiveAsync(groupOpenId, content);
+            {
+                var result = await _activeMessage.SendGroupActiveAsync(groupOpenId, content);
+                if (recallGame) _gameRecall.Schedule(groupOpenId, result.MessageId);
+            }
             else
                 await _activeMessage.SendPrivateActiveAsync(userOpenId!, content);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Send reply failed");
+        }
+    }
+
+    private enum DegradeKind { None, Keyboard, Markdown }
+
+    /// <summary>
+    /// 富交互回复出口：一条消息内同时完成“面板正文 + 菜单”，不额外发第二条。
+    /// 被平台拒绝时就地按能力降级：按钮被拒 → 无按钮 markdown；markdown 被拒 → 纯文本；
+    /// 被动槽位失效 → 沿用原有“降级主动消息”分支。降级重发占用下一个 msg_seq，
+    /// 而官方每消息被动回复上限 5 次，故仅在真被拒时多花一个槽位。
+    /// </summary>
+    private async Task SendReplyAsync(
+        string? groupOpenId, string? userOpenId, string? msgId, GameUiReply reply,
+        string? refMsgIdx = null, string? eventId = null)
+    {
+        var panel = reply.Panel;
+        var useMarkdown = panel is not null && panel.Markdown.Length > 0
+            && _richUi.UseMarkdown(groupOpenId);
+        var refId = _richUi.UseMessageReference(groupOpenId) ? refMsgIdx : null;
+
+        if (msgId is not null && ShouldSkipReply(groupOpenId, userOpenId, msgId,
+                useMarkdown ? panel!.Markdown : reply.Reply))
+            return;
+
+        var outbound = new OutboundMessage
+        {
+            PlainText = reply.Reply,
+            MarkdownText = useMarkdown ? panel!.Markdown : null,
+            Keyboard = useMarkdown ? panel!.Keyboard : null,
+            MsgId = msgId,
+            EventId = eventId,
+            MsgSeq = _seqTracker.Next(msgId),
+            RefMessageId = refId,
+        };
+
+        var degrade = DegradeKind.None;
+        try
+        {
+            var sentId = await SendOutboundAsync(groupOpenId, userOpenId, outbound);
+            if (groupOpenId is not null) _gameRecall.Schedule(groupOpenId, sentId);
+            if (useMarkdown)
+            {
+                _richUi.MarkOk(RichUiCapability.CapMarkdown);
+                _richUi.CountMarkdownSent();
+                if (outbound.Keyboard is not null) _richUi.MarkOk(RichUiCapability.CapKeyboard);
+            }
+            return;
+        }
+        catch (QqApiException ex) when (useMarkdown && outbound.Keyboard is not null
+                                        && QqApiErrorCodes.IsKeyboardDenied(ex.ErrCode))
+        {
+            // 按钮组件无权限/参数被拒：后续消息会自动改为文字链或无按钮，本条先保证发出去
+            _richUi.ReportDenied(RichUiCapability.CapKeyboard, ex.ErrCode);
+            degrade = DegradeKind.Keyboard;
+            _logger.LogWarning("RichUi 按钮被拒，本条降级无按钮 markdown err={ErrCode}", ex.ErrCode);
+        }
+        catch (QqApiException ex) when (useMarkdown && QqApiErrorCodes.IsMarkdownDenied(ex.ErrCode))
+        {
+            _richUi.ReportDenied(RichUiCapability.CapMarkdown, ex.ErrCode);
+            degrade = DegradeKind.Markdown;
+            _logger.LogWarning("RichUi markdown 被拒，降级纯文本 err={ErrCode}", ex.ErrCode);
+        }
+        catch (QqApiException ex) when ((msgId is not null || eventId is not null)
+                                        && (groupOpenId is not null || userOpenId is not null))
+        {
+            _logger.LogWarning("被动回复失败，降级主动消息 err={ErrCode}", ex.ErrCode);
+            _richUi.CountPlainFallback();
+            if (groupOpenId is not null)
+            {
+                var result = await _activeMessage.SendGroupActiveAsync(groupOpenId, reply.Reply);
+                _gameRecall.Schedule(groupOpenId, result.MessageId);
+            }
+            else if (userOpenId is not null)
+                await _activeMessage.SendPrivateActiveAsync(userOpenId, reply.Reply);
+            return;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Send rich reply failed");
+            return;
+        }
+
+        if (degrade == DegradeKind.None) return;
+        _richUi.CountDegradeRetry();
+        if (degrade == DegradeKind.Markdown) _richUi.CountPlainFallback();
+
+        var retry = degrade == DegradeKind.Keyboard
+            ? outbound with { Keyboard = null, MsgSeq = _seqTracker.Next(msgId) }
+            : outbound with { MarkdownText = null, Keyboard = null, MsgSeq = _seqTracker.Next(msgId) };
+
+        try
+        {
+            var retryId = await SendOutboundAsync(groupOpenId, userOpenId, retry);
+            if (groupOpenId is not null) _gameRecall.Schedule(groupOpenId, retryId);
+        }
+        catch (QqApiException ex) when (groupOpenId is not null || userOpenId is not null)
+        {
+            _logger.LogWarning("降级重发仍失败，转主动消息 err={ErrCode}", ex.ErrCode);
+            if (groupOpenId is not null)
+            {
+                var result = await _activeMessage.SendGroupActiveAsync(groupOpenId, reply.Reply);
+                _gameRecall.Schedule(groupOpenId, result.MessageId);
+            }
+            else if (userOpenId is not null)
+                await _activeMessage.SendPrivateActiveAsync(userOpenId!, reply.Reply);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Degraded reply failed");
+        }
+    }
+
+    private async Task<string?> SendOutboundAsync(string? groupOpenId, string? userOpenId, OutboundMessage msg)
+    {
+        if (groupOpenId is not null)
+            return await _apiService.SendGroupRichAsync(groupOpenId, msg);
+        if (userOpenId is not null)
+            return await _apiService.SendPrivateRichAsync(userOpenId, msg);
+        return null;
+    }
+
+    /// <summary>回复内容去重（仅被动回复场景）。返回 true 表示应跳过发送。</summary>
+    private bool ShouldSkipReply(string? groupOpenId, string? userOpenId, string? msgId, string content)
+    {
+        var scope = groupOpenId is not null ? $"g:{groupOpenId}" : $"u:{userOpenId}";
+        if (!ShouldSkipDuplicateReply(scope, content)) return false;
+
+        _logger.LogWarning("检测到重复回复，跳过发送: Scope={Scope}, MsgId={MsgId}, Content={Content}",
+            scope, msgId, content.Length > 50 ? content[..50] + "..." : content);
+        return true;
+    }
+
+    /// <summary>
+    /// 按钮回调。官方要求 3 秒内回应互动，否则客户端一直 loading，因此“先 ACK、后异步结算”，
+    /// 结算结果用 event_id 走被动回复（不占用主动消息的分钟/每日频控额度）。
+    /// </summary>
+    private async Task HandleButtonInteractionAsync(InteractionCreateEvent evt)
+    {
+        var now = DateTime.UtcNow;
+        if (!_handledInteractions.TryAdd(evt.Id, now))
+        {
+            _logger.LogDebug("重复互动事件已忽略 interaction={Id}", evt.Id);
+            return;
+        }
+        PruneHandledInteractions(now);
+
+        // 无论后续能不能处理，先 ACK 解除用户侧 loading（最多等 1.5s，不拖死事件回包）
+        await AckInteractionAsync(evt.Id);
+
+        if (evt.ChatType != 1 || string.IsNullOrEmpty(evt.GroupOpenid) || string.IsNullOrEmpty(evt.ActorOpenid))
+        {
+            _logger.LogDebug("非群聊按钮事件，仅 ACK scene={Scene}", evt.Scene);
+            return;
+        }
+
+        var cmd = _gameCommandRouter.TryMatchButtonCommand(evt.ButtonData);
+        if (cmd is null)
+        {
+            _logger.LogWarning("按钮 data 未命中游戏指令 data={Data}", evt.ButtonData);
+            return;
+        }
+
+        var groupId = evt.GroupOpenid!;
+        var actorId = evt.ActorOpenid!;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var reply = await _cultivationGameService.HandleAsync(groupId, actorId, actorId, cmd);
+                await SaveBotMessageAsync(groupId, reply.Reply);
+                // 被动回复的 event_id 必须带 "INTERACTION_CREATE:" 前缀（裸 Id 会被判 40034025 无效）
+                await SendReplyAsync(groupId, null, msgId: null, reply, eventId: evt.PassiveReplyEventId);
+            }
+            catch (Exception ex) { _logger.LogError(ex, "Button interaction failed group={GroupId}", groupId); }
+        });
+    }
+
+    private async Task AckInteractionAsync(string interactionId)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
+            await _apiService.ReplyInteractionAsync(interactionId, InteractionReply.Ok(), cts.Token);
+        }
+        catch (Exception ex)
+        {
+            // ACK 失败只影响用户侧按钮转圈超时，不影响已经发出的结算
+            _logger.LogWarning(ex, "回应互动失败 interaction={Id}", interactionId);
+        }
+    }
+
+    /// <summary>
+    /// 富交互实探：向本群发两条探测消息（纯 markdown / markdown+按钮），
+    /// 用平台真实返回结果确定能力态，帮管理员判断能否进入下一个灰度阶段。
+    /// 走被动槽位，不花主动消息配额。
+    /// </summary>
+    private async Task<string> ProbeRichUiAsync(string groupOpenId, string msgId)
+    {
+        var markdown = await TryProbeAsync(groupOpenId, msgId, withKeyboard: false);
+        var keyboard = await TryProbeAsync(groupOpenId, msgId, withKeyboard: true);
+        _richUi.ResetForDiagnostics();   // 按最新探测结果重新决策，不等 TTL
+
+        var snap = _richUi.Snapshot();
+        var opt = _richUi.Options;
+        return "富交互自检\n"
+            + $"markdown：{markdown}\n"
+            + $"按钮：{keyboard}\n"
+            + $"配置：总开关={(opt.Enabled ? "开" : "关")} 键盘={opt.KeyboardMode} "
+            + $"文字链={(opt.CmdInputLinks ? "开" : "关")} @标签={(opt.AtUserTags ? "开" : "关")}\n"
+            + $"白名单群数：{opt.GroupAllowList.Count}（0=全部）\n"
+            + $"累计：富消息 {snap.RichSent} 按钮 {snap.KeyboardSent} "
+            + $"文字链 {snap.LinkOnlySent} 降级 {snap.DegradeRetries} 转纯文本 {snap.PlainFallback}";
+    }
+
+    private async Task<string> TryProbeAsync(string groupOpenId, string msgId, bool withKeyboard)
+    {
+        var menu = GameMenuCatalog.For(GameAction.Help, MenuContext.Empty);
+        var keyboard = withKeyboard
+            ? GameKeyboard.From(menu, GameKeyboardMode.Command, _richUi.Options, _logger)
+            : null;
+
+        var probe = new OutboundMessage
+        {
+            MarkdownText = withKeyboard
+                ? "### 富交互自检（按钮）\n若下方出现按钮，说明消息按钮组件可用。"
+                : "### 富交互自检（文本）\n本行应为标题样式，说明 markdown 可用。",
+            Keyboard = keyboard,
+            MsgId = msgId,
+            MsgSeq = _seqTracker.Next(msgId),
+        };
+
+        try
+        {
+            await _apiService.SendGroupRichAsync(groupOpenId, probe);
+            return "可用";
+        }
+        catch (QqApiException ex)
+        {
+            _logger.LogWarning("RichUi 探测失败 withKeyboard={WithKeyboard} err={ErrCode}", withKeyboard, ex.ErrCode);
+            return $"不可用（err={ex.ErrCode}）";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "RichUi 探测异常");
+            return "探测异常";
+        }
+    }
+
+    private void PruneHandledInteractions(DateTime now)
+    {
+        if (_handledInteractions.Count <= 2000) return;
+        var cutoff = now.AddMinutes(-10);
+        foreach (var kv in _handledInteractions)
+        {
+            if (kv.Value < cutoff)
+                _handledInteractions.TryRemove(kv.Key, out _);
         }
     }
 

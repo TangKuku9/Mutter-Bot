@@ -46,22 +46,95 @@ public class QqBotApiService : IQqBotApiService
         _logger.LogInformation("QQ Bot 初始化完成: BotId={BotId}, BotName={BotName}", BotId, BotName);
     }
 
-    public async Task SendGroupMessageAsync(string groupOpenId, string content, string? msgId = null, int? msgSeq = null, CancellationToken ct = default)
+    public async Task<string?> SendGroupMessageAsync(string groupOpenId, string content, string? msgId = null, int? msgSeq = null, CancellationToken ct = default)
     {
-        var body = SendMessageRequest.Text(content, msgId, msgSeq);
+        return await SendGroupRichAsync(groupOpenId, OutboundMessage.Text(content, msgId, msgSeq), ct);
+    }
+
+    public async Task<string?> SendPrivateMessageAsync(string userOpenId, string content, string? msgId = null, int? msgSeq = null, CancellationToken ct = default)
+    {
+        return await SendPrivateRichAsync(userOpenId, OutboundMessage.Text(content, msgId, msgSeq), ct);
+    }
+
+    public async Task<string?> SendGroupRichAsync(string groupOpenId, OutboundMessage msg, CancellationToken ct = default)
+    {
+        var body = SendMessageRequest.From(msg);
         var resp = await SendAsync(HttpMethod.Post, $"/v2/groups/{groupOpenId}/messages", body, ct);
         await EnsureSuccessAsync(resp, ct);
 
-        _logger.LogDebug("已发送群消息: group={GroupOpenId}, msg={Message}", groupOpenId, content);
+        var sentId = await ReadSentMessageIdAsync(resp, ct);
+        _logger.LogDebug(
+            "已发送群消息: group={GroupOpenId}, msgType={MsgType}, keyboard={HasKeyboard}, sentId={SentId}, msg={Message}",
+            groupOpenId, body.MsgType, body.Keyboard is not null, sentId ?? "-", Describe(msg));
+        return sentId;
     }
 
-    public async Task SendPrivateMessageAsync(string userOpenId, string content, string? msgId = null, int? msgSeq = null, CancellationToken ct = default)
+    public async Task<string?> SendPrivateRichAsync(string userOpenId, OutboundMessage msg, CancellationToken ct = default)
     {
-        var body = SendMessageRequest.Text(content, msgId, msgSeq);
+        var body = SendMessageRequest.From(msg);
         var resp = await SendAsync(HttpMethod.Post, $"/v2/users/{userOpenId}/messages", body, ct);
         await EnsureSuccessAsync(resp, ct);
 
-        _logger.LogDebug("已发送私聊消息: user={UserOpenId}, msg={Message}", userOpenId, content);
+        var sentId = await ReadSentMessageIdAsync(resp, ct);
+        _logger.LogDebug(
+            "已发送私聊消息: user={UserOpenId}, msgType={MsgType}, sentId={SentId}, msg={Message}",
+            userOpenId, body.MsgType, sentId ?? "-", Describe(msg));
+        return sentId;
+    }
+
+    public async Task<bool> DeleteGroupMessageAsync(string groupOpenId, string messageId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(groupOpenId) || string.IsNullOrEmpty(messageId)) return false;
+
+        try
+        {
+            var resp = await SendAsync(HttpMethod.Delete, $"/v2/groups/{groupOpenId}/messages/{messageId}", null, ct);
+            await EnsureSuccessAsync(resp, ct);
+            return true;
+        }
+        catch (QqApiException ex) when (ex.ErrCode == 40064004)
+        {
+            _logger.LogDebug("撤回超时跳过（发送已超 2 分钟）: group={GroupOpenId}, messageId={MessageId}", groupOpenId, messageId);
+            return false;
+        }
+        catch (QqApiException ex)
+        {
+            _logger.LogWarning("撤回群消息失败 err={ErrCode} group={GroupOpenId}, messageId={MessageId}", ex.ErrCode, groupOpenId, messageId);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "撤回群消息异常 group={GroupOpenId}, messageId={MessageId}", groupOpenId, messageId);
+            return false;
+        }
+    }
+
+    /// <summary>发送接口响应体中携带平台分配的消息 id（形如 ROBOT1.0_...），解析失败返回 null。</summary>
+    private async Task<string?> ReadSentMessageIdAsync(HttpResponseMessage resp, CancellationToken ct)
+    {
+        try
+        {
+            var json = await resp.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, ct);
+            return json.TryGetProperty("id", out var id) ? id.GetString() : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    public async Task ReplyInteractionAsync(string interactionId, InteractionReply reply, CancellationToken ct = default)
+    {
+        var resp = await SendAsync(HttpMethod.Put, $"/interactions/{interactionId}", reply.ToWire(), ct);
+        await EnsureSuccessAsync(resp, ct);
+    }
+
+    /// <summary>日志降噪：只记正文前 80 字预览，避免 markdown 长面板刷屏日志。</summary>
+    private static string Describe(OutboundMessage msg)
+    {
+        var text = msg.UseMarkdown ? msg.MarkdownText : msg.PlainText;
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+        return text.Length > 80 ? text[..80] + "…" : text;
     }
 
     public async Task<string?> UploadMediaAsync(string groupOpenId, int fileType, string url, CancellationToken ct = default)

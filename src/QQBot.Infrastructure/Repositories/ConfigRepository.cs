@@ -48,11 +48,8 @@ public class ConfigRepository : IConfigRepository
             TriggerMode = entity.TriggerMode,
             CustomSystemPrompt = entity.CustomSystemPrompt,
             CustomTemperature = entity.CustomTemperature,
-            Keywords = string.IsNullOrEmpty(entity.Keywords)
-                ? null
-                : entity.Keywords.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList(),
-            ProactiveKeywords = entity.ProactiveKeywords,
-            ProactiveEnabled = entity.ProactiveEnabled,
+            AiProactiveEnabled = entity.AiProactiveEnabled,
+            BotMentionOpenId = entity.BotMentionOpenId,
             ActiveCharacter = entity.ActiveCharacter
         };
     }
@@ -106,9 +103,8 @@ public class ConfigRepository : IConfigRepository
                 TriggerMode = config.TriggerMode,
                 CustomSystemPrompt = config.CustomSystemPrompt,
                 CustomTemperature = config.CustomTemperature,
-                Keywords = config.Keywords != null ? string.Join(',', config.Keywords) : null,
-                ProactiveKeywords = config.ProactiveKeywords,
-                ProactiveEnabled = config.ProactiveEnabled,
+                AiProactiveEnabled = config.AiProactiveEnabled,
+                BotMentionOpenId = config.BotMentionOpenId,
                 ActiveCharacter = config.ActiveCharacter
             };
             _dbContext.GroupConfigs.Add(entity);
@@ -119,9 +115,8 @@ public class ConfigRepository : IConfigRepository
             entity.TriggerMode = config.TriggerMode;
             entity.CustomSystemPrompt = config.CustomSystemPrompt;
             entity.CustomTemperature = config.CustomTemperature;
-            entity.Keywords = config.Keywords != null ? string.Join(',', config.Keywords) : null;
-            entity.ProactiveKeywords = config.ProactiveKeywords;
-            entity.ProactiveEnabled = config.ProactiveEnabled;
+            entity.AiProactiveEnabled = config.AiProactiveEnabled;
+            entity.BotMentionOpenId = config.BotMentionOpenId;
             entity.ActiveCharacter = config.ActiveCharacter;
         }
 
@@ -138,11 +133,8 @@ public class ConfigRepository : IConfigRepository
                 TriggerMode = e.TriggerMode,
                 CustomSystemPrompt = e.CustomSystemPrompt,
                 CustomTemperature = e.CustomTemperature,
-                Keywords = string.IsNullOrEmpty(e.Keywords)
-                    ? null
-                    : e.Keywords.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList(),
-                ProactiveKeywords = e.ProactiveKeywords,
-                ProactiveEnabled = e.ProactiveEnabled,
+                AiProactiveEnabled = e.AiProactiveEnabled,
+                BotMentionOpenId = e.BotMentionOpenId,
                 ActiveCharacter = e.ActiveCharacter
             })
             .ToListAsync(ct);
@@ -154,6 +146,62 @@ public class ConfigRepository : IConfigRepository
             .FirstOrDefaultAsync(p => p.UserId == userId, ct);
         // 无记录时默认启用（全新数据库兜底；用户可通过 /private off 显式关闭）
         return entity?.IsEnabled ?? true;
+    }
+
+    /// <summary>
+    /// 择机发言配置。无行时返回默认值（Enabled=false），读取路径不写库——
+    /// 冷启动时多个后台服务同时读，写兜底行会造成并发主键冲突。
+    /// </summary>
+    public async Task<ProactiveChatConfig> GetProactiveConfigAsync(CancellationToken ct = default)
+    {
+        var entity = await _dbContext.ProactiveChatConfigs.FirstOrDefaultAsync(ct);
+        if (entity is null) return new ProactiveChatConfig().Normalize();
+
+        return new ProactiveChatConfig
+        {
+            Enabled = entity.Enabled,
+            WindowSeconds = entity.WindowSeconds,
+            WindowMaxMessages = entity.WindowMaxMessages,
+            CooldownMinutes = entity.CooldownMinutes,
+            MaxPerGroupPerDay = entity.MaxPerGroupPerDay,
+            MaxGlobalPerDay = entity.MaxGlobalPerDay,
+            QuietStartHour = entity.QuietStartHour,
+            QuietEndHour = entity.QuietEndHour,
+            Liveliness = entity.Liveliness,
+            AllowActiveChannel = entity.AllowActiveChannel,
+            ActivePerGroupPerMinute = entity.ActivePerGroupPerMinute,
+            ActivePerGroupPerDay = entity.ActivePerGroupPerDay,
+            ActivePerAccountPerMinute = entity.ActivePerAccountPerMinute,
+            UpdatedAt = entity.UpdatedAt
+        }.Normalize();
+    }
+
+    public async Task SaveProactiveConfigAsync(ProactiveChatConfig config, CancellationToken ct = default)
+    {
+        var normalized = config.Normalize();
+        var entity = await _dbContext.ProactiveChatConfigs.FirstOrDefaultAsync(e => e.Id == 1, ct);
+        if (entity is null)
+        {
+            entity = new ProactiveChatConfigEntity { Id = 1 };
+            _dbContext.ProactiveChatConfigs.Add(entity);
+        }
+
+        entity.Enabled = normalized.Enabled;
+        entity.WindowSeconds = normalized.WindowSeconds;
+        entity.WindowMaxMessages = normalized.WindowMaxMessages;
+        entity.CooldownMinutes = normalized.CooldownMinutes;
+        entity.MaxPerGroupPerDay = normalized.MaxPerGroupPerDay;
+        entity.MaxGlobalPerDay = normalized.MaxGlobalPerDay;
+        entity.QuietStartHour = normalized.QuietStartHour;
+        entity.QuietEndHour = normalized.QuietEndHour;
+        entity.Liveliness = normalized.Liveliness;
+        entity.AllowActiveChannel = normalized.AllowActiveChannel;
+        entity.ActivePerGroupPerMinute = normalized.ActivePerGroupPerMinute;
+        entity.ActivePerGroupPerDay = normalized.ActivePerGroupPerDay;
+        entity.ActivePerAccountPerMinute = normalized.ActivePerAccountPerMinute;
+        entity.UpdatedAt = DateTime.UtcNow;
+
+        await _dbContext.SaveChangesAsync(ct);
     }
 
     public async Task<bool> IsPrivateChatAdminAsync(string userId, CancellationToken ct = default)
@@ -277,5 +325,58 @@ public class ConfigRepository : IConfigRepository
                 Nickname = e.Nickname ?? string.Empty
             })
             .ToListAsync(ct);
+    }
+
+    public async Task<List<AiCharacter>> GetCustomCharactersAsync(CancellationToken ct = default)
+    {
+        return await _dbContext.CustomCharacters
+            .OrderBy(e => e.CreatedAt)
+            .Select(e => new AiCharacter
+            {
+                Name = e.Name,
+                DisplayName = e.DisplayName,
+                Description = e.Description,
+                SystemPromptOverride = e.SystemPrompt
+            })
+            .ToListAsync(ct);
+    }
+
+    public async Task SaveCustomCharacterAsync(AiCharacter character, CancellationToken ct = default)
+    {
+        var entity = await _dbContext.CustomCharacters
+            .FirstOrDefaultAsync(c => c.Name == character.Name, ct);
+        if (entity == null)
+        {
+            entity = new CustomCharacterEntity
+            {
+                Name = character.Name,
+                DisplayName = character.DisplayName,
+                Description = character.Description,
+                SystemPrompt = character.SystemPromptOverride,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
+            _dbContext.CustomCharacters.Add(entity);
+        }
+        else
+        {
+            entity.DisplayName = character.DisplayName;
+            entity.Description = character.Description;
+            entity.SystemPrompt = character.SystemPromptOverride;
+            entity.UpdatedAt = DateTime.UtcNow;
+        }
+
+        await _dbContext.SaveChangesAsync(ct);
+    }
+
+    public async Task<bool> DeleteCustomCharacterAsync(string name, CancellationToken ct = default)
+    {
+        var entity = await _dbContext.CustomCharacters
+            .FirstOrDefaultAsync(c => c.Name == name, ct);
+        if (entity == null) return false;
+
+        _dbContext.CustomCharacters.Remove(entity);
+        await _dbContext.SaveChangesAsync(ct);
+        return true;
     }
 }

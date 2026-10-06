@@ -36,10 +36,20 @@ public class MessageRepository : IMessageRepository
             .ToListAsync(ct);
     }
 
-    public async Task<List<ChatMessage>> GetPrivateHistoryAsync(string userId, int limit = 20, CancellationToken ct = default)
+    public async Task<List<ChatMessage>> GetPrivateHistoryAsync(
+        string userId, int limit = 20, DateTime? since = null, CancellationToken ct = default)
     {
-        return await _dbContext.ChatMessages
-            .Where(m => m.ChatType == 1 && m.UserId == userId)
+        // 私聊上下文必须两侧都要：只取用户自己那几行，模型看到的就是一串"没人回答的提问"，
+        // 于是它替自己编出上一轮答过什么（线上真实后果：对方只说了句「咕咕嘎嘎」，
+        // bot 回「催啥催嘛我这转半天打不开」——它在回答一个不存在的追问）。
+        // bot 行的 UserId 是 bot 自己，所以按 PeerUserId 认领对话对象，避免把对 A 说的话带进 B 的上下文。
+        var query = _dbContext.ChatMessages.Where(m => m.ChatType == 1 &&
+            (m.UserId == userId && !m.IsBotMessage || m.IsBotMessage && m.PeerUserId == userId));
+
+        if (since is not null)
+            query = query.Where(m => m.CreatedAt >= since);
+
+        return await query
             .OrderByDescending(m => m.CreatedAt)
             .Take(limit)
             .OrderBy(m => m.CreatedAt)
@@ -52,12 +62,30 @@ public class MessageRepository : IMessageRepository
             .AnyAsync(m => m.MessageId == messageId, ct);
     }
 
-    public async Task<(List<ChatMessage> Items, int TotalCount)> GetPagedMessagesAsync(string? groupId, int page, int pageSize, CancellationToken ct = default)
+    public async Task<int> MarkAtBotAsync(string messageId, CancellationToken ct = default)
+    {
+        // 单条 UPDATE，不存在就 0 行，不需要先查一遍
+        return await _dbContext.ChatMessages
+            .Where(m => m.MessageId == messageId && !m.HasAtBot)
+            .ExecuteUpdateAsync(s => s.SetProperty(m => m.HasAtBot, true), ct);
+    }
+
+    public async Task<(List<ChatMessage> Items, int TotalCount)> GetPagedMessagesAsync(
+        string? groupId, int page, int pageSize, string? source = null, CancellationToken ct = default)
     {
         var query = _dbContext.ChatMessages.AsQueryable();
 
         if (!string.IsNullOrEmpty(groupId))
             query = query.Where(m => m.GroupId == groupId);
+
+        query = source switch
+        {
+            "at" => query.Where(m => !m.IsBotMessage && m.HasAtBot),
+            "observe" => query.Where(m => !m.IsBotMessage && !m.HasAtBot),
+            "bot" => query.Where(m => m.IsBotMessage && !m.IsProactive),
+            "proactive" => query.Where(m => m.IsBotMessage && m.IsProactive),
+            _ => query
+        };
 
         var totalCount = await query.CountAsync(ct);
 

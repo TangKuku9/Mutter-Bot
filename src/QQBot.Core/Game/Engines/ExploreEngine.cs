@@ -34,6 +34,38 @@ public class ExploreEngine
             null, 0, 0, 120, 0),
         new("妖兽袭击", "林中妖兽扑来，你狼狈逃脱，丢了些灵草。", "tribulation",
             null, 0, 0, -20, -1),
+        new("紫晶芝崖", "崖壁上生着几株紫晶芝，紫气莹然。", "opportunity",
+            "zijing_zhi", 1, 1, 5, 0),
+        new("坠星荒原", "荒原深处拾得一块蕴灵碎石，聊胜于无。", "opportunity",
+            "lingkuang", 1, 1, 8, 0),
+        new("百草园废圈", "废圈残存灵草丛生，你俯身采了满怀。", "opportunity",
+            "lingcao", 2, 4, 12, 0),
+        new("雾隐药谷", "浓雾深锁的药谷里，药草带着晨露清香。", "opportunity",
+            "yaocao", 1, 3, 10, 0),
+        new("寒髓冰洞", "洞底寒气凝成晶露，你冒险取了一小瓶。", "opportunity",
+            "xuanbing_lu", 1, 2, 8, 0),
+        new("焚天火岩", "火岩缝隙中嵌着火焰晶，灼手而取。", "opportunity",
+            "huoyan_jing", 1, 2, 8, 0),
+        new("仙人对弈台", "石台棋局犹在，你观棋悟得一丝道韵。", "opportunity",
+            null, 0, 0, 100, 0),
+        new("灵泉洗髓", "偶遇一眼灵泉，洗去浊气，神完气足。", "opportunity",
+            null, 0, 0, 60, 1),
+        new("荒塔残卷", "古塔底层拾得残卷，虽不全却也受益。", "opportunity",
+            null, 0, 0, 90, 0),
+        new("商队遗货", "道旁拾得废弃商队的残货，内有可用之材。", "opportunity",
+            "lingcao", 1, 2, 15, 0),
+        new("毒瘴迷谷", "误入毒瘴深谷，你屏息疾行，仍被侵蚀了些修为。", "tribulation",
+            null, 0, 0, -35, -1),
+        new("沙暴劫", "荒漠沙暴骤起，你被埋了半日才爬出，修为受损。", "tribulation",
+            null, 0, 0, -30, -1),
+        new("邪修围堵", "几名邪修拦路索宝，你破围而出，也受了些轻伤。", "tribulation",
+            null, 0, 0, -40, -2),
+        new("雷泽迷途", "雷泽边缘电弧纵横，你绕行多日，耗损不小。", "tribulation",
+            null, 0, 0, -25, -1),
+        new("幻阵困厄", "误入前人幻阵，三日方破，神识疲惫。", "tribulation",
+            null, 0, 0, -30, -2),
+        new("观瀑悟道", "悬瀑之下静坐三日，水声中隐有大道之音。", "opportunity",
+            null, 0, 0, 110, 0),
     };
 
     public ExploreResult Explore(PlayerProfile player, DateTime now)
@@ -49,8 +81,20 @@ public class ExploreEngine
         if (tpl.MaterialId is not null && tpl.MaterialMax > 0)
         {
             var qty = rng.Next(tpl.MaterialMin, tpl.MaterialMax + 1);
-            if (qty > 0) materials[tpl.MaterialId] = qty;
+            if (qty > 0)
+            {
+                // 境界收益：修为越高历练收获越丰（每境界 +25%，向上取整）
+                qty = Math.Max(qty, (int)Math.Ceiling(
+                    qty * (1 + player.RealmIndex * GameConstants.ExploreRealmMaterialBonus)));
+                materials[tpl.MaterialId] = qty;
+            }
         }
+
+        // 灵石收益：奇遇事件掉落灵石，随境界线性增长（+30% 基数）
+        var stones = tpl.Type == "opportunity"
+            ? (long)Math.Round(GameConstants.ExploreStonesBase
+                * (0.8 + rng.NextDouble() * 0.4) * (player.RealmIndex + 1))
+            : 0;
 
         // 功法掉落（15% 概率，品级随境界提升）
         string? techniqueId = null;
@@ -70,7 +114,7 @@ public class ExploreEngine
                 techniqueId = candidates[rng.Next(candidates.Length)].Id;
         }
 
-        var message = BuildMessage(tpl, materials, cultivation, tpl.LifespanDelta);
+        var message = BuildMessage(tpl, materials, cultivation, tpl.LifespanDelta, stones);
         if (techniqueId is not null)
         {
             var tech = Technique.Techniques.First(t => t.Id == techniqueId);
@@ -80,14 +124,16 @@ public class ExploreEngine
         return new ExploreResult(
             tpl.Title, tpl.Narrative, tpl.Type,
             materials, cultivation, tpl.LifespanDelta,
-            message, techniqueId);
+            message, techniqueId, stones);
     }
 
-    private static string BuildMessage(Template tpl, Dictionary<string, int> mats, long cult, int life)
+    private static string BuildMessage(Template tpl, Dictionary<string, int> mats, long cult, int life, long stones)
     {
-        var parts = new List<string> { $"【{tpl.Title}】{tpl.Narrative}" };
+        // 标题独立成行，叙事交由 TextLayout.Flow 折行（见服务层出口）
+        var parts = new List<string> { $"【{tpl.Title}】", tpl.Narrative };
         if (mats.Count > 0)
             parts.Add("获得：" + string.Join("、", mats.Select(m => $"{AlchemyRecipe.MaterialName(m.Key)} ×{m.Value}")));
+        if (stones > 0) parts.Add($"灵石 +{stones:N0}");
         if (cult > 0) parts.Add($"修为 +{cult:N0}");
         if (cult < 0) parts.Add($"修为 {cult:N0}");
         if (life < 0) parts.Add($"寿元 {life}");
@@ -112,4 +158,5 @@ public record ExploreResult(
     long CultivationDelta,
     int LifespanDelta,
     string Message,
-    string? TechniqueId = null);       // 探索掉落的功法Id
+    string? TechniqueId = null,        // 探索掉落的功法Id
+    long StonesDelta = 0);             // 灵石奖励（仅奇遇）

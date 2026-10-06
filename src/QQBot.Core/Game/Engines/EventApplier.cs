@@ -19,9 +19,10 @@ public class EventApplier
 
         player.CultivationPoints += r.GainedCultivation;
         player.LastSettledAt = r.SettlementTime;
+        // 单行摘要：供各消息prepend或末尾追加，不再加括号包裹（避免括号内折行错乱）
         return r.Capped
-            ? $"闭关已满 {GameConstants.MaxIdleHours}h（收益封顶），本次收获修为 +{r.GainedCultivation:N0}。"
-            : $"闭关 {Format(r.ElapsedTime)}，收获修为 +{r.GainedCultivation:N0}。";
+            ? $"闭关满{GameConstants.MaxIdleHours}小时，修为+{r.GainedCultivation:N0}"
+            : $"闭关{Format(r.ElapsedTime)}，修为+{r.GainedCultivation:N0}";
     }
 
     public string ApplyBreakthrough(PlayerProfile player, BreakthroughResult r)
@@ -34,7 +35,7 @@ public class EventApplier
             // 突破成功恢复寿元：越高境界恢复越多
             var lifespanGain = 30 + r.NewRealmIndex * 10;
             player.Lifespan += lifespanGain;
-            return r.Message + $" 奖励灵石 +{r.BonusStones}，寿元 +{lifespanGain} 载。";
+            return r.Message + $"\n奖励灵石 +{r.BonusStones}，寿元 +{lifespanGain} 载";
         }
 
         if (r.Outcome == "failure")
