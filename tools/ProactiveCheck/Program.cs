@@ -732,6 +732,85 @@ using (var scope = sp.CreateScope())
     await pdb2.ChatMessages.Where(m => m.MessageId.StartsWith("p-")).ExecuteDeleteAsync();
 }
 
+Console.WriteLine("== 5d. 上下文条数保证与 token 输入预算 ==");
+// 阶梯本身是纯函数，先验它
+Check(ContextBuilder.CandidateFetchLadder(20, 40).First() == 40,
+    $"面板填 20 条时首次取 40 条候选（够过滤掉的纯图片/系统回复腾地方）");
+Check(ContextBuilder.CandidateFetchLadder(20, 40).SequenceEqual(new[] { 40, 80, 160, 200 }),
+    "候选不够就翻倍，直到 200 上限为止");
+Check(ContextBuilder.CandidateFetchLadder(100, 40).First() == 100,
+    "面板填 100 条时首次取 100 条候选（不小于用户要的条数）");
+Check(ContextBuilder.CandidateFetchLadder(1000, 40).Last() == 200,
+    "面板填 1000 条时候选被 200 上限封住（不会无界查库）");
+Check(ContextBuilder.CandidateFetchLadder(20, 40).Distinct().Count()
+        == ContextBuilder.CandidateFetchLadder(20, 40).Count,
+    "阶梯是有界的：封顶后不会无限产出同一个值（否则调用方每轮都会白查一次库）");
+Check(ContextBuilder.InputTokenBudget(2048) == 1536 && ContextBuilder.InputTokenBudget(512) == 384,
+    "输入预算由「最大 Tokens」按 0.75 折算，仍是同一个旋钮在管（不新增第二个人看不懂的数字）");
+Check(ContextBuilder.InputTokenBudget(0) == 0,
+    "预算换算对 0 不抛异常（服务端已把提交值钳到 ≥64，这里只是防御）");
+
+using (var scope = sp.CreateScope())
+{
+    var pdb3 = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    var msgRepo3 = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
+    var repo3 = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
+    var ctx3 = scope.ServiceProvider.GetRequiredService<IContextBuilder>();
+    const string g3 = "CTXG";
+
+    var t = DateTime.UtcNow.AddMinutes(-10);
+    var rows = new List<QQBot.Core.Models.ChatMessage>();
+    // 真实对话 20 条，间隔着 60 条「非 AI 生成的 bot 回复」——后者会被建对话时丢掉
+    for (var i = 0; i < 80; i++)
+    {
+        var isDistractor = i % 4 != 0;
+        rows.Add(new QQBot.Core.Models.ChatMessage
+        {
+            MessageId = $"c-{i:D3}", ChatType = 0, GroupId = g3,
+            UserId = isDistractor ? "bot" : "u1",
+            UserName = isDistractor ? "Bot" : "阿明",
+            PlainText = isDistractor ? "（系统播报，非 AI）签到成功" : $"第 {i} 句话说点什么",
+            IsBotMessage = isDistractor,
+            AiModelUsed = null,   // 非 AI 生成 -> 建对话时被丢掉，正是要制造的干扰行
+            CreatedAt = t.AddSeconds(i)
+        });
+    }
+    await msgRepo3.SaveMessagesAsync(rows);
+
+    await repo3.SaveAiConfigAsync(new AiConfig { MaxContextMessages = 20, MaxTokens = 2048 });
+    var built = await ctx3.BuildGroupContextAsync(g3, "现在这句", "阿明");
+
+    var historyPart = built.Messages.Where(m => !m.Content.Contains("现在这句")).ToList();
+    Check(historyPart.Count == 20,
+        $"面板填 20 条就真给 20 条（实际 {historyPart.Count}）——此前直接按 20 条取候选，"
+        + "被过滤掉的行会让实际条数缩水");
+    Check(historyPart.All(m => !m.Content.Contains("系统播报")),
+        "被过滤掉的非 AI 系统回复确实没有混进来");
+    Check(built.Messages[^1].Content == "[阿明]: 现在这句", "当前这条消息排在对话最后");
+    Check(built.EstimatedTokens <= ContextBuilder.InputTokenBudget(2048),
+        $"估算 token 不超输入预算（{built.EstimatedTokens} ≤ {ContextBuilder.InputTokenBudget(2048)}）");
+
+    // 条数够但内容很长时：预算必须真正生效，不能被"至少保留 8 条"盖过
+    await pdb3.ChatMessages.Where(m => m.MessageId.StartsWith("c-")).ExecuteDeleteAsync();
+    var longRows = Enumerable.Range(0, 20).Select(i => new QQBot.Core.Models.ChatMessage
+    {
+        MessageId = $"c-long-{i:D3}", ChatType = 0, GroupId = g3,
+        UserId = "u1", UserName = "阿明",
+        PlainText = new string('长', 400),   // 400 字 ≈ 200 token，20 条 ≈ 4000 token
+        CreatedAt = t.AddSeconds(i)
+    }).ToList();
+    await msgRepo3.SaveMessagesAsync(longRows);
+    var longBuilt = await ctx3.BuildGroupContextAsync(g3, "结尾一句", "阿明");
+    Check(longBuilt.EstimatedTokens <= ContextBuilder.InputTokenBudget(2048),
+        $"内容超长时被砍进预算（{longBuilt.EstimatedTokens} ≤ {ContextBuilder.InputTokenBudget(2048)}）");
+    Check(longBuilt.Messages.Count < 20,
+        $"确实发生了裁剪（{longBuilt.Messages.Count} 条 < 20 条面板设定值）");
+    Check(longBuilt.Messages[^1].Content == "[阿明]: 结尾一句",
+        "裁剪从最旧的一条开始，本轮消息始终保留");
+
+    await pdb3.ChatMessages.Where(m => m.MessageId.StartsWith("c-")).ExecuteDeleteAsync();
+}
+
 Console.WriteLine("== 6. 面板接口契约（含 EF 查询翻译） ==");
 // 与 ASP.NET Core 默认一致的 camelCase + 不转义中文
 var wire = new JsonSerializerOptions
