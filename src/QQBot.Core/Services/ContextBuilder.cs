@@ -11,8 +11,53 @@ public class ContextBuilder : IContextBuilder
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ContextBuilder> _logger;
 
+    /// <summary>
+    /// 字符数换算 token 的粗略比例。中文实测约 1.5 字符/token，这里取 2.0 是刻意偏保守
+    /// （宁可低估 token 数）。它只是估算，不做精确计数——项目刻意不引入 tokenizer。
+    /// </summary>
     private const double CharsPerToken = 2.0;
-    private const int MinConversationTurns = 4;
+
+    /// <summary>裁剪 token 时至少保留这么多条，否则对话只剩一两句时 AI 会答非所问。</summary>
+    private const int MinRemainingMessages = 8;
+
+    /// <summary>首次向数据库请求的候选条数。</summary>
+    private const int InitialHistoryCandidates = 40;
+
+    /// <summary>
+    /// 单次最多从库里取多少条候选。取候选而不是"直接取 N 条"，是因为历史里有些消息
+    /// （纯图片、非 AI 生成的 bot 回复）会在建对话时被丢掉 —— 直接按 N 取会让实际
+    /// 条数少于面板设定值。多取一些再裁到 N，面板上的数字才作数。
+    /// </summary>
+    private const int MaxHistoryCandidates = 200;
+
+    /// <summary>
+    /// 输入预算的换算系数：输出上限留一部分给回复本身，其余当作输入的可用额度。
+    /// 这是个保守的估计（不是精确 token 计数），只用于兜住"对话长得离谱"的情况。
+    /// </summary>
+    private const double InputBudgetRatio = 0.75;
+
+    /// <summary>
+    /// 从 <paramref name="initialCandidates"/> 条候选起步、每次翻倍，直到条数够用或已到上限。
+    /// 返回有界列表（到上限即止，不重复末值），调用方可以直接 Last()/Count，
+    /// 不必担心惰性序列在封顶后无限产出同一个值。
+    /// 抽成纯函数是为了能被自检直接覆盖：它保证"面板填 N 条"时不会因为过滤而缩水。
+    /// </summary>
+    public static List<int> CandidateFetchLadder(int maxContextMessages, int initialCandidates)
+    {
+        // 天真的 Math.Clamp(target, min, max) 在 target > max 时会抛
+        // "min cannot be greater than max"，所以先夹 target 再决定起点
+        var target = Math.Clamp(maxContextMessages, 1, MaxHistoryCandidates);
+        var n = Math.Clamp(initialCandidates, target, MaxHistoryCandidates);
+
+        var ladder = new List<int> { n };
+        while (n < MaxHistoryCandidates)
+        {
+            n = Math.Min(n * 2, MaxHistoryCandidates);
+            ladder.Add(n);
+        }
+
+        return ladder;
+    }
 
     /// <summary>
     /// 私聊上下文的时间边界。私聊是两个人一问一答，断档超过这个时长就是另一件事了：
@@ -54,16 +99,30 @@ public class ContextBuilder : IContextBuilder
         if (overrideConfig is not null)
             effectiveConfig = overrideConfig(effectiveConfig);
 
-        var history = await messageRepo.GetGroupHistoryAsync(
-            groupId, effectiveConfig.MaxContextMessages * 2, ct);
+        // 历史里的纯图片/非 AI bot 行会被 BuildConversation 丢掉，所以按阶梯多取候选，
+        // 直到条数够用为止 —— 面板填 N 条就得真给 N 条，不能因为过滤而缩水。
+        var candidatesFetched = 0;
+        var conversation = new List<(string Role, string Content)>();
 
-        var conversation = BuildConversation(history, currentMessage, senderName, effectiveConfig);
+        foreach (var candidates in CandidateFetchLadder(
+                     effectiveConfig.MaxContextMessages, InitialHistoryCandidates))
+        {
+            var history = await messageRepo.GetGroupHistoryAsync(groupId, candidates, ct);
+            candidatesFetched = history.Count;
+            conversation = BuildConversation(history, currentMessage, senderName, effectiveConfig);
+
+            // 够条数，或已经把库里的候选取尽（再翻倍也不会有更多）
+            if (conversation.Count >= effectiveConfig.MaxContextMessages || history.Count < candidates)
+                break;
+        }
 
         var (truncatedConversation, estimatedTokens, wasTruncated) =
             TruncateToBudget(conversation, effectiveConfig.MaxTokens);
 
-        _logger.LogDebug("Group {GroupId} context built: {Count} msgs, ~{Tokens} tokens, truncated={Truncated}",
-            groupId, truncatedConversation.Count, estimatedTokens, wasTruncated);
+        // 候选数与实际条数一起打出来：缩水时一眼可见，不用再猜
+        _logger.LogDebug(
+            "Group {GroupId} context built: 候选 {Candidates} → {Count} 条, ~{Tokens} tokens, truncated={Truncated}",
+            groupId, candidatesFetched, truncatedConversation.Count, estimatedTokens, wasTruncated);
 
         var (personaConfig, characterPrompt) = ApplyPersona(
             effectiveConfig, groupConfig?.ActiveCharacter,
@@ -89,16 +148,27 @@ public class ContextBuilder : IContextBuilder
 
         var config = await configRepo.GetAiConfigAsync(ct) ?? new AiConfig();
 
-        var history = await messageRepo.GetPrivateHistoryAsync(
-            userId, config.MaxContextMessages * 2, DateTime.UtcNow - PrivateContextMaxAge, ct);
+        // 与群聊同样按阶梯取候选：私聊里非 AI 生成的 bot 行与纯图片同样会被丢掉
+        var since = DateTime.UtcNow - PrivateContextMaxAge;
+        var candidatesFetched = 0;
+        var conversation = new List<(string Role, string Content)>();
 
-        var conversation = BuildConversation(history, currentMessage, senderName, config);
+        foreach (var candidates in CandidateFetchLadder(
+                     config.MaxContextMessages, InitialHistoryCandidates))
+        {
+            var history = await messageRepo.GetPrivateHistoryAsync(userId, candidates, since, ct);
+            candidatesFetched = history.Count;
+            conversation = BuildConversation(history, currentMessage, senderName, config);
+
+            if (conversation.Count >= config.MaxContextMessages || history.Count < candidates)
+                break;
+        }
 
         var (truncatedConversation, estimatedTokens, wasTruncated) =
             TruncateToBudget(conversation, config.MaxTokens);
 
-        _logger.LogDebug("Private {UserId} context built: {Count} msgs, ~{Tokens} tokens",
-            userId, truncatedConversation.Count, estimatedTokens);
+        _logger.LogDebug("Private {UserId} context built: 候选 {Candidates} → {Count} 条, ~{Tokens} tokens",
+            userId, candidatesFetched, truncatedConversation.Count, estimatedTokens);
 
         var (personaConfig, characterPrompt) = ApplyPersona(
             config, null, await configRepo.GetCustomCharactersAsync(ct));
@@ -196,36 +266,46 @@ public class ContextBuilder : IContextBuilder
         return conversation;
     }
 
-    private (List<(string Role, string Content)> Messages, int EstimatedTokens, bool WasTruncated)
+    /// <summary>
+    /// 输入预算的硬上限。由「最大 Tokens」按 <see cref="InputBudgetRatio"/> 折算而来。
+    /// 这是一个刻意保留的耦合：面板只有一个 token 旋钮，输入额度从它派生，
+    /// 而不是再给用户加第二个他更看不懂的数字。
+    /// </summary>
+    public static int InputTokenBudget(int maxTokens) => (int)(maxTokens * InputBudgetRatio);
+
+    /// <summary>
+    /// 把对话裁进预算。规则有两层，且顺序不能颠倒：
+    ///   1) 条数上限由 BuildConversation 负责（面板的「上下文条数」，保证语义完整）；
+    ///   2) 这里只管「太长就砍」，但绝不砍到 <see cref="MinRemainingMessages"/> 条以下 ——
+    ///      除非撞上 token 硬上限，因为那条线是防请求被上游拒掉/爆 context 的，必须服从。
+    /// 早先的写法让 8 条地板无条件压过预算，结果是"超预算"的请求照样发出去，
+    /// 跟这段代码的初衷正好相反。
+    /// </summary>
+    public (List<(string Role, string Content)> Messages, int EstimatedTokens, bool WasTruncated)
         TruncateToBudget(List<(string Role, string Content)> conversation, int maxTokens)
     {
-        var tokenBudget = (int)(maxTokens * 0.75);
+        var tokenBudget = InputTokenBudget(maxTokens);
 
-        var totalChars = conversation.Sum(m => m.Content.Length);
-        var estimatedTokens = (int)(totalChars / CharsPerToken);
+        if (EstimateTokens(conversation) <= tokenBudget)
+            return (conversation, EstimateTokens(conversation), false);
 
-        if (estimatedTokens <= tokenBudget)
-            return (conversation, estimatedTokens, false);
+        // 先砍到 8 条，看看够不够
+        var floor = Math.Min(conversation.Count, MinRemainingMessages);
+        var truncated = conversation.TakeLast(floor).ToList();
+        var wasTruncated = truncated.Count < conversation.Count;
 
-        var minMessages = MinConversationTurns * 2;
-        var truncated = new List<(string Role, string Content)>(conversation);
+        if (EstimateTokens(truncated) <= tokenBudget)
+            return (truncated, EstimateTokens(truncated), wasTruncated);
 
-        while (truncated.Count > minMessages)
-        {
-            totalChars = truncated.Sum(m => m.Content.Length);
-            estimatedTokens = (int)(totalChars / CharsPerToken);
-
-            if (estimatedTokens <= tokenBudget)
-                return (truncated, estimatedTokens, true);
-
+        // 还不够小：预算优先，继续砍（此时可以低于 8 条）
+        while (truncated.Count > 1 && EstimateTokens(truncated) > tokenBudget)
             truncated.RemoveAt(0);
-        }
 
-        totalChars = truncated.Sum(m => m.Content.Length);
-        estimatedTokens = (int)(totalChars / CharsPerToken);
-
-        return (truncated, estimatedTokens, true);
+        return (truncated, EstimateTokens(truncated), true);
     }
+
+    private static int EstimateTokens(List<(string Role, string Content)> conversation) =>
+        (int)(conversation.Sum(m => m.Content.Length) / CharsPerToken);
 
     private static AiConfig ApplyGroupOverrides(AiConfig globalConfig, GroupConfig? groupConfig)
     {

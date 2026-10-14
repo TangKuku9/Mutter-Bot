@@ -91,8 +91,10 @@ public class ConfigController : ControllerBase
         entity.SystemPrompt = dto.SystemPrompt;
         entity.Personality = dto.Personality;
         entity.Temperature = dto.Temperature;
-        entity.MaxTokens = dto.MaxTokens;
-        entity.MaxContextMessages = dto.MaxContextMessages;
+        // 这三个也钳制：面板的输入框有 min/max，但 API 可以绕过面板直连提交。
+        // MaxTokens=0 会让输入预算算成 0、上下文被压到一条；MaxContextMessages=0 同理。
+        entity.MaxTokens = Math.Clamp(dto.MaxTokens, 64, 32768);
+        entity.MaxContextMessages = Math.Clamp(dto.MaxContextMessages, 2, 100);
         // 附图张数在这里钳制：负数是无效输入，过大只会白烧 token 与带宽
         entity.MaxAttachedImages = Math.Clamp(dto.MaxAttachedImages, 0, AiConfig.CeilingAttachedImages);
         entity.WebSearchEnabled = dto.WebSearchEnabled;
