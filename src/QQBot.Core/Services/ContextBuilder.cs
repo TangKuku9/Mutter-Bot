@@ -1,6 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using QQBot.Core.Game.Services;
 using QQBot.Core.Interfaces;
 using QQBot.Core.Models;
 using QQBot.Core.Models.Config;
@@ -11,7 +10,6 @@ public class ContextBuilder : IContextBuilder
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ContextBuilder> _logger;
-    private readonly GameCommandRouter _gameCommandRouter;
 
     private const double CharsPerToken = 2.0;
     private const int MinConversationTurns = 4;
@@ -25,12 +23,10 @@ public class ContextBuilder : IContextBuilder
 
     public ContextBuilder(
         IServiceScopeFactory scopeFactory,
-        ILogger<ContextBuilder> logger,
-        GameCommandRouter gameCommandRouter)
+        ILogger<ContextBuilder> logger)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
-        _gameCommandRouter = gameCommandRouter;
     }
 
     public async Task<BuildContextResult> BuildGroupContextAsync(
@@ -175,13 +171,10 @@ public class ContextBuilder : IContextBuilder
             }
             else
             {
-                // 游戏指令消息（签到/突破/修行等）由修仙系统处理，其系统回复（非AI生成）
-                // 已被上方跳过；若保留用户指令会造成"说了没人答"的半截对话，
-                // AI 会自行脑补系统回复，造成上下文污染（如把「签到」脑补成AI说的"签到成功"）。
-                // FreeAction（AI裁判）除外：其回复是 AI 生成的，需保留完整配对。
-                var gameCmd = _gameCommandRouter.TryMatch(msg.PlainText);
-                if (gameCmd is not null && gameCmd.Action != GameAction.FreeAction)
-                    continue;
+                // 此前这里会跳过"游戏指令消息"（签到/突破/修行等）以免造成
+                // "说了没人答"的半截对话、让 AI 脑补系统回复。该功能已随修仙域移到
+                // xianxia 分支，主分支不再有这类消息，故移除该过滤。
+                // 若将来并入其它"用户指令 + 系统代答"型功能，需把这条排除逻辑加回来。
                 conversation.Add(("user", $"[{msg.UserName}]: {msg.PlainText}"));
             }
         }

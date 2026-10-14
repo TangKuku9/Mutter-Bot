@@ -10,7 +10,6 @@
         <el-menu-item index="/groups"><el-icon><UserFilled /></el-icon>群管理</el-menu-item>
         <el-menu-item index="/proactive"><el-icon><Comment /></el-icon>择机发言</el-menu-item>
         <el-menu-item index="/private-chats"><el-icon><ChatLineSquare /></el-icon>私聊管理</el-menu-item>
-        <el-menu-item index="/cultivation"><el-icon><MagicStick /></el-icon>修仙看板</el-menu-item>
         <el-menu-item index="/logs"><el-icon><Document /></el-icon>实时日志</el-menu-item>
         <el-menu-item index="/account"><el-icon><Avatar /></el-icon>账号中心</el-menu-item>
       </el-menu>
@@ -34,7 +33,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   Odometer, ChatDotRound, TrendCharts, Setting, UserFilled,
-  ChatLineSquare, MagicStick, Document, Avatar, Comment
+  ChatLineSquare, Document, Avatar, Comment
 } from '@element-plus/icons-vue'
 import api from './api'
 

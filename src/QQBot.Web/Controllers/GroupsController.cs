@@ -19,16 +19,12 @@ public class GroupsController : ControllerBase
         _db = db;
     }
 
-    /// <summary>已知群列表（合并群配置与修仙玩家数）。</summary>
+    /// <summary>已知群列表（合并群配置）。</summary>
     [HttpGet]
     public async Task<IActionResult> GetGroups(CancellationToken ct)
     {
         var groups = await _db.KnownGroups.AsNoTracking().ToListAsync(ct);
         var configs = await _db.GroupConfigs.AsNoTracking().ToListAsync(ct);
-        var playerCounts = await _db.PlayerProfiles.AsNoTracking()
-            .GroupBy(p => p.GroupId)
-            .Select(g => new { GroupId = g.Key, Count = g.Count() })
-            .ToListAsync(ct);
 
         var result = groups.Select(g =>
         {
@@ -38,7 +34,6 @@ public class GroupsController : ControllerBase
                 g.GroupOpenId,
                 g.Name,
                 g.AddedAt,
-                PlayerCount = playerCounts.FirstOrDefault(p => p.GroupId == g.GroupOpenId)?.Count ?? 0,
                 Config = cfg is null ? null : new
                 {
                     cfg.IsEnabled,

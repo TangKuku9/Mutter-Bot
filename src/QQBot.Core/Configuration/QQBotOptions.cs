@@ -6,7 +6,8 @@ public class QQBotOptions
     public string ClientSecret { get; set; } = string.Empty;
     public string ApiBaseUrl { get; set; } = "https://api.bot.qq.com";
 
-    /// <summary>修仙系统富交互（markdown 卡片 / 按钮菜单 / @标签）开关与能力门控配置。</summary>
+    /// <summary>富交互（markdown 卡片 / 按钮菜单 / @标签）开关与能力门控配置。
+    /// 名称保留 "GameKeyboardMode" 是因为它已经是 appsettings 里的配置键值，改名会破坏现有部署。</summary>
     public RichUiOptions RichUi { get; set; } = new();
 }
 

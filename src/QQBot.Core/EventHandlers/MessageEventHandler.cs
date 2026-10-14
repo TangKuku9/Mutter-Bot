@@ -6,8 +6,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using QQBot.Core;
 using QQBot.Core.Configuration;
-using QQBot.Core.Game.Services;
-using QQBot.Core.Game.Ui;
 using QQBot.Core.Interfaces;
 using QQBot.Core.Models;
 using QQBot.Core.Models.Config;
@@ -29,10 +27,7 @@ public class MessageEventHandler
     private readonly INotificationService _notificationService;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ChannelWriter<ChatMessage> _messageWriter;
-    private readonly GameCommandRouter _gameCommandRouter;
-    private readonly CultivationGameService _cultivationGameService;
     private readonly RichUiCapability _richUi;
-    private readonly IGameRecallService _gameRecall;
     private readonly ProactiveObserveService _observe;
     private readonly ReplySeqTracker _seqTracker;
     private readonly GroupMessageGate _groupGate;
@@ -59,9 +54,6 @@ public class MessageEventHandler
     private readonly ConcurrentDictionary<string, DateTime> _recentBotReplies = new();
     private const int BotReplyDedupWindowSeconds = 8;
 
-    /// <summary>游标：已回应过的互动事件 ID（官方同一 interaction_id 只能回应一次）。</summary>
-    private readonly ConcurrentDictionary<string, DateTime> _handledInteractions = new();
-
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public MessageEventHandler(
@@ -75,10 +67,7 @@ public class MessageEventHandler
         INotificationService notificationService,
         IServiceScopeFactory scopeFactory,
         ChannelWriter<ChatMessage> messageWriter,
-        GameCommandRouter gameCommandRouter,
-        CultivationGameService cultivationGameService,
         RichUiCapability richUi,
-        IGameRecallService gameRecall,
         ProactiveObserveService observe,
         ReplySeqTracker seqTracker,
         GroupMessageGate groupGate,
@@ -94,10 +83,7 @@ public class MessageEventHandler
         _notificationService = notificationService;
         _scopeFactory = scopeFactory;
         _messageWriter = messageWriter;
-        _gameCommandRouter = gameCommandRouter;
-        _cultivationGameService = cultivationGameService;
         _richUi = richUi;
-        _gameRecall = gameRecall;
         _observe = observe;
         _seqTracker = seqTracker;
         _groupGate = groupGate;
@@ -398,16 +384,16 @@ public class MessageEventHandler
         parsed.HasAtBot = mention;
 
         // 内容级去重：QQ 服务端可能用不同 msgId 重复投递同一消息。
-        // 但游戏指令（如「突破」「修炼」）跳过此检查：去重窗口(30s)会误杀
-        // 渡劫结算等需要短时间内重复发送相同指令的玩法（2026-08-07 事故根因）。
+        // 历史上游戏指令（「突破」「修炼」等）曾跳过此检查——去重窗口(30s)会误杀
+        // 需要短时间内重复发送相同指令的玩法（2026-08-07 事故根因）。
+        // 该玩法已随修仙域移到 xianxia 分支，主分支所有消息统一走内容级去重。
         // 消息 ID 级去重（GroupMessageGate）仍在，足以拦截 QQ 同 msgId 重复投递。
         var senderId = evt.Author?.MemberOpenid ?? string.Empty;
-        // 优先用平台下发的真实昵称（历史上只用了 OpenId，面板只能显示“道友XXXX”）
+        // 优先用平台下发的真实昵称（历史上只用了 OpenId，面板只能显示占位名）
         var senderName = !string.IsNullOrWhiteSpace(evt.Author?.Username)
             ? evt.Author!.Username!
             : senderId.Length > 0 ? senderId : "Member";
-        GameCommand? gameCmd = mention ? _gameCommandRouter.TryMatch(parsed.PlainText) : null;
-        if (!reprocessAsAt && gameCmd is null && IsContentDuplicate(evt.GroupOpenid, senderId, ContentSignature(parsed)))
+        if (!reprocessAsAt && IsContentDuplicate(evt.GroupOpenid, senderId, ContentSignature(parsed)))
         {
             _logger.LogWarning("检测到重复投递，跳过: GroupId={GroupId}, Sender={SenderId}, Content={Content}",
                 evt.GroupOpenid, senderId, parsed.PlainText.Length > 50 ? parsed.PlainText[..50] + "..." : parsed.PlainText);
@@ -468,14 +454,6 @@ public class MessageEventHandler
             {
                 try
                 {
-                    // /ui：用当前消息的被动回复槽位实探 markdown / 按钮能力（零主动配额）
-                    if (parsed.PlainText.TrimStart().StartsWith("/ui", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var report = await ProbeRichUiAsync(evt.GroupOpenid, evt.Id);
-                        await SendReplyAsync(evt.GroupOpenid, null, evt.Id, report);
-                        return;
-                    }
-
                     var reply = await _commandService.ExecuteGroupCommandAsync(senderId, parsed.PlainText, evt.GroupOpenid, role);
                     await SendReplyAsync(evt.GroupOpenid, null, evt.Id, reply);
                 }
@@ -486,70 +464,7 @@ public class MessageEventHandler
 
         if (mention)
         {
-            // 游戏指令路由：命中修仙RPG 关键词则走游戏，未命中继续走 AI 回复
-            // （gameCmd 已在去重检查前预匹配，确保游戏指令绕过内容级去重）
-            if (gameCmd != null)
-            {
-                // 自由行动：显式前缀触发 AI 裁判
-                if (gameCmd.Action == GameAction.FreeAction)
-                {
-                    if (string.IsNullOrWhiteSpace(gameCmd.Args))
-                    {
-                        await SendReplyAsync(evt.GroupOpenid, null, evt.Id,
-                            "请描述你想做的事，如：@我 行动 去后山采药", recallGame: true);
-                        return;
-                    }
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            var gameReply = await _cultivationGameService.HandleFreeActionAsync(
-                                evt.GroupOpenid, senderId, senderName, gameCmd.Args);
-                            if (gameReply is null)
-                            {
-                                await SendReplyAsync(evt.GroupOpenid, null, evt.Id, "AI裁判暂不可用，请稍后再试。", recallGame: true);
-                                return;
-                            }
-                            // 保存到聊天历史 + Dashboard 统计
-                            await SaveBotMessageAsync(evt.GroupOpenid, gameReply.Reply,
-                                gameReply.AiModelUsed, gameReply.PromptTokens, gameReply.CompletionTokens);
-                            if (gameReply.AiModelUsed is not null)
-                            {
-                                try
-                                {
-                                    await _notificationService.NotifyAiResponseCompletedAsync(new
-                                    {
-                                        GroupId = evt.GroupOpenid, Model = gameReply.AiModelUsed,
-                                        TotalTokens = (gameReply.PromptTokens ?? 0) + (gameReply.CompletionTokens ?? 0),
-                                        Content = gameReply.Reply
-                                    });
-                                }
-                                catch (Exception ex) { _logger.LogError(ex, "Notify AI complete failed"); }
-                            }
-                            await SendReplyAsync(evt.GroupOpenid, null, evt.Id, gameReply, evt.MessageScene?.MsgIdx);
-                        }
-                        catch (Exception ex) { _logger.LogError(ex, "Free action failed"); }
-                    });
-                    return;
-                }
-
-                // 确定性游戏指令
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        var reply = await _cultivationGameService.HandleAsync(
-                            evt.GroupOpenid, senderId, senderName, gameCmd);
-                        await SaveBotMessageAsync(evt.GroupOpenid, reply.Reply);
-                        // 被动回复，零配额；带面板时同一消息里挂上菜单
-                        await SendReplyAsync(evt.GroupOpenid, null, evt.Id, reply, evt.MessageScene?.MsgIdx);
-                    }
-                    catch (Exception ex) { _logger.LogError(ex, "Game command failed"); }
-                });
-                return;
-            }
-
-            // 未命中游戏指令 -> 走原 AI 角色扮演
+            // 被 @ 到 -> 走 AI 角色扮演
             _ = Task.Run(async () =>
             {
                 try { await ProcessAiReplyAsync(evt.GroupOpenid, null, senderId, senderName, parsed, evt.Id); }
@@ -733,7 +648,7 @@ public class MessageEventHandler
         finally { _aiSemaphore.Release(); }
     }
 
-    private async Task SendReplyAsync(string? groupOpenId, string? userOpenId, string? msgId, string content, bool recallGame = false)
+    private async Task SendReplyAsync(string? groupOpenId, string? userOpenId, string? msgId, string content)
     {
         // 回复去重：同群/同用户在窗口期内已发送过相同内容则跳过，
         // 防止 QQ 服务端用不同 msgId/不同 @ 段格式重复投递时用户看到重复回复。
@@ -744,8 +659,7 @@ public class MessageEventHandler
         {
             if (groupOpenId is not null)
             {
-                var sentId = await _apiService.SendGroupMessageAsync(groupOpenId, content, msgId, _seqTracker.Next(msgId));
-                if (recallGame) _gameRecall.Schedule(groupOpenId, sentId);
+                await _apiService.SendGroupMessageAsync(groupOpenId, content, msgId, _seqTracker.Next(msgId));
             }
             else if (userOpenId is not null)
                 await _apiService.SendPrivateMessageAsync(userOpenId, content, msgId, _seqTracker.Next(msgId));
@@ -754,10 +668,7 @@ public class MessageEventHandler
         {
             _logger.LogWarning("被动回复失败，降级主动消息 err={ErrCode}", ex.ErrCode);
             if (groupOpenId is not null)
-            {
-                var result = await _activeMessage.SendGroupActiveAsync(groupOpenId, content);
-                if (recallGame) _gameRecall.Schedule(groupOpenId, result.MessageId);
-            }
+                await _activeMessage.SendGroupActiveAsync(groupOpenId, content);
             else
                 await _activeMessage.SendPrivateActiveAsync(userOpenId!, content);
         }
@@ -765,124 +676,6 @@ public class MessageEventHandler
         {
             _logger.LogError(ex, "Send reply failed");
         }
-    }
-
-    private enum DegradeKind { None, Keyboard, Markdown }
-
-    /// <summary>
-    /// 富交互回复出口：一条消息内同时完成“面板正文 + 菜单”，不额外发第二条。
-    /// 被平台拒绝时就地按能力降级：按钮被拒 → 无按钮 markdown；markdown 被拒 → 纯文本；
-    /// 被动槽位失效 → 沿用原有“降级主动消息”分支。降级重发占用下一个 msg_seq，
-    /// 而官方每消息被动回复上限 5 次，故仅在真被拒时多花一个槽位。
-    /// </summary>
-    private async Task SendReplyAsync(
-        string? groupOpenId, string? userOpenId, string? msgId, GameUiReply reply,
-        string? refMsgIdx = null, string? eventId = null)
-    {
-        var panel = reply.Panel;
-        var useMarkdown = panel is not null && panel.Markdown.Length > 0
-            && _richUi.UseMarkdown(groupOpenId);
-        var refId = _richUi.UseMessageReference(groupOpenId) ? refMsgIdx : null;
-
-        if (msgId is not null && ShouldSkipReply(groupOpenId, userOpenId, msgId,
-                useMarkdown ? panel!.Markdown : reply.Reply))
-            return;
-
-        var outbound = new OutboundMessage
-        {
-            PlainText = reply.Reply,
-            MarkdownText = useMarkdown ? panel!.Markdown : null,
-            Keyboard = useMarkdown ? panel!.Keyboard : null,
-            MsgId = msgId,
-            EventId = eventId,
-            MsgSeq = _seqTracker.Next(msgId),
-            RefMessageId = refId,
-        };
-
-        var degrade = DegradeKind.None;
-        try
-        {
-            var sentId = await SendOutboundAsync(groupOpenId, userOpenId, outbound);
-            if (groupOpenId is not null) _gameRecall.Schedule(groupOpenId, sentId);
-            if (useMarkdown)
-            {
-                _richUi.MarkOk(RichUiCapability.CapMarkdown);
-                _richUi.CountMarkdownSent();
-                if (outbound.Keyboard is not null) _richUi.MarkOk(RichUiCapability.CapKeyboard);
-            }
-            return;
-        }
-        catch (QqApiException ex) when (useMarkdown && outbound.Keyboard is not null
-                                        && QqApiErrorCodes.IsKeyboardDenied(ex.ErrCode))
-        {
-            // 按钮组件无权限/参数被拒：后续消息会自动改为文字链或无按钮，本条先保证发出去
-            _richUi.ReportDenied(RichUiCapability.CapKeyboard, ex.ErrCode);
-            degrade = DegradeKind.Keyboard;
-            _logger.LogWarning("RichUi 按钮被拒，本条降级无按钮 markdown err={ErrCode}", ex.ErrCode);
-        }
-        catch (QqApiException ex) when (useMarkdown && QqApiErrorCodes.IsMarkdownDenied(ex.ErrCode))
-        {
-            _richUi.ReportDenied(RichUiCapability.CapMarkdown, ex.ErrCode);
-            degrade = DegradeKind.Markdown;
-            _logger.LogWarning("RichUi markdown 被拒，降级纯文本 err={ErrCode}", ex.ErrCode);
-        }
-        catch (QqApiException ex) when ((msgId is not null || eventId is not null)
-                                        && (groupOpenId is not null || userOpenId is not null))
-        {
-            _logger.LogWarning("被动回复失败，降级主动消息 err={ErrCode}", ex.ErrCode);
-            _richUi.CountPlainFallback();
-            if (groupOpenId is not null)
-            {
-                var result = await _activeMessage.SendGroupActiveAsync(groupOpenId, reply.Reply);
-                _gameRecall.Schedule(groupOpenId, result.MessageId);
-            }
-            else if (userOpenId is not null)
-                await _activeMessage.SendPrivateActiveAsync(userOpenId, reply.Reply);
-            return;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Send rich reply failed");
-            return;
-        }
-
-        if (degrade == DegradeKind.None) return;
-        _richUi.CountDegradeRetry();
-        if (degrade == DegradeKind.Markdown) _richUi.CountPlainFallback();
-
-        var retry = degrade == DegradeKind.Keyboard
-            ? outbound with { Keyboard = null, MsgSeq = _seqTracker.Next(msgId) }
-            : outbound with { MarkdownText = null, Keyboard = null, MsgSeq = _seqTracker.Next(msgId) };
-
-        try
-        {
-            var retryId = await SendOutboundAsync(groupOpenId, userOpenId, retry);
-            if (groupOpenId is not null) _gameRecall.Schedule(groupOpenId, retryId);
-        }
-        catch (QqApiException ex) when (groupOpenId is not null || userOpenId is not null)
-        {
-            _logger.LogWarning("降级重发仍失败，转主动消息 err={ErrCode}", ex.ErrCode);
-            if (groupOpenId is not null)
-            {
-                var result = await _activeMessage.SendGroupActiveAsync(groupOpenId, reply.Reply);
-                _gameRecall.Schedule(groupOpenId, result.MessageId);
-            }
-            else if (userOpenId is not null)
-                await _activeMessage.SendPrivateActiveAsync(userOpenId!, reply.Reply);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Degraded reply failed");
-        }
-    }
-
-    private async Task<string?> SendOutboundAsync(string? groupOpenId, string? userOpenId, OutboundMessage msg)
-    {
-        if (groupOpenId is not null)
-            return await _apiService.SendGroupRichAsync(groupOpenId, msg);
-        if (userOpenId is not null)
-            return await _apiService.SendPrivateRichAsync(userOpenId, msg);
-        return null;
     }
 
     /// <summary>回复内容去重（仅被动回复场景）。返回 true 表示应跳过发送。</summary>
@@ -897,49 +690,16 @@ public class MessageEventHandler
     }
 
     /// <summary>
-    /// 按钮回调。官方要求 3 秒内回应互动，否则客户端一直 loading，因此“先 ACK、后异步结算”，
-    /// 结算结果用 event_id 走被动回复（不占用主动消息的分钟/每日频控额度）。
+    /// 按钮回调。
+    /// 主分支不做按钮业务（菜单随修仙域移到 xianxia 分支），但仍要 ACK：
+    /// 官方要求 3 秒内回应互动，否则客户端一直 loading；
+    /// 同时 Ack 成功本身是"回调链路已实通"的证据，供富交互能力门控决策。
     /// </summary>
     private async Task HandleButtonInteractionAsync(InteractionCreateEvent evt)
     {
-        var now = DateTime.UtcNow;
-        if (!_handledInteractions.TryAdd(evt.Id, now))
-        {
-            _logger.LogDebug("重复互动事件已忽略 interaction={Id}", evt.Id);
-            return;
-        }
-        PruneHandledInteractions(now);
-
         // 无论后续能不能处理，先 ACK 解除用户侧 loading（最多等 1.5s，不拖死事件回包）
         await AckInteractionAsync(evt.Id);
-
-        if (evt.ChatType != 1 || string.IsNullOrEmpty(evt.GroupOpenid) || string.IsNullOrEmpty(evt.ActorOpenid))
-        {
-            _logger.LogDebug("非群聊按钮事件，仅 ACK scene={Scene}", evt.Scene);
-            return;
-        }
-
-        var cmd = _gameCommandRouter.TryMatchButtonCommand(evt.ButtonData);
-        if (cmd is null)
-        {
-            _logger.LogWarning("按钮 data 未命中游戏指令 data={Data}", evt.ButtonData);
-            return;
-        }
-
-        var groupId = evt.GroupOpenid!;
-        var actorId = evt.ActorOpenid!;
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                var reply = await _cultivationGameService.HandleAsync(groupId, actorId, actorId, cmd);
-                await SaveBotMessageAsync(groupId, reply.Reply);
-                // 被动回复的 event_id 必须带 "INTERACTION_CREATE:" 前缀（裸 Id 会被判 40034025 无效）
-                await SendReplyAsync(groupId, null, msgId: null, reply, eventId: evt.PassiveReplyEventId);
-            }
-            catch (Exception ex) { _logger.LogError(ex, "Button interaction failed group={GroupId}", groupId); }
-        });
+        _logger.LogDebug("按钮互动已 ACK（主分支无按钮业务）data={Data} scene={Scene}", evt.ButtonData, evt.Scene);
     }
 
     private async Task AckInteractionAsync(string interactionId)
@@ -951,76 +711,8 @@ public class MessageEventHandler
         }
         catch (Exception ex)
         {
-            // ACK 失败只影响用户侧按钮转圈超时，不影响已经发出的结算
+            // ACK 失败只影响用户侧按钮转圈超时
             _logger.LogWarning(ex, "回应互动失败 interaction={Id}", interactionId);
-        }
-    }
-
-    /// <summary>
-    /// 富交互实探：向本群发两条探测消息（纯 markdown / markdown+按钮），
-    /// 用平台真实返回结果确定能力态，帮管理员判断能否进入下一个灰度阶段。
-    /// 走被动槽位，不花主动消息配额。
-    /// </summary>
-    private async Task<string> ProbeRichUiAsync(string groupOpenId, string msgId)
-    {
-        var markdown = await TryProbeAsync(groupOpenId, msgId, withKeyboard: false);
-        var keyboard = await TryProbeAsync(groupOpenId, msgId, withKeyboard: true);
-        _richUi.ResetForDiagnostics();   // 按最新探测结果重新决策，不等 TTL
-
-        var snap = _richUi.Snapshot();
-        var opt = _richUi.Options;
-        return "富交互自检\n"
-            + $"markdown：{markdown}\n"
-            + $"按钮：{keyboard}\n"
-            + $"配置：总开关={(opt.Enabled ? "开" : "关")} 键盘={opt.KeyboardMode} "
-            + $"文字链={(opt.CmdInputLinks ? "开" : "关")} @标签={(opt.AtUserTags ? "开" : "关")}\n"
-            + $"白名单群数：{opt.GroupAllowList.Count}（0=全部）\n"
-            + $"累计：富消息 {snap.RichSent} 按钮 {snap.KeyboardSent} "
-            + $"文字链 {snap.LinkOnlySent} 降级 {snap.DegradeRetries} 转纯文本 {snap.PlainFallback}";
-    }
-
-    private async Task<string> TryProbeAsync(string groupOpenId, string msgId, bool withKeyboard)
-    {
-        var menu = GameMenuCatalog.For(GameAction.Help, MenuContext.Empty);
-        var keyboard = withKeyboard
-            ? GameKeyboard.From(menu, GameKeyboardMode.Command, _richUi.Options, _logger)
-            : null;
-
-        var probe = new OutboundMessage
-        {
-            MarkdownText = withKeyboard
-                ? "### 富交互自检（按钮）\n若下方出现按钮，说明消息按钮组件可用。"
-                : "### 富交互自检（文本）\n本行应为标题样式，说明 markdown 可用。",
-            Keyboard = keyboard,
-            MsgId = msgId,
-            MsgSeq = _seqTracker.Next(msgId),
-        };
-
-        try
-        {
-            await _apiService.SendGroupRichAsync(groupOpenId, probe);
-            return "可用";
-        }
-        catch (QqApiException ex)
-        {
-            _logger.LogWarning("RichUi 探测失败 withKeyboard={WithKeyboard} err={ErrCode}", withKeyboard, ex.ErrCode);
-            return $"不可用（err={ex.ErrCode}）";
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "RichUi 探测异常");
-            return "探测异常";
-        }
-    }
-
-    private void PruneHandledInteractions(DateTime now)
-    {
-        if (_handledInteractions.Count <= 2000) return;
-        var cutoff = now.AddMinutes(-10);
-        foreach (var kv in _handledInteractions)
-        {
-            if (kv.Value < cutoff)
-                _handledInteractions.TryRemove(kv.Key, out _);
         }
     }
 

@@ -18,12 +18,10 @@ public class AppDbContext : DbContext
     public DbSet<ProactiveChatConfigEntity> ProactiveChatConfigs => Set<ProactiveChatConfigEntity>();
     public DbSet<ProactiveChatLogEntity> ProactiveChatLogs => Set<ProactiveChatLogEntity>();
 
-    // 修仙RPG 游戏域
-    public DbSet<PlayerProfileEntity> PlayerProfiles => Set<PlayerProfileEntity>();
-    public DbSet<GroupWorldEntity> GroupWorlds => Set<GroupWorldEntity>();
-    public DbSet<PlayerInventoryEntity> PlayerInventories => Set<PlayerInventoryEntity>();
-    public DbSet<GameCooldownEntity> GameCooldowns => Set<GameCooldownEntity>();
-    public DbSet<CultivationEventLogEntity> CultivationEventLogs => Set<CultivationEventLogEntity>();
+    // 修仙RPG 的 5 张表（PlayerProfiles / GroupWorlds / PlayerInventories /
+    // GameCooldowns / CultivationEventLogs）保留建表语句与补列迁移，但不再建实体：
+    // 功能已拆到 xianxia 分支，主分支只保证已有部署的库结构不被破坏、数据不丢。
+    // 将来若在修仙分支继续迭代，这里的 DDL 需要与那边的实体保持同步。
 
     protected override void OnConfiguring(DbContextOptionsBuilder options)
     {
@@ -79,41 +77,6 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<CustomCharacterEntity>(e =>
         {
             e.HasKey(x => x.Name);
-        });
-
-        // 修仙RPG 游戏域
-        modelBuilder.Entity<PlayerProfileEntity>(e =>
-        {
-            e.HasKey(x => x.Id);
-            e.HasIndex(x => new { x.GroupId, x.MemberOpenId }).IsUnique();
-            e.HasIndex(x => new { x.GroupId, x.CultivationPoints });
-            // 乐观并发令牌：UPDATE/DELETE 时把 Version 加入 WHERE，
-            // 一旦该行被其它写改过即 0 行受影响 -> DbUpdateConcurrencyException
-            e.Property(x => x.Version).IsConcurrencyToken();
-        });
-
-        modelBuilder.Entity<GroupWorldEntity>(e =>
-        {
-            e.HasKey(x => x.GroupId);
-        });
-
-        modelBuilder.Entity<PlayerInventoryEntity>(e =>
-        {
-            e.HasKey(x => x.Id);
-            e.HasIndex(x => new { x.GroupId, x.MemberOpenId, x.ItemId }).IsUnique();
-        });
-
-        modelBuilder.Entity<GameCooldownEntity>(e =>
-        {
-            e.HasKey(x => x.Id);
-            e.HasIndex(x => new { x.GroupId, x.MemberOpenId, x.ActionType });
-        });
-
-        modelBuilder.Entity<CultivationEventLogEntity>(e =>
-        {
-            e.HasKey(x => x.Id);
-            e.HasIndex(x => new { x.GroupId, x.MemberOpenId, x.CreatedAt });
-            e.HasIndex(x => new { x.GroupId, x.EventType, x.CreatedAt });
         });
 
         modelBuilder.Entity<ProactiveChatConfigEntity>(e =>
@@ -210,7 +173,11 @@ public class AppDbContext : DbContext
             );
             """, ct);
 
-        // ===== 修仙RPG 游戏域建表（兼容已有数据库） =====
+        // ===== 修仙RPG 游戏域建表（主分支不再使用，仅保留结构） =====
+        // 功能已拆到 xianxia 分支。这里刻意保留建表与补列：
+        //   1) 已有部署的库里这 5 张表可能存着玩家数据，删表不可逆；
+        //   2) 切回修仙分支时无需再补 schema。
+        // 主分支不对它们做任何读写，纯粹是"留着不碍事"。
         await Database.ExecuteSqlRawAsync(
             """
             CREATE TABLE IF NOT EXISTS "PlayerProfiles" (

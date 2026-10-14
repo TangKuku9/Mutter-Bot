@@ -5,8 +5,8 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using QQBot.Core.Configuration;
-using QQBot.Core.Game.Ui;
 using QQBot.Core.Interfaces;
+using QQBot.Core.Services;
 using QQBot.Core.Models.QQOfficial;
 
 namespace QQBot.Infrastructure.Services;

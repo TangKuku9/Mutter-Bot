@@ -1,7 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using QQBot.Core.Game.Interfaces;
 using QQBot.Core.Interfaces;
 using QQBot.Core.Models;
 using QQBot.Core.Models.Config;

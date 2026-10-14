@@ -10,7 +10,6 @@ const routes = [
   { path: '/groups', component: () => import('./views/Groups.vue'), meta: { title: '群管理' } },
   { path: '/proactive', component: () => import('./views/Proactive.vue'), meta: { title: '择机发言' } },
   { path: '/private-chats', component: () => import('./views/PrivateChats.vue'), meta: { title: '私聊管理' } },
-  { path: '/cultivation', component: () => import('./views/Cultivation.vue'), meta: { title: '修仙看板' } },
   { path: '/logs', component: () => import('./views/Logs.vue'), meta: { title: '实时日志' } },
   { path: '/account', component: () => import('./views/Account.vue'), meta: { title: '账号中心' } }
 ]

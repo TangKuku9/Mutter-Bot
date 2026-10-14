@@ -1,6 +1,6 @@
 using QQBot.Core.Models.Config;
 
-namespace QQBot.Core.Game.Interfaces;
+namespace QQBot.Core.Interfaces;
 
 /// <summary>
 /// 结构化 AI 输出结果，包含反序列化 DTO 与 AI 用量信息。
@@ -9,7 +9,7 @@ public record StructuredResult<T>(T Data, string? Model, int PromptTokens, int C
 
 /// <summary>
 /// 结构化 AI 输出服务。封装 JSON mode + 解析降级 + 数值钳制。
-/// 用于 AI 事件生成器与自由动作裁判等需要结构化结果的游戏场景。
+/// 需求方不止游戏域：AI 择机发言的判定（ProactiveVerdict）也走这里。
 /// </summary>
 public interface IStructuredAiService
 {

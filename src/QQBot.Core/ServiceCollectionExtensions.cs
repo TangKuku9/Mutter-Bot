@@ -1,9 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
 using QQBot.Core.EventHandlers;
-using QQBot.Core.Game.Ai;
-using QQBot.Core.Game.Engines;
-using QQBot.Core.Game.Services;
-using QQBot.Core.Game.Ui;
 using QQBot.Core.Interfaces;
 using QQBot.Core.Proactive;
 using QQBot.Core.Services;
@@ -27,25 +23,12 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ProactiveSpeaker>();
         services.AddSingleton<ReplySeqTracker>();
         services.AddSingleton<GroupMessageGate>();
-        services.AddSingleton<GameService>();
         services.AddSingleton<BotCommandService>();
         services.AddSingleton<MessageEventHandler>();
 
-        // 修仙RPG 游戏域
-        services.AddSingleton<IdleSettlementEngine>();
-        services.AddSingleton<BreakthroughEngine>();
-        services.AddSingleton<DailyTaskEngine>();
-        services.AddSingleton<AlchemyEngine>();
-        services.AddSingleton<ExploreEngine>();
-        services.AddSingleton<SparEngine>();
-        services.AddSingleton<EventApplier>();
-        services.AddSingleton<GameCommandRouter>();
-        // 富交互能力门控（markdown / 按钮 / @标签 的配置与降级态）
+        // 富交互能力门控（markdown / 按钮 / @标签 的配置与降级态）。
+        // 它不属于修仙域：主动消息与网关的降级判断都依赖它。
         services.AddSingleton<RichUiCapability>();
-        services.AddSingleton<GameUiPresenter>();
-        services.AddSingleton<CultivationGameService>();
-        services.AddSingleton<EventGenerator>();
-        services.AddSingleton<ActionReferee>();
 
         return services;
     }

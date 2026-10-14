@@ -14,11 +14,6 @@
         <el-table-column label="群 OpenId" min-width="150" show-overflow-tooltip>
           <template #default="{ row }"><code>{{ row.groupOpenId }}</code></template>
         </el-table-column>
-        <el-table-column label="修仙玩家" width="90">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.playerCount > 0 ? 'success' : 'info'">{{ row.playerCount }}</el-tag>
-          </template>
-        </el-table-column>
         <el-table-column label="响应开关" width="90">
           <template #default="{ row }">
             <el-tag size="small" :type="row.config?.isEnabled ? 'success' : 'danger'">

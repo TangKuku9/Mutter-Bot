@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using QQBot.Core.Configuration;
 
-namespace QQBot.Core.Game.Ui;
+namespace QQBot.Core.Services;
 
 /// <summary>能力探测状态。Unknown=未验证（按配置允许尝试）；Ok=已确认可用；Denied=被平台拒绝。</summary>
 public enum CapState { Unknown = 0, Ok = 1, Denied = 2 }

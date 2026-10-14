@@ -2,7 +2,6 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using QQBot.Core.Game.Interfaces;
 using QQBot.Core.Interfaces;
 using QQBot.Core.Models;
 using QQBot.Core.Models.Config;

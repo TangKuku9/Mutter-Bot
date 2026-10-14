@@ -11,7 +11,6 @@ public class BotCommandService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IQqBotApiService _apiService;
-    private readonly GameService _gameService;
     private readonly ILogger<BotCommandService> _logger;
 
     private const string HelpText =
@@ -27,21 +26,15 @@ public class BotCommandService
         /char list - List available characters
         /char set <name> - Switch character (admin only)
         /char reset - Reset to default character
-        /quiz start <type> - Start quiz (riddle/idiom/brain teaser)
-        /quiz answer <answer> - Submit answer
-        /quiz stop - Stop current game
-        /ui - 富交互能力自检（markdown/按钮实探，仅群内生效）
         """;
 
     public BotCommandService(
         IServiceScopeFactory scopeFactory,
         IQqBotApiService apiService,
-        GameService gameService,
         ILogger<BotCommandService> logger)
     {
         _scopeFactory = scopeFactory;
         _apiService = apiService;
-        _gameService = gameService;
         _logger = logger;
     }
 
@@ -63,7 +56,6 @@ public class BotCommandService
                 "/group" => await ToggleGroupAsync(parts, ct),
                 "/private" => await TogglePrivateAsync(senderId, parts, ct),
                 "/char" => await HandleCharacterAsync(senderId, parts, ct),
-                "/quiz" => await HandleQuizAsync(senderId, parts, ct),
                 _ => $"Unknown command {cmd}. Send /help for available commands."
             };
         }
@@ -86,9 +78,6 @@ public class BotCommandService
             return cmd switch
             {
                 "/char" => await HandleCharacterGroupAsync(senderId, parts, groupId, isAdmin, ct),
-                "/quiz" => await HandleQuizGroupAsync(senderId, parts, groupId, isAdmin, ct),
-                // /ui 由 MessageEventHandler 直接处理（它才持有当条消息的被动回复槽位）
-                "/ui" => "/ui 需在群内 @我 使用，会本条发回 markdown 与按钮两条探测消息。",
                 _ => $"Unknown command {cmd}."
             };
         }
@@ -250,31 +239,5 @@ public class BotCommandService
         await configRepo.SaveGroupConfigAsync(config, ct);
 
         return "Character reset to default.";
-    }
-
-    private Task<string> HandleQuizAsync(string senderId, string[] parts, CancellationToken ct)
-    {
-        if (parts.Length < 2) return Task.FromResult("Usage: /quiz start <type>|answer <answer>|stop");
-        return Task.FromResult("Quiz commands are only available in groups.");
-    }
-
-    private async Task<string> HandleQuizGroupAsync(string senderId, string[] parts, string groupId, bool isAdmin, CancellationToken ct)
-    {
-        if (parts.Length < 2) return "Usage: /quiz start <type>|answer <answer>|stop";
-
-        var subCmd = parts[1].ToLowerInvariant();
-        return subCmd switch
-        {
-            "start" => isAdmin
-                ? await _gameService.StartGameAsync(groupId, string.Join(' ', parts.Skip(2)))
-                : "Only group admins can start games.",
-            "answer" => parts.Length >= 3
-                ? await _gameService.SubmitAnswerAsync(groupId, string.Join(' ', parts.Skip(2)))
-                : "Usage: /quiz answer <your answer>",
-            "stop" => isAdmin
-                ? _gameService.StopGame(groupId)
-                : "Only group admins can stop games.",
-            _ => "Usage: /quiz start <type>|answer <answer>|stop"
-        };
     }
 }

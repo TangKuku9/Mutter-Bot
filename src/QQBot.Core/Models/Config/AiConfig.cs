@@ -5,8 +5,7 @@ public record AiConfig
     /// <summary>
     /// 默认系统提示词，用户未填写 SystemPrompt 时使用。
     /// 注：第 4 条的“不渲染 Markdown”仅约束 AI 自由聊天输出——AI 回复无法预知格式是否会被降级，
-    /// 一律发纯文本最安全。修仙面板不受此限制：它由 GamePanel/MarkdownText 受控渲染，
-    /// 同一数据源同时产出纯文本与 markdown，被平台拒绝时自动发纯文本。
+    /// 一律发纯文本最安全。富消息通道本身仍是共享能力（见 RichUiCapability）。
     /// </summary>
     public const string DefaultSystemPrompt =
         """
