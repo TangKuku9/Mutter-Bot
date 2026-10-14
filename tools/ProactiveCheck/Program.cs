@@ -423,7 +423,8 @@ foreach (var suffix in new[] { "", "-wal", "-shm" })
 }
 Console.WriteLine($"源库：{sourceDb} → 副本 {targetDb}（生产库只读，不改）");
 
-long MessagesBefore, GroupsBefore;
+long MessagesBefore;
+List<string> legacyNumericGroupIds;
 var flagsBefore = new Dictionary<string, long>();
 using (var probe = new SqliteConnection($"Data Source={targetDb}"))
 {
@@ -441,7 +442,9 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
         fix.ExecuteNonQuery();
     }
     MessagesBefore = Scalar(probe, "SELECT COUNT(*) FROM ChatMessages");
-    GroupsBefore = Scalar(probe, "SELECT COUNT(*) FROM GroupConfigs WHERE GroupId IN ('100000001','100000002')");
+    // 迁移前先取一份「数字群号时代」的键快照：按形状（纯数字）识别，
+    // 不把任何具体群号写进仓库，因此换一个库跑也成立。
+    legacyNumericGroupIds = ReadNumericGroupIds(probe);
     flagsBefore = ReadFlags(probe);
 }
 
@@ -467,8 +470,9 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
         "GroupConfigs.AiProactiveEnabled 列补齐");
     Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_index_list('ProactiveChatLogs')") == 2, "留痕表两个索引就位");
     Check(Scalar(probe, "SELECT COUNT(*) FROM ChatMessages") == MessagesBefore, $"聊天历史未被迁移改动（{MessagesBefore} 条）");
-    Check(Scalar(probe, "SELECT COUNT(*) FROM GroupConfigs WHERE GroupId IN ('100000001','100000002')") == GroupsBefore,
-        $"数字群号时代的 {GroupsBefore} 条配置未被迁移丢失");
+    var legacyKept = ReadNumericGroupIds(probe);
+    Check(legacyNumericGroupIds.All(legacyKept.Contains),
+        $"数字群号时代的 {legacyNumericGroupIds.Count} 条配置未被迁移丢失");
     var flagsAfter = ReadFlags(probe);
     var preserved = flagsBefore.All(kv => flagsAfter.TryGetValue(kv.Key, out var v) && v == kv.Value);
     Check(preserved, $"迁移不改动任何群的参与位（原有 {flagsBefore.Count} 群）");
@@ -483,8 +487,10 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
     probe.Open();
     var ddl = ScalarText(probe, "SELECT sql FROM sqlite_master WHERE type='table' AND name='GroupConfigs'") ?? "";
     Check(ddl.Contains("\"GroupId\" TEXT NOT NULL"), "GroupConfigs 主键已重建为 TEXT（可存 openid 十六进制串）");
-    Check(Scalar(probe, "SELECT COUNT(*) FROM GroupConfigs WHERE GroupId IN ('100000001','100000002')") == 2,
-        "两条数字群号时代的历史配置原样保留（键转为文本）");
+    var legacyText = ReadNumericGroupIds(probe);
+    Check(legacyNumericGroupIds.All(legacyText.Contains)
+          && ScalarText(probe, "SELECT typeof(GroupId) FROM GroupConfigs LIMIT 1") == "text",
+        $"数字群号时代的历史配置原样保留（{legacyNumericGroupIds.Count} 条，键转为文本）");
     Check(ScalarText(probe, "SELECT typeof(UserId) FROM PrivateChatConfigs LIMIT 1") == "text",
         "PrivateChatConfigs.UserId 同样转为 TEXT 主键");
 }
@@ -505,11 +511,11 @@ using (var db = new AppDbContext())
 
     // 已存在的群应被补上默认配置行，面板才有地方落开关
     var all = await repo.GetAllGroupConfigsAsync();
-    Check(all.Any(g => g.GroupId == "AAAABBBBCCCCDDDDEEEEFFFF00009999"),
-        "另一个在册群被补齐默认配置行");
     var known = await repo.GetKnownGroupsAsync();
     Check(known.All(k => all.Any(g => g.GroupId == k.GroupId)),
         $"每个在册群都有配置行（{known.Count} 群），面板才有地方落开关");
+    Check(all.Any(g => g.GroupId == hexGroup),
+        "补齐不会挤掉已有的 openid 群配置");
 
     var clean = all.First(g => g.GroupId == hexGroup);
     clean.AiProactiveEnabled = false;
@@ -950,6 +956,19 @@ static Dictionary<string, long> ReadFlagsOn(string db)
     using var conn = new SqliteConnection($"Data Source={db}");
     conn.Open();
     return ReadFlags(conn);
+}
+
+// 「数字群号时代」的键：早期用 QQ 群号做键，迁移后是 TEXT。
+// 只按形状（非空且全为数字）识别，不引用任何具体群号，
+// 这样既覆盖了历史键，也不会把线上群号带进仓库。
+static List<string> ReadNumericGroupIds(SqliteConnection conn)
+{
+    var ids = new List<string>();
+    using var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT GroupId FROM GroupConfigs WHERE GroupId <> '' AND GroupId NOT GLOB '*[^0-9]*'";
+    using var reader = cmd.ExecuteReader();
+    while (reader.Read()) ids.Add(reader.GetString(0));
+    return ids;
 }
 
 static string? ScalarText(SqliteConnection conn, string sql)

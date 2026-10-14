@@ -12,8 +12,8 @@ public static class Program
 {
     public static async Task Main(string[] args)
     {
-        // 无感迁移：固定与 Windows 版一致的运行时环境，避免客户感知差异。
-        // 1) 文化固定为 zh-CN——保证百分比/数字等格式化与 Windows 版一致
+        // 固定运行时环境，避免不同机器上的格式化与日界统计出现差异。
+        // 1) 文化固定为 zh-CN——保证百分比/数字等格式化稳定
         //    （否则 invariant/其他 locale 会把 "12%" 渲染成 "12 %"）。
         // 2) 时区固定为 Asia/Shanghai——保证依赖本地日界的逻辑（如"今日消息数"统计
         //    的 DateTime.Today）按北京时间零点计算，而不是服务器时区（可能是 UTC）。

@@ -40,14 +40,14 @@ chown qqbot:qqbot "$INSTALL_DIR"
 
 echo "[3/6] 复制文件..."
 # 先停止运行中的服务：让 SQLite 干净关闭并对 WAL 做检查点，
-# 避免未落盘的写（如最近一次突破）在复制/覆盖过程中丢失。
+# 避免未落盘的写丢失。
 systemctl stop qqbot 2>/dev/null || true
 
 # 保护已有的运行数据库及 WAL/SHM 辅助文件：
 # 若安装目录已有 qqbot.db，先备份，且不被 publish 中的旧库及其 WAL/SHM 覆盖。
 # 注意：SQLite 在 WAL 模式下，最近未 checkpoint 的写存在于 qqbot.db-wal；
-#       用开发机的 -wal/-shm 覆盖线上文件会让这些写丢失（典型表现：
-#       PlayerProfiles 的最近突破被回退，而已 checkpoint 的背包保留）。
+#       用开发机的 -wal/-shm 覆盖线上文件会让这些写丢失
+#       （表现为最近一批写入回退，而更早已 checkpoint 的数据仍在）。
 if [ -f "$INSTALL_DIR/qqbot.db" ]; then
     BACKUP="$INSTALL_DIR/qqbot.db.bak.$(date +%Y%m%d%H%M%S)"
     cp "$INSTALL_DIR/qqbot.db" "$BACKUP"
