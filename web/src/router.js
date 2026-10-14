@@ -20,7 +20,7 @@ const router = createRouter({
 })
 
 router.afterEach((to) => {
-  if (to.meta?.title) document.title = `${to.meta.title} · QQBot 管理面板`
+  if (to.meta?.title) document.title = `${to.meta.title} · Mutter 管理面板`
 })
 
 export default router

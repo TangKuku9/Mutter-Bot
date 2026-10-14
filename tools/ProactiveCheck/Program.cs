@@ -5,23 +5,23 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using QQBot.Core.EventHandlers;
-using QQBot.Core;
-using QQBot.Core.Interfaces;
-using QQBot.Core.Models.Config;
-using QQBot.Core.Models.QQOfficial;
-using QQBot.Core.Proactive;
-using QQBot.Core.Services;
-using QQBot.Infrastructure;
-using QQBot.Infrastructure.Data;
+using Mutter.Core.EventHandlers;
+using Mutter.Core;
+using Mutter.Core.Interfaces;
+using Mutter.Core.Models.Config;
+using Mutter.Core.Models.QQOfficial;
+using Mutter.Core.Proactive;
+using Mutter.Core.Services;
+using Mutter.Infrastructure;
+using Mutter.Infrastructure.Data;
 using Microsoft.Extensions.Hosting;
-using QQBot.Infrastructure.Entities;
-using QQBot.Infrastructure.Services;
-using QQBot.Web.Controllers;
+using Mutter.Infrastructure.Entities;
+using Mutter.Infrastructure.Services;
+using Mutter.Web.Controllers;
 
 // 择机主动发言自检：纯逻辑门禁 + 生产库副本上的迁移幂等 + DI 装配。
 // 用法：dotnet run --project tools/ProactiveCheck -- [源库路径]
-var sourceDb = args.Length > 0 ? args[0] : "qqbot.db";
+var sourceDb = args.Length > 0 ? args[0] : "mutter-bot.db";
 if (!File.Exists(sourceDb))
 {
     Console.WriteLine($"源库不存在：{sourceDb}（需先做一致性快照，避免拷到半截 WAL）");
@@ -414,7 +414,7 @@ Check(System.Text.Json.JsonSerializer.Deserialize<ProactiveVerdict>(repairedJson
     "折在 JSON 字符串值里的换行被接回，判定解析不再靠运气");
 
 Console.WriteLine("== 4. 生产库副本上的迁移幂等 ==");
-var targetDb = Path.Combine(AppContext.BaseDirectory, "qqbot.db");
+var targetDb = Path.Combine(AppContext.BaseDirectory, "mutter-bot.db");
 foreach (var suffix in new[] { "", "-wal", "-shm" })
 {
     var src = targetDb + suffix;
@@ -498,7 +498,7 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
 // 真正走一遍面板路径：给一个十六进制 openid 存群配置
 using (var db = new AppDbContext())
 {
-    var repo = new QQBot.Infrastructure.Repositories.ConfigRepository(db);
+    var repo = new Mutter.Infrastructure.Repositories.ConfigRepository(db);
     const string hexGroup = "AAAABBBBCCCCDDDDEEEEFFFF00001111";
     await repo.SaveGroupConfigAsync(new GroupConfig
     {
@@ -655,10 +655,10 @@ using (var scope = sp.CreateScope())
 
     await msgRepo.SaveMessagesAsync(new[]
     {
-        new QQBot.Core.Models.ChatMessage { MessageId = "t-at", ChatType = 0, GroupId = g1, UserId = "u", UserName = "泷奈", PlainText = "@bot 在吗", HasAtBot = true },
-        new QQBot.Core.Models.ChatMessage { MessageId = "t-obs", ChatType = 0, GroupId = g1, UserId = "u", UserName = "千束", PlainText = "今晚吃拉面" },
-        new QQBot.Core.Models.ChatMessage { MessageId = "t-reply", ChatType = 0, GroupId = g1, UserId = "bot", UserName = "Bot", PlainText = "在的", IsBotMessage = true, AiModelUsed = "test" },
-        new QQBot.Core.Models.ChatMessage { MessageId = "t-pro", ChatType = 0, GroupId = g1, UserId = "bot", UserName = "Bot", PlainText = "拉面配煎蛋", IsBotMessage = true, IsProactive = true, AiModelUsed = "test" },
+        new Mutter.Core.Models.ChatMessage { MessageId = "t-at", ChatType = 0, GroupId = g1, UserId = "u", UserName = "泷奈", PlainText = "@bot 在吗", HasAtBot = true },
+        new Mutter.Core.Models.ChatMessage { MessageId = "t-obs", ChatType = 0, GroupId = g1, UserId = "u", UserName = "千束", PlainText = "今晚吃拉面" },
+        new Mutter.Core.Models.ChatMessage { MessageId = "t-reply", ChatType = 0, GroupId = g1, UserId = "bot", UserName = "Bot", PlainText = "在的", IsBotMessage = true, AiModelUsed = "test" },
+        new Mutter.Core.Models.ChatMessage { MessageId = "t-pro", ChatType = 0, GroupId = g1, UserId = "bot", UserName = "Bot", PlainText = "拉面配煎蛋", IsBotMessage = true, IsProactive = true, AiModelUsed = "test" },
     });
 
     foreach (var (source, expect) in new[] { ("at", 1L), ("observe", 1L), ("bot", 1L), ("proactive", 1L) })
@@ -696,7 +696,7 @@ using (var scope = sp.CreateScope())
     var pn = DateTime.UtcNow;
     var older = pn.AddDays(-9);
 
-    QQBot.Core.Models.ChatMessage Row(string id, string user, bool isBot, string text, DateTime at, string? peer = null)
+    Mutter.Core.Models.ChatMessage Row(string id, string user, bool isBot, string text, DateTime at, string? peer = null)
         => new()
         {
             MessageId = id, ChatType = 1, GroupId = null,
@@ -765,12 +765,12 @@ using (var scope = sp.CreateScope())
     const string g3 = "CTXG";
 
     var t = DateTime.UtcNow.AddMinutes(-10);
-    var rows = new List<QQBot.Core.Models.ChatMessage>();
+    var rows = new List<Mutter.Core.Models.ChatMessage>();
     // 真实对话 20 条，间隔着 60 条「非 AI 生成的 bot 回复」——后者会被建对话时丢掉
     for (var i = 0; i < 80; i++)
     {
         var isDistractor = i % 4 != 0;
-        rows.Add(new QQBot.Core.Models.ChatMessage
+        rows.Add(new Mutter.Core.Models.ChatMessage
         {
             MessageId = $"c-{i:D3}", ChatType = 0, GroupId = g3,
             UserId = isDistractor ? "bot" : "u1",
@@ -798,7 +798,7 @@ using (var scope = sp.CreateScope())
 
     // 条数够但内容很长时：预算必须真正生效，不能被"至少保留 8 条"盖过
     await pdb3.ChatMessages.Where(m => m.MessageId.StartsWith("c-")).ExecuteDeleteAsync();
-    var longRows = Enumerable.Range(0, 20).Select(i => new QQBot.Core.Models.ChatMessage
+    var longRows = Enumerable.Range(0, 20).Select(i => new Mutter.Core.Models.ChatMessage
     {
         MessageId = $"c-long-{i:D3}", ChatType = 0, GroupId = g3,
         UserId = "u1", UserName = "阿明",
@@ -886,7 +886,7 @@ using (var scope = sp.CreateScope())
     routeGroup.TriggerMode = 0;                       // 只回被 @ 的：更能验证 @ 判定
     routeGroup.BotMentionOpenId = "11112222333344445555666677778888";
     await repo.SaveGroupConfigAsync(routeGroup);
-    var router = sp.GetRequiredService<QQBot.Core.Services.MessageRouter>();
+    var router = sp.GetRequiredService<Mutter.Core.Services.MessageRouter>();
     var hitRoute = await router.RouteGroupAsync(routeGroup.GroupId, false,
         "<@11112222333344445555666677778888> 中午吃什么");
     Check(hitRoute.ShouldProcess && hitRoute.BotMentionCode == routeGroup.BotMentionOpenId && !hitRoute.ShouldObserve,
@@ -934,7 +934,7 @@ using (var scope = sp.CreateScope())
 
 foreach (var suffix in new[] { "", "-wal", "-shm" })
 {
-    var f = Path.Combine(AppContext.BaseDirectory, "qqbot.db" + suffix);
+    var f = Path.Combine(AppContext.BaseDirectory, "mutter-bot.db" + suffix);
     if (File.Exists(f)) File.Delete(f);
 }
 
@@ -992,7 +992,7 @@ file sealed class NoopGateway : IQqGatewayConnection
     public IReadOnlyDictionary<string, long> EventCounts => _counts;
     public bool IsConnected => true;
     public event EventHandler<bool>? ConnectionStateChanged { add { } remove { } }
-    public event EventHandler<QQBot.Core.Models.QQOfficial.QqDispatch>? DispatchReceived { add { } remove { } }
+    public event EventHandler<Mutter.Core.Models.QQOfficial.QqDispatch>? DispatchReceived { add { } remove { } }
     public Task ConnectAsync(CancellationToken ct = default) => Task.CompletedTask;
     public Task DisconnectAsync(CancellationToken ct = default) => Task.CompletedTask;
 }

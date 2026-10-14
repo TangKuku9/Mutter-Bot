@@ -60,7 +60,7 @@ const exportLogs = () => {
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
-  a.download = `qqbot-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`
+  a.download = `mutter-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`
   a.click()
   URL.revokeObjectURL(a.href)
 }

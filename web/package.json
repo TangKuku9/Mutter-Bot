@@ -1,8 +1,8 @@
 {
-  "name": "qqbot-panel",
+  "name": "mutter-panel",
   "version": "2.0.0",
   "private": true,
-  "description": "QQBot 管理面板前端源码工程",
+  "description": "Mutter 管理面板前端源码工程",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

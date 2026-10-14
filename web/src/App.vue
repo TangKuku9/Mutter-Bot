@@ -1,7 +1,7 @@
 <template>
   <el-container class="layout">
     <el-aside width="200px" class="aside">
-      <div class="logo">🐾 QQBot 面板</div>
+      <div class="logo">🐾 Mutter 面板</div>
       <el-menu :default-active="route.path" router class="menu">
         <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
         <el-menu-item index="/chat"><el-icon><ChatDotRound /></el-icon>聊天记录</el-menu-item>

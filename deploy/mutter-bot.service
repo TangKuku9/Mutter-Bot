@@ -1,0 +1,34 @@
+[Unit]
+Description=mutter-bot Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mutter-bot
+ExecStart=/opt/mutter-bot/mutter-bot --headless
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+
+# 安全加固
+User=mutter-bot
+Group=mutter-bot
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mutter-bot/logs /opt/mutter-bot
+PrivateTmp=true
+
+# 环境变量
+Environment=DOTNET_ROOT=/usr/share/dotnet
+# 时区固定为北京时间：保证"今日消息数"等按本地日界统计的逻辑符合预期。
+# 注意：不要设置 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1，
+# 否则百分比等格式化会退化为 "12 %" 这类变体，与代码中固定的 zh-CN 不一致。
+Environment=TZ=Asia/Shanghai
+Environment=ASPNETCORE_ENVIRONMENT=Production
+
+[Install]
+WantedBy=multi-user.target

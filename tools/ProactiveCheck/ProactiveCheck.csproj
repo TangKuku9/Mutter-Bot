@@ -6,9 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/QQBot.Core/QQBot.Core.csproj" />
-    <ProjectReference Include="../../src/QQBot.Infrastructure/QQBot.Infrastructure.csproj" />
-    <ProjectReference Include="../../src/QQBot.Web/QQBot.Web.csproj" />
+    <ProjectReference Include="../../src/Mutter.Core/Mutter.Core.csproj" />
+    <ProjectReference Include="../../src/Mutter.Infrastructure/Mutter.Infrastructure.csproj" />
+    <ProjectReference Include="../../src/Mutter.Web/Mutter.Web.csproj" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.*" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.*" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.*" />

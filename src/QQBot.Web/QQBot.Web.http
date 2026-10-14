@@ -1,6 +1,0 @@
-@QQBot.Web_HostAddress = http://localhost:5194
-
-GET {{QQBot.Web_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###

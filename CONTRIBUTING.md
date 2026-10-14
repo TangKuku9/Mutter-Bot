@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你愿意为 QQBot-Linux 出力。本文说明分支模型、提交流程，以及**不可协商的项目红线**。
+感谢你愿意为 Mutter 出力。本文说明分支模型、提交流程，以及**不可协商的项目红线**。
 红线部分请务必读完再动手——其中多条是为了保护群成员隐私和你的账号安全。
 
 > 本项目仅供学习交流，使用与贡献均须遵守 QQ 机器人平台规则与相关法律法规。
@@ -50,14 +50,14 @@ git push origin preview-features
 ### 起步
 
 ```bash
-git clone https://github.com/TangKuku9/QQBot-Linux.git
-cd QQBot-Linux
+git clone https://github.com/TangKuku9/mutter-bot.git
+cd mutter-bot
 
 # 配置：仓库只跟踪占位符，真实凭据请写进这个本地文件（已被 .gitignore 忽略）
-cp src/QQBot.Web/appsettings.example.json src/QQBot.Web/appsettings.json
+cp src/Mutter.Web/appsettings.example.json src/Mutter.Web/appsettings.json
 
-dotnet build QQBot-Linux.sln
-dotnet run --project src/QQBot.ConsoleHost
+dotnet build Mutter.sln
+dotnet run --project src/Mutter.ConsoleHost
 ```
 
 在 QQ 开放平台创建机器人，取 `AppId` / `ClientSecret`，并申请群全量消息、@ 消息、互动事件等
@@ -65,11 +65,11 @@ dotnet run --project src/QQBot.ConsoleHost
 
 ### 面板前端
 
-**构建产物不入库**，`src/QQBot.Web/wwwroot` 被 `.gitignore` 忽略。仓库克隆下来时没有面板页面，
+**构建产物不入库**，`src/Mutter.Web/wwwroot` 被 `.gitignore` 忽略。仓库克隆下来时没有面板页面，
 需要自行构建：
 
 ```bash
-cd web && npm ci && npm run build    # 输出到 ../src/QQBot.Web/wwwroot
+cd web && npm ci && npm run build    # 输出到 ../src/Mutter.Web/wwwroot
 ```
 
 开发时可用 `npm run dev`（Vite 会把 `/api` 与 `/hub` 代理到 `http://127.0.0.1:5188`）。
@@ -121,7 +121,7 @@ refactor!: 剥离修仙功能到 xianxia 分支，主分支专注 AI 聊天/择�
 
 ## 4. 提交前检查清单
 
-- [ ] `dotnet build QQBot-Linux.sln` **0 warning / 0 error**
+- [ ] `dotnet build Mutter.sln` **0 warning / 0 error**
 - [ ] 若改动了 `web/`，`npm run build` 通过
 - [ ] 若改动了业务逻辑，`tools/ProactiveCheck` 跑完没有 `FAIL`
 - [ ] `git status` 里没有意外文件（尤其没有被 `.gitignore` 忽略却被 `git add -f` 强加进来的）
@@ -146,7 +146,7 @@ refactor!: 剥离修仙功能到 xianxia 分支，主分支专注 AI 聊天/择�
 ### 6.1 凭据与密钥
 
 - **绝不提交** `AppId`、`ClientSecret`、AI 服务商 `ApiKey`、面板口令或任何 token。
-- `src/QQBot.Web/appsettings.json` 只允许占位符（`YOUR_APP_ID` 等）。
+- `src/Mutter.Web/appsettings.json` 只允许占位符（`YOUR_APP_ID` 等）。
   真凭据请放 `appsettings.Development.json` 或环境变量——它们已被 `.gitignore` 忽略。
 - **一旦误提交：立刻轮换该凭据**（平台重置 secret、改面板口令）。
   只删掉提交**不等于**修复——历史里仍能翻出来。
@@ -166,7 +166,7 @@ refactor!: 剥离修仙功能到 xianxia 分支，主分支专注 AI 聊天/择�
 
 - 数据库：`*.db` / `*.db-wal` / `*.db-shm` / `*.sqlite*`
 - 日志：`logs/`、`*.log`
-- 构建：`bin/`、`obj/`、`publish/`、`src/QQBot.Web/wwwroot/`
+- 构建：`bin/`、`obj/`、`publish/`、`src/Mutter.Web/wwwroot/`
 - 环境配置：`appsettings.*.json`、`secrets.json`
 
 ### 6.4 数据安全（不可逆操作）

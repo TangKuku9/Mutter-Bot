@@ -5,7 +5,7 @@ publish/
 artifacts/
 
 # 面板前端构建产物：由 web/ 构建生成，不入库（需自行 npm run build）
-src/QQBot.Web/wwwroot/
+src/Mutter.Web/wwwroot/
 
 # Visual Studio
 .vs/
@@ -35,7 +35,7 @@ src/QQBot.Web/wwwroot/
 
 # Environment-specific settings (keep appsettings.json, ignore environment overrides)
 appsettings.*.json
-!src/QQBot.Web/appsettings.example.json
+!src/Mutter.Web/appsettings.example.json
 
 # Node
 node_modules/

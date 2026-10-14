@@ -1,4 +1,4 @@
-# QQBot-Linux
+# Mutter
 
 基于 **QQ 官方机器人 API**（WebSocket 接入）的群聊 AI 聊天机器人，附带 Web 管理面板。
 
@@ -53,17 +53,17 @@
 
 - 后端：C# / .NET 9（ConsoleHost 进程托管 + ASP.NET Core 面板 API + SignalR 推送）
 - 数据库：SQLite（EF Core）
-- 前端：Vue 3 + Vite + Element Plus，构建产物输出至 `src/QQBot.Web/wwwroot`
+- 前端：Vue 3 + Vite + Element Plus，构建产物输出至 `src/Mutter.Web/wwwroot`
 - 接入：QQ 官方机器人 WebSocket 网关（群全量消息 / @ 消息 / 互动事件）
 
 ## 目录结构
 
 ```
 src/
-  QQBot.Core/            # 领域层：AI 聊天、上下文构建、Proactive 决策、富交互能力门控
-  QQBot.Infrastructure/  # EF Core（SQLite）、QQ API 客户端、WebSocket 网关、托管服务
-  QQBot.Web/             # 面板 API（ASP.NET Core）
-  QQBot.ConsoleHost/     # 进程宿主（生产以 systemd 运行）
+  Mutter.Core/            # 领域层：AI 聊天、上下文构建、Proactive 决策、富交互能力门控
+  Mutter.Infrastructure/  # EF Core（SQLite）、QQ API 客户端、WebSocket 网关、托管服务
+  Mutter.Web/             # 面板 API（ASP.NET Core）
+  Mutter.ConsoleHost/     # 进程宿主（生产以 systemd 运行）
 web/                    # 面板前端源码（Vite）
 tools/                  # 自检工具（ProactiveCheck）
 deploy/                 # install.sh 与 systemd 单元
@@ -72,18 +72,18 @@ deploy/                 # install.sh 与 systemd 单元
 ## 快速开始
 
 1. 在 QQ 开放平台创建机器人，取得 `AppId` / `ClientSecret`，并申请所需 intents。
-2. 复制 `src/QQBot.Web/appsettings.example.json` 为 `appsettings.json`，填写凭据与面板口令。
+2. 复制 `src/Mutter.Web/appsettings.example.json` 为 `appsettings.json`，填写凭据与面板口令。
 3. 构建并运行：
 
 ```bash
-dotnet build QQBot-Linux.sln
-dotnet run --project src/QQBot.ConsoleHost
+dotnet build Mutter.sln
+dotnet run --project src/Mutter.ConsoleHost
 ```
 
 4. 面板前端：构建产物不入库，需自行构建（不构建则只有 API 与网关，没有面板页面）：
 
 ```bash
-cd web && npm ci && npm run build   # 输出到 ../src/QQBot.Web/wwwroot
+cd web && npm ci && npm run build   # 输出到 ../src/Mutter.Web/wwwroot
 ```
 
 数据库为 SQLite，首次启动自动建表；已有库由 `EnsureSchemaUpgradedAsync` 幂等升级（含历史主键类型修复）。
