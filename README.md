@@ -66,7 +66,7 @@ src/
   Mutter.ConsoleHost/     # 进程宿主（生产以 systemd 运行）
 web/                    # 面板前端源码（Vite）
 tools/                  # 自检工具（ProactiveCheck）
-deploy/                 # install.sh 与 systemd 单元
+deploy/                 # install.sh、systemd 单元，以及旧版(qqbot)迁移说明
 ```
 
 ## 快速开始
