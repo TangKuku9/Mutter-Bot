@@ -2,7 +2,7 @@
 
 基于 **QQ 官方机器人 API**（WebSocket 接入）的群聊 AI 聊天机器人，附带 Web 管理面板。
 
-> 仅供学习交流，请遵守 QQ 机器人平台规则与相关法律法规。
+> 本项目仅提供 bot 管理工具，使用时请遵守 QQ 机器人平台规则与相关法律法规。
 
 ## 分支说明（重要）
 
@@ -15,20 +15,8 @@
 
 **想贡献代码请先读 [CONTRIBUTING.md](CONTRIBUTING.md)**（分支模型、提交规范与项目红线）。
 安全漏洞请走 [SECURITY.md](SECURITY.md) 的私密渠道，不要开公开 issue。
-社区 PR 请提交到 `preview-features` 或 `preview-fixes`，由维护者合并进 `main`。
-
-修仙功能（境界/突破/炼丹/探索/挂机结算/每日任务/切磋/群世界/AI 随机事件/月榜/富交互按钮面板）
-已于某次重构中从 `main` 剥离，成套保留在 `xianxia` 分支，相当于给这个玩法留了一份完整存档。
-
-两点需要知道：
-
-- **两边已各自演进。** 剥离之后 `main` 上的共享基础设施修正在 `xianxia` 上**不存在**，
-  例如上下文条数保证、token 输入预算、择机去重与图片张数可配等。
-  若将来要恢复修仙玩法，建议以 `main` 为基线重新并入，而不是直接切过去用。
-- **数据表仍保留在 `main` 的库里。** `PlayerProfiles` / `GroupWorlds` / `PlayerInventories` /
-  `GameCooldowns` / `CultivationEventLogs` 五张表的建表与补列迁移仍在
-  `AppDbContext.EnsureSchemaUpgradedAsync` 中，但 `main` 不对它们建实体、不做读写。
-  这是刻意的：已有部署里可能存着玩家数据，删表不可逆。
+社区 PR 请提交到 `preview-features` 或 `preview-fixes`；**合并一律由维护者决定**——
+维护者先合并到预览分支，再并入 `main`。CI 全绿不代表一定会被合并。
 
 ## 功能概览
 

@@ -9,17 +9,30 @@
 
 ## 1. 分支模型
 
-| 分支 | 用途 | 谁能推 | 接受 PR |
+| 分支 | 用途 | 谁能推送 | 接受 PR |
 | --- | --- | --- | --- |
-| `main` | 稳定主线，正式发布 | 仅维护者 | ✗ |
-| `preview-features` | **新功能**的 PR 目标分支 | 维护者 + PR | ✓ |
-| `preview-fixes` | **缺陷修复**的 PR 目标分支 | 维护者 + PR | ✓ |
-| `xianxia` | 修仙 RPG 冻结存档 | 仅维护者 | ✗ |
+| `main` | 稳定主线，正式发布 | 仅维护者（须经 PR） | 仅文档 / 治理类极小改动 |
+| `preview-features` | **新功能**的 PR 目标分支 | 仅维护者 | ✓ |
+| `preview-fixes` | **缺陷修复**的 PR 目标分支 | 仅维护者 | ✓ |
+| `xianxia` | 修仙 RPG 冻结存档 | 无人（只读存档） | ✗ |
 
-规则：
+### 谁有权合并
 
+**合并（merge）只由维护者决定。** 这一点分两层，别混为一谈：
+
+- **机制上**：GitHub 的合并权限由仓库的**写权限**决定。本仓库只把写权限授予维护者，
+  因此外部贡献者即使自己的 PR 全绿，也**没有按钮可按**。
+- **约定上**：即便将来给某位协作者开了写权限，也**不要自行合并**——请留给维护者裁决。
+
+CI 全绿是合并的**必要条件，不是充分条件**。维护者仍会核对项目红线与改动范围，
+并有权要求修改、推迟或直接关闭。
+
+### 规则
+
+- **外部贡献者没有写权限，请 fork 后在自己的 fork 里开分支**（命令见第 5 节），
+  不要试图直接往本仓库推分支。
 - **社区 PR 一律提交到 `preview-features` 或 `preview-fixes`，不要直接提到 `main`。**
-  维护者会把预览分支合并进 `main`。
+  维护者先合并到预览分支，再把预览分支合并进 `main`。
 - `xianxia` 是刻意冻结的存档，**不接受任何 PR、不接受合并**。若你想恢复修仙玩法，
   请按 README 的建议以 `main` 为基线重新实现。
 - 只含文档或仓库治理的极小改动（例如修错别字、补链接）可以提到 `main`。
@@ -44,12 +57,24 @@ git push origin preview-features
 
 | 分支 | 建议规则 |
 | --- | --- |
-| `main` | 禁止直接推送；要求通过 PR 合并；要求 CI 通过后才能合并 |
-| `preview-features`、`preview-fixes` | 要求 CI 通过；禁止强制推送与删除 |
-| `xianxia` | 锁定（Lock branch），杜绝误推冻结存档 |
+| `main` | `Require a pull request before merging`；`Require status checks to pass`；禁止删除与强推 |
+| `preview-features`、`preview-fixes` | `Require status checks to pass`；禁止删除与强推 |
+| `xianxia` | `Restrict updates` + 禁止删除 + 禁止强推（做成只读存档） |
 
 入口：`Settings → Rules → Rulesets`（或 `Branches`），为上面每个分支各建一条。
 `Require status checks to pass` 里勾选 CI 的两个任务：**构建与自检 (.NET)** 与 **面板前端构建**。
+
+**三个最容易配错的点：**
+
+- **`Require a pull request before merging` 里的 Required approvals 填 `0`。**
+  GitHub 不允许批准自己的 PR，单人维护时填 `1` 会让维护者**自己永远合不了自己的 PR**。
+  approvals=0 **不等于**"谁都能合并"——合并权仍由写权限决定，而写权限只给维护者
+  （见上面「谁有权合并」）。将来若有第二位协作者，再把 approvals 提到 `1`，
+  或引入 `CODEOWNERS` + `Require review from Code Owners`。
+- **预览分支不要勾 `Restrict updates`。** 它只允许有 bypass 权限的人更新，
+  会连 PR 合并一起挡掉。
+- **`xianxia` 不要勾 `Require status checks`。** CI 的触发分支不含 `xianxia`，
+  勾了会让该分支永久等待一个不会上报的检查，等于锁死。
 
 ---
 
@@ -150,11 +175,21 @@ refactor!: 剥离修仙功能到 xianxia 分支，主分支专注 AI 聊天/择�
 
 ## 5. PR 流程
 
-1. 从 `main` 切出你的分支：`git switch -c fix/proactive-dedup main`
+1. **先 fork 本仓库**，再在**你自己的 fork** 里从 `main` 切出分支：
+
+   ```bash
+   git switch -c fix/proactive-dedup main
+   git push -u origin fix/proactive-dedup
+   ```
+
+   仓库的写权限只给维护者，直接往本仓库推分支会失败。
+   已被授予写权限的协作者可以直接在本仓库开分支，但同样**不要自行合并**。
 2. 一个 PR 只做一件事；改动小、目的单一，评审才快
 3. 目标分支按性质选 `preview-features`（新功能）或 `preview-fixes`（缺陷修复）
 4. PR 描述里写清：**改了什么、为什么、怎么验证的**
 5. 涉及行为的改动，附上复现步骤或自检输出
+6. **然后等维护者裁决。** CI 全绿只是前置条件；维护者会核对红线与改动范围，
+   再决定合并、要求修改或关闭。
 
 ### CI 会自动跑什么
 
@@ -172,7 +207,7 @@ refactor!: 剥离修仙功能到 xianxia 分支，主分支专注 AI 聊天/择�
 
 ## 6. 项目红线
 
-以下条目不可协商。违反任一条的 PR 会被直接关闭；已合并的会被回退。
+以下条目不可协商。**维护者会直接关闭**违反任一条的 PR；已经合并进来的会被回退。
 
 ### 6.1 凭据与密钥
 
