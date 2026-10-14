@@ -75,7 +75,7 @@ dotnet build QQBot-Linux.sln
 dotnet run --project src/QQBot.ConsoleHost
 ```
 
-4. 面板前端（可选，仓库已含构建产物）：
+4. 面板前端：构建产物不入库，需自行构建（不构建则只有 API 与网关，没有面板页面）：
 
 ```bash
 cd web && npm ci && npm run build   # 输出到 ../src/QQBot.Web/wwwroot
