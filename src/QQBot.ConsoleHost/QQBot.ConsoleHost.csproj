@@ -23,7 +23,8 @@
   <ItemGroup>
     <Content Include="..\QQBot.Web\wwwroot\**" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\QQBot.Web\appsettings.json" Link="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\QQBot.Web\appsettings.Development.json" Link="appsettings.Development.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 环境后缀配置不入库，本地没有时不应因此构建失败 -->
+    <Content Include="..\QQBot.Web\appsettings.Development.json" Link="appsettings.Development.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\QQBot.Web\appsettings.Development.json')" />
   </ItemGroup>
 
 </Project>
