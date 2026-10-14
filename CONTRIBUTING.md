@@ -1,280 +1,341 @@
 # 贡献指南
 
-感谢你愿意为 Mutter 出力。本文说明分支模型、提交流程，以及**不可协商的项目红线**。
-红线部分请务必读完再动手——其中多条是为了保护群成员隐私和你的账号安全。
+感谢你愿意为 Mutter-Bot 出力！Mutter 是一个基于 **.NET 9** 与现代 Web 技术的 QQ 机器人与智能会话服务。
 
-> 本项目仅供学习交流，使用与贡献均须遵守 QQ 机器人平台规则与相关法律法规。
+在参与代码贡献前，建议具备以下技术基础：
+- 熟悉 **C# / .NET 9**，理解依赖注入（DI）、异步编程与 ASP.NET Core Web API / SignalR 机制。
+- 熟悉 **Vue 3** + **Vite** 前端开发（用于管理面板交互）。
+- 了解 **Entity Framework Core** 与 SQLite 的基本操作及迁移机制。
+- 了解 [QQ 机器人官方开放平台](https://bot.q.qq.com/wiki/) 的基础通信协议（WebSocket Gateway、Intents 事件与频控规范）。
+- 新增代码须严格满足本地构建 **0 Warning / 0 Error** 与自检测试。
 
----
-
-## 1. 分支模型
-
-| 分支 | 用途 | 谁能推送 | 接受 PR |
-| --- | --- | --- | --- |
-| `main` | 稳定主线，正式发布 | 仅维护者（须经 PR） | 仅文档 / 治理类极小改动 |
-| `preview-features` | **新功能**的 PR 目标分支 | 仅维护者 | ✓ |
-| `preview-fixes` | **缺陷修复**的 PR 目标分支 | 仅维护者 | ✓ |
-| `xianxia` | 修仙 RPG 冻结存档 | 无人（只读存档） | ✗ |
-
-### 谁有权合并
-
-**合并（merge）只由维护者决定。** 这一点分两层，别混为一谈：
-
-- **机制上**：GitHub 的合并权限由仓库的**写权限**决定。本仓库只把写权限授予维护者，
-  因此外部贡献者即使自己的 PR 全绿，也**没有按钮可按**。
-- **约定上**：即便将来给某位协作者开了写权限，也**不要自行合并**——请留给维护者裁决。
-
-CI 全绿是合并的**必要条件，不是充分条件**。维护者仍会核对项目红线与改动范围，
-并有权要求修改、推迟或直接关闭。
-
-### 规则
-
-- **外部贡献者没有写权限，请 fork 后在自己的 fork 里开分支**（命令见第 5 节），
-  不要试图直接往本仓库推分支。
-- **社区 PR 一律提交到 `preview-features` 或 `preview-fixes`，不要直接提到 `main`。**
-  维护者先合并到预览分支，再把预览分支合并进 `main`。
-- `xianxia` 是刻意冻结的存档，**不接受任何 PR、不接受合并**。若你想恢复修仙玩法，
-  请按 README 的建议以 `main` 为基线重新实现。
-- 只含文档或仓库治理的极小改动（例如修错别字、补链接）可以提到 `main`。
-
-### 预览分支必须与 main 保持同源
-
-预览分支是"接 PR 的暂存区"，不是长期分叉。合并进 `main` 之后，请把预览分支快进到新的 `main`：
-
-```bash
-git fetch origin
-git switch preview-features
-git merge --ff-only origin/main      # 快进；若报错说明已分叉，需要先处理冲突
-git push origin preview-features
-```
-
-`preview-fixes` 同理。**维护者合并 PR 后有责任执行这一步**，否则两个预览分支会逐渐累积分叉，
-后续 PR 的冲突会越来越难收拾。
-
-### 维护者需在 GitHub 上开启的保护规则
-
-这些是仓库设置，不在代码里，新维护者接手时请照着开：
-
-| 分支 | 建议规则 |
-| --- | --- |
-| `main` | `Require a pull request before merging`；`Require status checks to pass`；禁止删除与强推 |
-| `preview-features`、`preview-fixes` | `Require status checks to pass`；禁止删除与强推 |
-| `xianxia` | `Restrict updates` + 禁止删除 + 禁止强推（做成只读存档） |
-
-入口：`Settings → Rules → Rulesets`（或 `Branches`），为上面每个分支各建一条。
-`Require status checks to pass` 里勾选 CI 的两个任务：**构建与自检 (.NET)** 与 **面板前端构建**。
-
-**三个最容易配错的点：**
-
-- **`Require a pull request before merging` 里的 Required approvals 填 `0`。**
-  GitHub 不允许批准自己的 PR，单人维护时填 `1` 会让维护者**自己永远合不了自己的 PR**。
-  approvals=0 **不等于**"谁都能合并"——合并权仍由写权限决定，而写权限只给维护者
-  （见上面「谁有权合并」）。将来若有第二位协作者，再把 approvals 提到 `1`，
-  或引入 `CODEOWNERS` + `Require review from Code Owners`。
-- **预览分支不要勾 `Restrict updates`。** 它只允许有 bypass 权限的人更新，
-  会连 PR 合并一起挡掉。
-- **`xianxia` 不要勾 `Require status checks`。** CI 的触发分支不含 `xianxia`，
-  勾了会让该分支永久等待一个不会上报的检查，等于锁死。
+> ⚠️ **合规声明**：本项目仅供学习交流与个人研究使用，任何贡献均须遵守 QQ 机器人平台规则与相关法律法规。
 
 ---
 
-## 2. 本地开发
+## 目录
 
-### 依赖
+- [1. 搭建开发环境](#1-搭建开发环境)
+  - [1.1 工具依赖](#11-工具依赖)
+  - [1.2 推荐 IDE 与插件](#12-推荐-ide-与插件)
+  - [1.3 获取代码与本地配置](#13-获取代码与本地配置)
+  - [1.4 启动后端服务](#14-启动后端服务)
+  - [1.5 启动管理面板前端 (Dev Server)](#15-启动管理面板前端-dev-server)
+  - [1.6 数据库说明](#16-数据库说明)
+- [2. 项目架构与模块划分](#2-项目架构与模块划分)
+- [3. 开发指引：修改与新增](#3-开发指引修改与新增)
+  - [3.1 修改现有逻辑](#31-修改现有逻辑)
+  - [3.2 新增核心能力 / 指令](#32-新增核心能力--指令)
+  - [3.3 扩展管理面板 API 与界面](#33-扩展管理面板-api-与界面)
+- [4. 可用核心资源与服务 API](#4-可用核心资源与服务-api)
+- [5. 代码检查与自检](#5-代码检查与自检)
+  - [5.1 构建检查 (0 Warning / 0 Error)](#51-构建检查-0-warning--0-error)
+  - [5.2 逻辑自检 (ProactiveCheck)](#52-逻辑自检-proactivecheck)
+  - [5.3 前端构建自检](#53-前端构建自检)
+  - [5.4 提交前自查清单](#54-提交前自查清单)
+- [6. 提交规范 (Commit)](#6-提交规范-commit)
+- [7. 分支模型与 PR 流程](#7-分支模型与-pr-流程)
+  - [7.1 分支规划](#71-分支规划)
+  - [7.2 维护与合并权限](#72-维护与合并权限)
+  - [7.3 标准 PR 步骤](#73-标准-pr-步骤)
+  - [7.4 CI 自动化流水线](#74-ci-自动化流水线)
+- [8. 项目红线（不可协商）](#8-项目红线不可协商)
+- [9. 安全漏洞反馈与开源许可](#9-安全漏洞反馈与开源许可)
 
-- **.NET 9 SDK**（`net9.0`，本项目用 `9.0.*` 版本号浮动）
-- **Node.js** `^18.0.0 || ^20.0.0 || >=22.0.0`（Vite 6 的要求；仅在改动/构建面板前端时需要）
+---
 
-### 起步
+## 1. 搭建开发环境
+
+### 1.1 工具依赖
+
+- **[.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)**（`net9.0`，工程采用 `9.0.*` 版本号浮动）
+- **[Node.js](https://nodejs.org/)**（`^18.0.0 || ^20.0.0 || >=22.0.0`，推荐使用 LTS 20.x，Vite 6 编译前端面板所需）
+- **[Git](https://git-scm.com/)**
+
+### 1.2 推荐 IDE 与插件
+
+- **Visual Studio 2022**（17.12+）或 **JetBrains Rider** / **Visual Studio Code**
+- 若使用 **VS Code**，建议安装以下插件：
+  - [C# Dev Kit](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csdevkit) / [C#](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csharp)：提供 C# 语言高亮、补全与调试支持。
+  - [Vue Language Features (Volar)](https://marketplace.visualstudio.com/items?itemName=Vue.volar)：为 `web/` 目录下的 Vue 3 组件提供支持。
+  - [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode)：前端代码格式化。
+
+### 1.3 获取代码与本地配置
+
+1. 将本仓库 Fork 至你的 GitHub 个人账户。
+2. 克隆本地并初始化配置文件：
 
 ```bash
-git clone https://github.com/TangKuku9/Mutter-Bot.git
+git clone https://github.com/<your-username>/Mutter-Bot.git
 cd Mutter-Bot
 
-# 配置：仓库只跟踪占位符，真实凭据请写进这个本地文件（已被 .gitignore 忽略）
+# 从模板创建本地配置文件（该文件已被 .gitignore 忽略，绝不要提交真实凭据）
 cp src/Mutter.Web/appsettings.example.json src/Mutter.Web/appsettings.json
+```
 
+3. 编辑 `src/Mutter.Web/appsettings.json`，填入在 [QQ 开放平台](https://bot.q.qq.com/) 申请的机器人测试凭据（`AppId`、`ClientSecret`）以及 AI 服务商的配置。
+
+### 1.4 启动后端服务
+
+本仓库提供两种宿主运行模式，按需选择：
+
+- **方式 1：TUI 终端控制台宿主（调试机器人主要逻辑常用）**
+  ```bash
+  dotnet run --project src/Mutter.ConsoleHost
+  ```
+  控制台包含 Dashboard、日志监视器与配置看板等 Terminal.Gui 界面。
+
+- **方式 2：Web 宿主（提供管理面板 API 与 SignalR Hub）**
+  ```bash
+  dotnet run --project src/Mutter.Web
+  ```
+  默认监听 `http://127.0.0.1:5188`。
+
+### 1.5 启动管理面板前端 (Dev Server)
+
+面板前端工程位于 `web/` 目录，基于 Vite + Vue 3：
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+启动后访问提示的本地地址（通常为 `http://localhost:5173`），Vite 已配置反向代理，会自动将 `/api` 和 `/hub` 请求转发给后端的 `http://127.0.0.1:5188`。
+
+> 💡 **构建产物说明**：生产构建产物 `src/Mutter.Web/wwwroot/` 被 `.gitignore` 忽略，**严禁将构建产物提交入库**。
+
+### 1.6 数据库说明
+
+- 本地开发采用 **SQLite**，首次启动程序会自动完成建表（`AppDbContext.EnsureSchemaUpgradedAsync` 执行幂等初始化与迁移）。
+- 运行时生成的数据库文件存放在 `data/` 或根目录，均已被 `.gitignore` 忽略，不得提交到 Git。
+
+---
+
+## 2. 项目架构与模块划分
+
+仓库采用分层与职责分离架构，各工程目录划分如下：
+
+```
+Mutter-Bot/
+├── src/
+│   ├── Mutter.Core/            # 核心业务逻辑（无 UI / 无外部具体协议绑定的纯领域与服务层）
+│   ├── Mutter.Infrastructure/  # 基础设施层（EF Core 数据库、QQ 网关与 HTTP 客户端、AI 接入）
+│   ├── Mutter.Web/             # Web API 宿主（Controller、SignalR Hub、面板鉴权与会话）
+│   └── Mutter.ConsoleHost/     # 控制台/终端 TUI 宿主（基于 Terminal.Gui 的运行容器）
+├── web/                        # 管理面板前端工程（Vue 3 + Vite + Element Plus）
+├── tools/
+│   └── ProactiveCheck/         # 独立自检工具（门禁断言、择机发言逻辑回归、迁移验证）
+├── deploy/                     # 部署脚本与 systemd 配置模板
+└── Directory.Build.props       # 全局 MSBuild 规则（0 Warning / 0 Error 强制配置）
+```
+
+- **`Mutter.Core`**：包含消息解析（`MessageParser`）、主动择机发言大脑（`Proactive` 状态机与 Prompt）、上下文规模剪裁（`ContextBuilder`）、指令处理（`BotCommandService`）以及实体与接口契约。
+- **`Mutter.Infrastructure`**：包含 QQ WebSocket 客户端（`QqGatewayWebSocketClient`）、QQ 官方 API 实现、SQLite 上下文（`AppDbContext`）与仓储实现。
+- **`Mutter.Web`**：对外暴露 RESTful API 与实时日志 Bus，提供轻量安全鉴权与配置写入。
+- **`web/`**：独立的 SPA 前端工程，构建后静态输出至 `Mutter.Web/wwwroot`。
+
+---
+
+## 3. 开发指引：修改与新增
+
+### 3.1 修改现有逻辑
+
+1. **AI 对话上下文与提示词**：
+   - 关注 `src/Mutter.Core/Services/ContextBuilder.cs` 与 `AiChatService.cs`。
+   - 保证上下文构建不超出 `MaxTokens` / `MaxContextMessages`。
+2. **主动发言（择机发言）规则**：
+   - 核心决策入口位于 `src/Mutter.Core/Proactive/ProactiveSpeaker.cs`。
+   - 门禁逻辑与去重判定位于 `GroupMessageGate.cs` 与 `ProactiveVerdict.cs`。
+   - **注意**：修改判定分支必须在 `tools/ProactiveCheck` 中补充或更新相应断言！
+
+### 3.2 新增核心能力 / 指令
+
+1. 若需要新增机器人指令，在 `src/Mutter.Core/Services/BotCommandService.cs` 中增加解析与路由分支。
+2. 新增领域接口定义在 `src/Mutter.Core/Interfaces/`，对应实现置于 `Mutter.Infrastructure/Services/`。
+3. 在 `src/Mutter.Core/ServiceCollectionExtensions.cs` 或 `Mutter.Infrastructure/ServiceCollectionExtensions.cs` 中完成 DI 依赖注入注册。
+
+### 3.3 扩展管理面板 API 与界面
+
+1. **后端 API**：
+   - 在 `src/Mutter.Web/Controllers/` 新增或修改控制器方法。
+   - 涉及修改配置的接口，必须在服务端对参数范围进行严格收敛（参考 [6.6 安全底线](#66-安全底线)）。
+2. **前端页面**：
+   - 进入 `web/src/views/` 增加页面或修改组件，使用 Element Plus 保持 UI 风格统一。
+   - 运行 `npm run build` 确保无打包错误。
+
+---
+
+## 4. 可用核心资源与服务 API
+
+在编写业务逻辑时，尽量复用既有组件与接口，避免自行造轮子：
+
+| 接口 / 服务类 | 命名空间 | 核心职责说明 |
+| --- | --- | --- |
+| `IQqBotApiService` | `Mutter.Core.Interfaces` | QQ 官方 OpenAPI 交互封装（发送群消息、主动消息、获取群资料等） |
+| `IQqGatewayConnection` | `Mutter.Core.Interfaces` | QQ WebSocket 网关连接管理与事件流订阅 |
+| `IAiChatService` | `Mutter.Core.Interfaces` | 通用大模型流式/单次对话抽象 |
+| `IStructuredAiService` | `Mutter.Core.Interfaces` | 带有 JSON Schema 结构化提取能力的大模型接口 |
+| `IContextBuilder` | `Mutter.Core.Interfaces` | 群聊/私聊多轮上下文剪裁、Token 控制与提示词拼接 |
+| `IMessageRepository` | `Mutter.Core.Interfaces` | 聊天记录、活跃消息与日志的持久化检索存储 |
+| `IConfigRepository` | `Mutter.Core.Interfaces` | 机器人全局及各群差异化配置存取 |
+| `GroupMessageGate` | `Mutter.Core.Services` | 群消息门禁（频率限制、去重过滤、触发概率计算） |
+| `ReplySeqTracker` | `Mutter.Core.Services` | 官方 API 消息 reply_seq 回复序号安全追踪 |
+
+---
+
+## 5. 代码检查与自检
+
+发起 Pull Request 前，请确保以下所有本地检查均已全绿通过。
+
+### 5.1 构建检查 (0 Warning / 0 Error)
+
+仓库根目录由 [`Directory.Build.props`](Directory.Build.props) 全局开启了 `<TreatWarningsAsErrors>true</TreatWarningsAsErrors>`。任何警告在本地编译时都将视为错误中断构建：
+
+```bash
 dotnet build Mutter.sln
-dotnet run --project src/Mutter.ConsoleHost
 ```
+*（提示：NuGet 依赖已知漏洞告警 NU190x 已豁免，交由 Dependabot 统一处理）*
 
-在 QQ 开放平台创建机器人，取 `AppId` / `ClientSecret`，并申请群全量消息、@ 消息、互动事件等
-所需 intents。
+### 5.2 逻辑自检 (ProactiveCheck)
 
-### 面板前端
-
-**构建产物不入库**，`src/Mutter.Web/wwwroot` 被 `.gitignore` 忽略。仓库克隆下来时没有面板页面，
-需要自行构建：
+项目提供了专用的回归自检工具：
 
 ```bash
-cd web && npm ci && npm run build    # 输出到 ../src/Mutter.Web/wwwroot
-```
-
-开发时可用 `npm run dev`（Vite 会把 `/api` 与 `/hub` 代理到 `http://127.0.0.1:5188`）。
-
-### 数据库
-
-SQLite，首次启动自动建表；已有库由 `AppDbContext.EnsureSchemaUpgradedAsync` 幂等升级。
-运行时数据库默认落在 `data/`，**不入库**。
-
-### 自检
-
-```bash
-# 只跑不依赖数据库的逻辑段（1~3）——CI 用的就是这个
+# 运行纯逻辑回归段（1~3 段，无任何数据库依赖，CI 必跑项）
 dotnet run --project tools/ProactiveCheck -- --logic-only
 
-# 全量跑：额外验证迁移幂等与 DI 装配，需要一个真实库
+# 全量自检（额外测试 SQLite 迁移幂等与 DI 装配，需传入指定测试库路径）
 dotnet run --project tools/ProactiveCheck -- <sqlite-db-path>
 ```
 
-纯逻辑段（1~3）不依赖数据库，任何情况下都应全绿；迁移段（4）需要一个**处于特定中间版本**的库
-作为基准，环境不匹配时会失败。**若你的改动涉及择机发言的门禁、去重或上下文规模，请为它补上断言。**
+> **注意**：若改动涉及择机发言判定、去重、上下文窗口等逻辑，**必须**在 `ProactiveCheck` 中补充对应的断言逻辑！
+
+### 5.3 前端构建自检
+
+若修改了 `web/` 下的代码，必须验证前端能够正常构建成功：
+
+```bash
+cd web
+npm run build
+```
+
+### 5.4 提交前自查清单
+
+- [ ] `dotnet build Mutter.sln` 报告 **0 warning / 0 error**
+- [ ] `dotnet run --project tools/ProactiveCheck -- --logic-only` 运行全绿通过
+- [ ] 若修改了 `web/` 前端，`npm run build` 打包通过
+- [ ] `git status` 检查：没有误加入 `wwwroot/`、`*.db`、`appsettings.json` 等生成物或敏感文件
+- [ ] 提交历史干净，没有混杂无意义的代码格式化或与本 PR 目标无关的改动
 
 ---
 
-## 3. 提交规范
+## 6. 提交规范 (Commit)
 
-使用 Conventional Commits，**描述用中文**（与仓库既有风格一致）：
-
-```
-<type>: <简述>
-
-<可选正文：为什么这么改>
-```
-
-| type | 用途 |
-| --- | --- |
-| `feat` | 新功能 |
-| `fix` | 缺陷修复 |
-| `docs` | 文档 |
-| `refactor` | 重构（不改变外部行为） |
-| `perf` | 性能 |
-| `test` | 测试与自检 |
-| `build` | 构建、依赖、仓库配置 |
-| `chore` | 杂项 |
-
-破坏性变更在 type 后加 `!`，并在正文里说明迁移方式。例如：
+采用 [Conventional Commits](https://www.conventionalcommits.org/) 规范，简述部分**推荐使用中文**：
 
 ```
-refactor!: 剥离修仙功能到 xianxia 分支，主分支专注 AI 聊天/择机发言
+<type>: <简述说明>
+
+[可选详细正文：修改背景、动机与设计]
 ```
+
+常用 `type` 类别：
+- `feat`: 新增功能特性
+- `fix`: 修复缺陷或 Bug
+- `docs`: 仅文档更新（如 README、CONTRIBUTING 等）
+- `refactor`: 代码重构（未改变对外行为）
+- `perf`: 性能优化
+- `test`: 测试用例或自检工具改动
+- `build`: 构建工程、依赖项或 CI 工作流改动
+- `chore`: 辅助工具、杂项脚本
+
+破坏性变更在 type 后附带感叹号（例如 `refactor!: 重构配置模型结构`），并在正文中说明破坏性原因及升级指引。
 
 ---
 
-## 4. 提交前检查清单
+## 7. 分支模型与 PR 流程
 
-- [ ] `dotnet build Mutter.sln` **0 warning / 0 error**
-      （这条由仓库根的 [`Directory.Build.props`](Directory.Build.props) 强制：`TreatWarningsAsErrors=true`，
-      本地构建就会因警告失败，不会等到 CI 才发现。依赖漏洞告警 `NU190x` 已豁免，交给 Dependabot）
-- [ ] 若改动了 `web/`，`npm run build` 通过
-- [ ] 若改动了业务逻辑，`tools/ProactiveCheck` 跑完没有 `FAIL`
-- [ ] `git status` 里没有意外文件（尤其没有被 `.gitignore` 忽略却被 `git add -f` 强加进来的）
-- [ ] 提交里没有混进无关的格式化或重构噪音
+### 7.1 分支规划
 
----
+| 分支 | 用途 | 推送权限 | 接收 PR 规则 |
+| --- | --- | --- | --- |
+| `main` | 稳定主线，生产发布版本 | 仅维护者 | 仅接收极微小的文档/错别字修复 |
+| `preview-features` | **新功能特性** PR 目标分支 | 仅维护者 | **接受** 新功能特性 PR |
+| `preview-fixes` | **缺陷修复** PR 目标分支 | 仅维护者 | **接受** Bug 修复 PR |
+| `xianxia` | 历史修仙 RPG 功能只读存档 | 无人（冻结） | **不接受任何 PR** |
 
-## 5. PR 流程
+### 7.2 维护与合并权限
 
-1. **先 fork 本仓库**，再在**你自己的 fork** 里从 `main` 切出分支：
+- **写权限隔离**：外部贡献者无主仓库直推权限，必须在自己的 Fork 仓库中工作并提 PR。
+- **合并由维护者裁决**：即便获得协作者写权限，也不要自行合并 PR。
+- **CI 绿灯是必要非充分条件**：CI 检查全部通过后，维护者将按[项目红线](#8-项目红线不可协商)与代码质量进行人工 Review。
 
+### 7.3 标准 PR 步骤
+
+1. **Fork 仓库**到个人空间，从 `main` 切出开发分支：
    ```bash
-   git switch -c fix/proactive-dedup main
-   git push -u origin fix/proactive-dedup
+   git switch -c feat/my-new-feature main
+   git push -u origin feat/my-new-feature
    ```
+2. 保持原子性：**一个 PR 专注于解决一件事**，改动越聚焦，合并越高效。
+3. 提交 PR 时正确选择目标分支：
+   - 新功能特性 -> 目标分支选择 `preview-features`
+   - 缺陷与问题修复 -> 目标分支选择 `preview-fixes`
+4. 认真填写 PR 描述：说明改动动机、核心变化点及验证方法（建议附带自检输出或复现截图）。
 
-   仓库的写权限只给维护者，直接往本仓库推分支会失败。
-   已被授予写权限的协作者可以直接在本仓库开分支，但同样**不要自行合并**。
-2. 一个 PR 只做一件事；改动小、目的单一，评审才快
-3. 目标分支按性质选 `preview-features`（新功能）或 `preview-fixes`（缺陷修复）
-4. PR 描述里写清：**改了什么、为什么、怎么验证的**
-5. 涉及行为的改动，附上复现步骤或自检输出
-6. **然后等维护者裁决。** CI 全绿只是前置条件；维护者会核对红线与改动范围，
-   再决定合并、要求修改或关闭。
+### 7.4 CI 自动化流水线
 
-### CI 会自动跑什么
-
-每个 PR 与推送都会触发 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：
-
-| 任务 | 内容 |
-| --- | --- |
-| 构建与自检 (.NET) | `dotnet build`（经 `Directory.Build.props` 以 warnings as errors 执行）+ `ProactiveCheck --logic-only`（第 1~3 段） |
-| 面板前端构建 | `web/` 的 `npm ci && npm run build` |
-
-这两项是合并的**前置条件**，本地跑通不代表 CI 一定过（Linux 上可能多出平台相关告警）。
-`ProactiveCheck` 第 4~6 段需要真实数据库，CI 里跑不了，发布前请自行全量跑一遍。
+每个向本仓库发起的 PR 及推送均会自动执行 GitHub Actions [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：
+1. **构建与自检 (.NET)**：在 Linux 环境下验证 `dotnet restore` + `dotnet build`（含警告即错误）+ `ProactiveCheck --logic-only`。
+2. **面板前端构建**：在 Node 20 环境下执行 `npm ci && npm run build`。
 
 ---
 
-## 6. 项目红线
+## 8. 项目红线（不可协商）
 
-以下条目不可协商。**维护者会直接关闭**违反任一条的 PR；已经合并进来的会被回退。
+> ⚠️ 以下红线规则不可协商。违反任一条的 PR 将被直接关闭，已有合并将被回退。
 
-### 6.1 凭据与密钥
+### 8.1 凭据与密钥安全
+- **严禁提交任何真实密钥**：包括 `AppId`、`ClientSecret`、大模型 `ApiKey`、面板 Token 等。
+- `src/Mutter.Web/appsettings.json` 在仓库中仅允许保留占位符（如 `YOUR_APP_ID`）。真实凭证请使用本地环境变量或本地 `appsettings.Development.json`。
+- 若不慎误提交凭证：**必须立即在对应平台重置轮换凭据**。仅删除 Git Commit 无法清除历史泄漏风险。
 
-- **绝不提交** `AppId`、`ClientSecret`、AI 服务商 `ApiKey`、面板口令或任何 token。
-- `src/Mutter.Web/appsettings.json` 只允许占位符（`YOUR_APP_ID` 等）。
-  真凭据请放 `appsettings.Development.json` 或环境变量——它们已被 `.gitignore` 忽略。
-- **一旦误提交：立刻轮换该凭据**（平台重置 secret、改面板口令）。
-  只删掉提交**不等于**修复——历史里仍能翻出来。
+### 8.2 群成员隐私保护
+- **严禁**在代码、注释、测试数据、PR 截图或 Issue 中包含真实群号、OpenID、用户昵称、头像或私有链接。
+- 所有单元测试与 Mock 数据一律使用合成虚拟标识符（例如 `11112222333344445555666677778888`）。
+- 部署产生的真实聊天记录绝对不可上传至公共代码仓库。
 
-### 6.2 群成员隐私
+### 8.3 运行时数据与生成文件防泄露
+以下内容**绝对不入库**（已被 `.gitignore` 保护，严禁使用 `git add -f`）：
+- 数据库文件：`*.db`、`*.db-wal`、`*.db-shm`、`*.sqlite*`
+- 运行时日志：`logs/`、`*.log`
+- 构建中间与发布文件：`bin/`、`obj/`、`publish/`、`src/Mutter.Web/wwwroot/`
+- 本地私密配置文件：`appsettings.Development.json`、`secrets.json`
 
-- **绝不**把真实群号、群 openid、成员 openid、昵称、头像链接写进代码、注释、测试用例、
-  文档、issue 或 PR 截图。
-- 测试与自检一律使用合成假数据（仓库既有风格如 `11112222333344445555666677778888`、
-  `AAAABBBBCCCCDDDDEEEEFFFF00001111`）。
-- 聊天记录只存在于部署本地的数据库中，**不得**进入仓库或任何公开渠道。
-- 需要引用"线上现象"说明来由时，只描述现象，不要附带可识别的标识符。
+### 8.4 数据库兼容性与不可逆操作
+- **严禁删除或重构现有业务数据表**：已有部署运行中存有生产数据，删表不可逆。
+- 迁移逻辑必须保证**幂等执行**：重复运行不报错、不丢失历史行。
+- 涉及 Schema 结构变动的 PR 必须提供明确的数据影响面与回滚说明。
 
-### 6.3 运行时数据与构建产物
+### 8.5 官方平台合规要求
+- **严禁破坏或绕过 QQ 官方频控限制**：发送调用必须受控于分钟/天双重配额。
+- 严禁实现自动批量加群、批量骚扰私聊、爬取敏感群员名单等违反平台规则的行为。
+- 严禁加入任何旨在规避平台内容审核或封禁对抗的绕行机制。
 
-**不入库**（见 `.gitignore`）：
+### 8.6 服务端安全防护
+- 管理面板口令必须使用 **PBKDF2 等加盐强哈希算法**，严禁明文入库。
+- **可配置字段必须在服务端进行硬性边界收敛**：前端表单校验可被绕过，因此后端对 `MaxTokens`、`MaxContextMessages` 等数值写入时必须钳制在合法安全区间。
+- 新增 Controller API 端点必须正确集成鉴权中间件。
 
-- 数据库：`*.db` / `*.db-wal` / `*.db-shm` / `*.sqlite*`
-- 日志：`logs/`、`*.log`
-- 构建：`bin/`、`obj/`、`publish/`、`src/Mutter.Web/wwwroot/`
-- 环境配置：`appsettings.*.json`、`secrets.json`
-
-### 6.4 数据安全（不可逆操作）
-
-- **不得删除或重建已有数据表。** 已有部署里可能存着真实的玩家与聊天数据，删表不可逆。
-  这正是 `main` 不再使用、却仍在 `EnsureSchemaUpgradedAsync` 中保留
-  `PlayerProfiles` / `GroupWorlds` / `PlayerInventories` / `GameCooldowns` /
-  `CultivationEventLogs` 五张表的原因。
-- 迁移代码必须**幂等**：重复执行安全，且不丢已有行。
-- 破坏性的 schema 变更必须在 PR 中说明影响面与回滚方案。
-
-### 6.5 平台合规
-
-- **不得绕过或放宽 QQ 官方频控上限。** 配额必须钳制在官方限制内（当前实现为分钟/日双重配额）。
-- 不得实现自动加群、批量私聊、爬取成员列表、规避风控等违反平台规则的能力。
-- 不得加入任何意图规避平台审核或封禁的机制。
-
-### 6.6 安全底线
-
-- 面板口令必须走 PBKDF2 哈希，不得明文入库。
-- **面板可调字段必须在服务端钳制。** 前端输入框的 `min`/`max` 可被 API 直连绕过，
-  因此 `MaxTokens`、`MaxContextMessages`、`MaxAttachedImages` 等在写入前都要收敛到合法区间。
-- 新增 API 端点必须接入既有鉴权中间件。
-- 不得引入命令注入、路径穿越、远程代码执行等攻击面。
-
-### 6.7 范围与依赖
-
-- **不要碰 `xianxia`**：冻结存档，不接受改动。
-- 不引入遥测、外呼或第三方统计；确有必要时须在 PR 中明确说明并取得同意。
-- 新增第三方依赖请说明理由；面板前端依赖请同步更新 `package-lock.json`。
+### 8.7 依赖与范围控制
+- **严禁修改 `xianxia` 分支**：该分支为只读冻结存档。
+- 严禁擅自引入未经验证的遥测、用户跟踪或外部数据上报模块。
+- 引入新的第三方 NuGet 或 npm 依赖项须在 PR 中充分说明必要性。
 
 ---
 
-## 7. 报告安全问题
+## 9. 安全漏洞反馈与开源许可
 
-发现安全漏洞（凭据泄露、鉴权绕过、注入等）请**不要开公开 issue**。请通过
-仓库的 **Security → Report a vulnerability**（GitHub 私密安全公告）提交，附上影响面与复现步骤。
-
-各举范围、响应预期与**不在范围内**的情形见 [SECURITY.md](SECURITY.md)。
-
----
-
-## 8. 许可
-
-本项目以 [MIT 许可](LICENSE) 发布。你提交的贡献将同样以 MIT 许可授权给本项目及所有使用者。
+- **报告安全漏洞**：如果你发现了 Mutter 的潜在安全漏洞（如鉴权绕过、凭据风险或注入攻击），**请勿提交公开 Issue**。请通过 GitHub 仓库顶部的 **Security → Report a vulnerability** 开启私密安全通报，维护团队将及时评估与响应。详情参阅 [SECURITY.md](SECURITY.md)。
+- **开源协议**：本项目基于 [MIT 许可证](LICENSE) 开源。你向本项目提交的任何代码，均默认视为同意以 MIT 许可授权给本项目及所有使用者。
