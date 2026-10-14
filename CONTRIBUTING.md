@@ -38,6 +38,19 @@ git push origin preview-features
 `preview-fixes` 同理。**维护者合并 PR 后有责任执行这一步**，否则两个预览分支会逐渐累积分叉，
 后续 PR 的冲突会越来越难收拾。
 
+### 维护者需在 GitHub 上开启的保护规则
+
+这些是仓库设置，不在代码里，新维护者接手时请照着开：
+
+| 分支 | 建议规则 |
+| --- | --- |
+| `main` | 禁止直接推送；要求通过 PR 合并；要求 CI 通过后才能合并 |
+| `preview-features`、`preview-fixes` | 要求 CI 通过；禁止强制推送与删除 |
+| `xianxia` | 锁定（Lock branch），杜绝误推冻结存档 |
+
+入口：`Settings → Rules → Rulesets`（或 `Branches`），为上面每个分支各建一条。
+`Require status checks to pass` 里勾选 CI 的两个任务：**构建与自检 (.NET)** 与 **面板前端构建**。
+
 ---
 
 ## 2. 本地开发
@@ -50,8 +63,8 @@ git push origin preview-features
 ### 起步
 
 ```bash
-git clone https://github.com/TangKuku9/mutter-bot.git
-cd mutter-bot
+git clone https://github.com/TangKuku9/Mutter-Bot.git
+cd Mutter-Bot
 
 # 配置：仓库只跟踪占位符，真实凭据请写进这个本地文件（已被 .gitignore 忽略）
 cp src/Mutter.Web/appsettings.example.json src/Mutter.Web/appsettings.json
@@ -82,6 +95,10 @@ SQLite，首次启动自动建表；已有库由 `AppDbContext.EnsureSchemaUpgra
 ### 自检
 
 ```bash
+# 只跑不依赖数据库的逻辑段（1~3）——CI 用的就是这个
+dotnet run --project tools/ProactiveCheck -- --logic-only
+
+# 全量跑：额外验证迁移幂等与 DI 装配，需要一个真实库
 dotnet run --project tools/ProactiveCheck -- <sqlite-db-path>
 ```
 
@@ -122,6 +139,8 @@ refactor!: 剥离修仙功能到 xianxia 分支，主分支专注 AI 聊天/择�
 ## 4. 提交前检查清单
 
 - [ ] `dotnet build Mutter.sln` **0 warning / 0 error**
+      （这条由仓库根的 [`Directory.Build.props`](Directory.Build.props) 强制：`TreatWarningsAsErrors=true`，
+      本地构建就会因警告失败，不会等到 CI 才发现。依赖漏洞告警 `NU190x` 已豁免，交给 Dependabot）
 - [ ] 若改动了 `web/`，`npm run build` 通过
 - [ ] 若改动了业务逻辑，`tools/ProactiveCheck` 跑完没有 `FAIL`
 - [ ] `git status` 里没有意外文件（尤其没有被 `.gitignore` 忽略却被 `git add -f` 强加进来的）
@@ -136,6 +155,18 @@ refactor!: 剥离修仙功能到 xianxia 分支，主分支专注 AI 聊天/择�
 3. 目标分支按性质选 `preview-features`（新功能）或 `preview-fixes`（缺陷修复）
 4. PR 描述里写清：**改了什么、为什么、怎么验证的**
 5. 涉及行为的改动，附上复现步骤或自检输出
+
+### CI 会自动跑什么
+
+每个 PR 与推送都会触发 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：
+
+| 任务 | 内容 |
+| --- | --- |
+| 构建与自检 (.NET) | `dotnet build`（经 `Directory.Build.props` 以 warnings as errors 执行）+ `ProactiveCheck --logic-only`（第 1~3 段） |
+| 面板前端构建 | `web/` 的 `npm ci && npm run build` |
+
+这两项是合并的**前置条件**，本地跑通不代表 CI 一定过（Linux 上可能多出平台相关告警）。
+`ProactiveCheck` 第 4~6 段需要真实数据库，CI 里跑不了，发布前请自行全量跑一遍。
 
 ---
 
@@ -204,6 +235,8 @@ refactor!: 剥离修仙功能到 xianxia 分支，主分支专注 AI 聊天/择�
 
 发现安全漏洞（凭据泄露、鉴权绕过、注入等）请**不要开公开 issue**。请通过
 仓库的 **Security → Report a vulnerability**（GitHub 私密安全公告）提交，附上影响面与复现步骤。
+
+各举范围、响应预期与**不在范围内**的情形见 [SECURITY.md](SECURITY.md)。
 
 ---
 

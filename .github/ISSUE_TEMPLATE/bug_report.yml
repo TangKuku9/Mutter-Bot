@@ -1,0 +1,74 @@
+name: 缺陷报告
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > ⚠️ **请先脱敏。** 群号、群/成员 openid、昵称、聊天原文都属于隐私，
+        > 不要贴进 issue。需要举例请用 `123456`、`AAAABBBB...` 这类合成数据。
+        > 如果是**安全漏洞**，请不要开 issue，改走 [SECURITY.md](../blob/main/SECURITY.md) 的私密渠道。
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      description: 实际发生了什么？期望是什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 尽量给出最小可复现路径。涉及择机发言/门禁的，说明群配置与触发条件。
+      placeholder: |
+        1. 在面板把「发言倾向」设为…
+        2. 群内发送…
+        3. 观察到…
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / 提交
+      description: 分支名 + 提交短哈希，例如 `main @ d190b3b`
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及范围
+      options:
+        - AI 聊天 / 上下文
+        - 择机主动发言
+        - Web 管理面板
+        - 部署 / systemd
+        - 数据库 / 迁移
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: |
+        `journalctl -u mutter-bot -n 200` 的相关片段。**粘贴前请自行脱敏**
+        （凭据、群号、openid、昵称、聊天原文）。
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: redlines
+    attributes:
+      label: 确认
+      options:
+        - label: 我已确认内容中不含真实凭据、群号、openid、昵称或聊天原文
+          required: true
+        - label: 我已搜索过现有 issue，确认不是重复
+          required: true

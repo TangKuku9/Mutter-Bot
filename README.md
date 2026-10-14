@@ -14,6 +14,7 @@
 | `xianxia` | 上述内容 + 修仙 RPG（群内文字游戏） | **冻结的备份**，不再更新 |
 
 **想贡献代码请先读 [CONTRIBUTING.md](CONTRIBUTING.md)**（分支模型、提交规范与项目红线）。
+安全漏洞请走 [SECURITY.md](SECURITY.md) 的私密渠道，不要开公开 issue。
 社区 PR 请提交到 `preview-features` 或 `preview-fixes`，由维护者合并进 `main`。
 
 修仙功能（境界/突破/炼丹/探索/挂机结算/每日任务/切磋/群世界/AI 随机事件/月榜/富交互按钮面板）

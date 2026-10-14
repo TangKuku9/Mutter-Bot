@@ -1,0 +1,21 @@
+<Project>
+
+  <!--
+    CONTRIBUTING 要求「0 warning / 0 error」。把这条规则放在仓库里而不是 CI 命令行上，
+    有三个好处：
+      1) 本地构建与 CI 行为一致，贡献者在本地就能发现，而不是推到 CI 才知道；
+      2) 不依赖 `dotnet build -warnaserror` 的命令行参数；
+      3) 属性值里的分号在命令行上会被 MSBuild 误解析（MSB1006），写在这里没有这个问题。
+  -->
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!--
+      例外：NuGet 审计告警（NU190x，依赖存在已知漏洞）。
+      这是上游依赖的问题，应该由 Dependabot 提 PR 升版本处理，
+      不适合让任意一次构建直接失败。
+    -->
+    <WarningsNotAsErrors>NU1900;NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
+  </PropertyGroup>
+
+</Project>

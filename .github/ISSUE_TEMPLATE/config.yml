@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞（请勿开公开 issue）
+    url: https://github.com/TangKuku9/Mutter-Bot/security/advisories/new
+    about: 凭据泄露、鉴权绕过、注入等问题请走私密安全公告，详见 SECURITY.md。
+  - name: 使用与部署问题
+    url: https://github.com/TangKuku9/Mutter-Bot/blob/main/CONTRIBUTING.md
+    about: 构建、配置、分支模型与项目红线，先看贡献指南。

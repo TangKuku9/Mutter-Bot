@@ -20,11 +20,16 @@ using Mutter.Infrastructure.Services;
 using Mutter.Web.Controllers;
 
 // 择机主动发言自检：纯逻辑门禁 + 生产库副本上的迁移幂等 + DI 装配。
-// 用法：dotnet run --project tools/ProactiveCheck -- [源库路径]
-var sourceDb = args.Length > 0 ? args[0] : "mutter-bot.db";
-if (!File.Exists(sourceDb))
+// 用法：
+//   dotnet run --project tools/ProactiveCheck -- [源库路径]
+//   dotnet run --project tools/ProactiveCheck -- --logic-only
+// --logic-only 只跑不依赖数据库的第 1~3 段，供 CI 使用（第 4~6 段需要真实库）。
+var logicOnly = args.Contains("--logic-only");
+var sourceDb = args.FirstOrDefault(a => !a.StartsWith("--")) ?? "mutter-bot.db";
+if (!logicOnly && !File.Exists(sourceDb))
 {
     Console.WriteLine($"源库不存在：{sourceDb}（需先做一致性快照，避免拷到半截 WAL）");
+    Console.WriteLine("若只想跑不依赖数据库的逻辑段（1~3），加 --logic-only。");
     return 2;
 }
 
@@ -412,6 +417,13 @@ var jsonBroken = CjkTextFixer.Cleanse("{\n  \"line\": \"天\n禄赢了\",\n  \"t
 var repairedJson = StructuredAiService.ExtractRepairableJson(jsonBroken)!;
 Check(System.Text.Json.JsonSerializer.Deserialize<ProactiveVerdict>(repairedJson)!.Line == "天禄赢了",
     "折在 JSON 字符串值里的换行被接回，判定解析不再靠运气");
+
+if (logicOnly)
+{
+    Console.WriteLine("\n--logic-only：跳过依赖数据库的第 4~6 段。");
+    Console.WriteLine(ok ? "\n全部通过" : "\n存在失败项");
+    return ok ? 0 : 1;
+}
 
 Console.WriteLine("== 4. 生产库副本上的迁移幂等 ==");
 var targetDb = Path.Combine(AppContext.BaseDirectory, "mutter-bot.db");

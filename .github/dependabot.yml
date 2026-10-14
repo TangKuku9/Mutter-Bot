@@ -1,0 +1,41 @@
+version: 2
+updates:
+  # 后端依赖：csproj 里大量使用 9.0.* 这类浮动版本，安全更新尤其需要自动跟进
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    target-branch: "preview-fixes"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      nuget-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # 面板前端依赖
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    target-branch: "preview-fixes"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # 本仓库的 CI 工作流自身
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    target-branch: "preview-fixes"
+    commit-message:
+      prefix: "build"
