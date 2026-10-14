@@ -4,6 +4,9 @@ obj/
 publish/
 artifacts/
 
+# 面板前端构建产物：由 web/ 构建生成，不入库（需自行 npm run build）
+src/QQBot.Web/wwwroot/
+
 # Visual Studio
 .vs/
 *.suo
