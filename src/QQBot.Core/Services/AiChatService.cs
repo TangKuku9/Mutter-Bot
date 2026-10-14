@@ -51,7 +51,7 @@ public class AiChatService : IAiChatService
 
     public async Task<AiChatResponse> ChatAsync(
         string systemPrompt,
-        List<(string Role, string Content, string? ImageUrl)> conversationHistory,
+        List<(string Role, string Content, IReadOnlyList<string>? ImageUrls)> conversationHistory,
         AiConfig config,
         CancellationToken ct = default)
     {
@@ -62,10 +62,10 @@ public class AiChatService : IAiChatService
             messages.Add(new { role = "system", content = systemPrompt });
         }
 
-        foreach (var (role, msgContent, imageUrl) in conversationHistory)
+        foreach (var (role, msgContent, imageUrls) in conversationHistory)
         {
-            if (!string.IsNullOrEmpty(imageUrl))
-                messages.Add(new { role, content = await BuildContentPartsAsync(msgContent, new[] { imageUrl }) });
+            if (imageUrls is { Count: > 0 })
+                messages.Add(new { role, content = await BuildContentPartsAsync(msgContent, imageUrls) });
             else
                 messages.Add(new { role, content = msgContent });
         }

@@ -39,9 +39,25 @@
       </el-form-item>
       <el-form-item label="最大 Tokens">
         <el-input-number v-model="form.maxTokens" :min="256" :max="32768" :step="256" />
+        <span class="hint">单次回复的输出上限</span>
       </el-form-item>
       <el-form-item label="上下文条数">
         <el-input-number v-model="form.maxContextMessages" :min="2" :max="100" />
+        <span class="hint">@ 回复与私聊带多少条历史</span>
+      </el-form-item>
+      <el-form-item label="附图张数">
+        <el-input-number v-model="form.maxAttachedImages" :min="0" :max="form.ceilingAttachedImages || 10" />
+        <span class="hint">@ 回复与私聊最多带给 AI 看几张图，0 = 不看图</span>
+        <div class="hint" style="margin-left: 0">
+          表情包与动图不会附给模型（GIF 会把请求打成 500），所以实际附上的可能少于这个数。
+          AI 择机发言有自己的附图张数，在「择机发言」面板单独设置。
+        </div>
+      </el-form-item>
+      <el-form-item label=" ">
+        <div class="hint" style="margin-left: 0">
+          以上「上下文条数」「最大 Tokens」只作用于 @ 回复与私聊。AI 择机发言有自己的
+          「背景历史条数」与「判定输出上限」，在「择机发言」面板单独设置，不受这里影响。
+        </div>
       </el-form-item>
       <el-form-item label="联网搜索">
         <el-switch v-model="form.webSearchEnabled" />
@@ -199,6 +215,7 @@ const save = async () => {
       temperature: form.value.temperature,
       maxTokens: form.value.maxTokens,
       maxContextMessages: form.value.maxContextMessages,
+      maxAttachedImages: form.value.maxAttachedImages,
       webSearchEnabled: form.value.webSearchEnabled
     })
     ElMessage.success('AI 配置已保存')

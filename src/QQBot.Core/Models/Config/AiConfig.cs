@@ -32,6 +32,27 @@ public record AiConfig
     public int MaxContextMessages { get; set; } = 20;
 
     /// <summary>
+    /// @ 回复 / 私聊时最多附带给 AI 的图片张数，0=不带图。
+    /// 此前写死只带 <c>ImageUrls[0]</c>：群友一次发好几张，其余被静默丢弃。
+    /// </summary>
+    public int MaxAttachedImages { get; set; } = DefaultMaxAttachedImages;
+
+    public const int DefaultMaxAttachedImages = 3;
+    public const int CeilingAttachedImages = 10;
+
+    /// <summary>
+    /// 按 <see cref="MaxAttachedImages"/> 截取待附带的图片（取最前面的几张，按消息内原顺序）。
+    /// 抽成纯函数是为了能被自检直接覆盖——此前是调用方内联的 <c>ImageUrls[0]</c>，无从验证。
+    /// </summary>
+    public IReadOnlyList<string> CapAttachedImages(IReadOnlyList<string> imageUrls)
+    {
+        if (imageUrls.Count == 0 || MaxAttachedImages <= 0) return Array.Empty<string>();
+        return imageUrls.Count <= MaxAttachedImages
+            ? imageUrls
+            : imageUrls.Take(MaxAttachedImages).ToList();
+    }
+
+    /// <summary>
     /// 是否启用联网搜索。开启后根据 API 地址自动推断服务商联网模式
     ///（通义千问 enable_search / 智谱 web_search tool）。
     /// </summary>

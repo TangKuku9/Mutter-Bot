@@ -1,5 +1,7 @@
 namespace QQBot.Infrastructure.Entities;
 
+using QQBot.Core.Models.Config;
+
 /// <summary>择机发言全局配置，单行表（Id 恒为 1）。由管理面板读写。</summary>
 public class ProactiveChatConfigEntity
 {
@@ -13,6 +15,16 @@ public class ProactiveChatConfigEntity
     public int QuietStartHour { get; set; } = 23;
     public int QuietEndHour { get; set; } = 8;
     public int Liveliness { get; set; } = 1;
+
+    /// <summary>判定时最多附带给 AI 的图片张数，0=不带图。</summary>
+    public int MaxAttachedImages { get; set; } = ProactiveChatConfig.DefaultMaxAttachedImages;
+
+    /// <summary>判定时可参考的背景历史条数（与 AI 面板的上下文条数分开）。</summary>
+    public int HistoryMaxMessages { get; set; } = ProactiveChatConfig.DefaultHistoryMaxMessages;
+
+    /// <summary>单次判定调用的输出上限（与 AI 面板的 max_tokens 分开）。</summary>
+    public int EvalMaxTokens { get; set; } = ProactiveChatConfig.DefaultEvalMaxTokens;
+
     public bool AllowActiveChannel { get; set; } = true;
     public int ActivePerGroupPerMinute { get; set; } = 3;
     public int ActivePerGroupPerDay { get; set; } = 20;

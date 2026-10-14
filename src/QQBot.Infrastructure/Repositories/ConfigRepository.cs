@@ -31,6 +31,7 @@ public class ConfigRepository : IConfigRepository
             Temperature = entity.Temperature,
             MaxTokens = entity.MaxTokens,
             MaxContextMessages = entity.MaxContextMessages,
+            MaxAttachedImages = entity.MaxAttachedImages,
             WebSearchEnabled = entity.WebSearchEnabled
         };
     }
@@ -69,6 +70,7 @@ public class ConfigRepository : IConfigRepository
                 Temperature = config.Temperature,
                 MaxTokens = config.MaxTokens,
                 MaxContextMessages = config.MaxContextMessages,
+                MaxAttachedImages = config.MaxAttachedImages,
                 WebSearchEnabled = config.WebSearchEnabled
             };
             _dbContext.AiConfigs.Add(entity);
@@ -83,6 +85,7 @@ public class ConfigRepository : IConfigRepository
             entity.Temperature = config.Temperature;
             entity.MaxTokens = config.MaxTokens;
             entity.MaxContextMessages = config.MaxContextMessages;
+            entity.MaxAttachedImages = config.MaxAttachedImages;
             entity.WebSearchEnabled = config.WebSearchEnabled;
         }
 
@@ -168,6 +171,9 @@ public class ConfigRepository : IConfigRepository
             QuietStartHour = entity.QuietStartHour,
             QuietEndHour = entity.QuietEndHour,
             Liveliness = entity.Liveliness,
+            MaxAttachedImages = entity.MaxAttachedImages,
+            HistoryMaxMessages = entity.HistoryMaxMessages,
+            EvalMaxTokens = entity.EvalMaxTokens,
             AllowActiveChannel = entity.AllowActiveChannel,
             ActivePerGroupPerMinute = entity.ActivePerGroupPerMinute,
             ActivePerGroupPerDay = entity.ActivePerGroupPerDay,
@@ -195,6 +201,9 @@ public class ConfigRepository : IConfigRepository
         entity.QuietStartHour = normalized.QuietStartHour;
         entity.QuietEndHour = normalized.QuietEndHour;
         entity.Liveliness = normalized.Liveliness;
+        entity.MaxAttachedImages = normalized.MaxAttachedImages;
+        entity.HistoryMaxMessages = normalized.HistoryMaxMessages;
+        entity.EvalMaxTokens = normalized.EvalMaxTokens;
         entity.AllowActiveChannel = normalized.AllowActiveChannel;
         entity.ActivePerGroupPerMinute = normalized.ActivePerGroupPerMinute;
         entity.ActivePerGroupPerDay = normalized.ActivePerGroupPerDay;

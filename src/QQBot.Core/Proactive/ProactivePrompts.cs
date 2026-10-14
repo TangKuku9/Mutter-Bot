@@ -11,8 +11,11 @@ public static class ProactivePrompts
 {
     public const int MaxLineChars = 40;
 
-    /// <summary>一次评估最多附带几张图。QQ 图片约一小时后失效，取窗口内最近的几张即可覆盖当下话题。</summary>
-    public const int MaxAttachedImages = 3;
+    /// <summary>
+    /// 一次评估最多附带几张图的默认值。真正生效的是
+    /// <see cref="ProactiveChatConfig.MaxAttachedImages"/>（面板可调）。
+    /// </summary>
+    public const int DefaultMaxAttachedImages = ProactiveChatConfig.DefaultMaxAttachedImages;
 
     public static string SystemPrompt =>
         """

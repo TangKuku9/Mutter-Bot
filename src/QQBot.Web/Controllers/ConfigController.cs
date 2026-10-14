@@ -48,6 +48,7 @@ public class ConfigController : ControllerBase
                 Temperature = 0.7,
                 MaxTokens = 2048,
                 MaxContextMessages = 20,
+                MaxAttachedImages = AiConfig.DefaultMaxAttachedImages,
                 AvailableCharacters = characters,
                 AvailableProviders = providers
             });
@@ -63,6 +64,7 @@ public class ConfigController : ControllerBase
             Temperature = entity.Temperature,
             MaxTokens = entity.MaxTokens,
             MaxContextMessages = entity.MaxContextMessages,
+            MaxAttachedImages = entity.MaxAttachedImages,
             WebSearchEnabled = entity.WebSearchEnabled,
             AvailableCharacters = characters,
             AvailableProviders = providers
@@ -91,6 +93,8 @@ public class ConfigController : ControllerBase
         entity.Temperature = dto.Temperature;
         entity.MaxTokens = dto.MaxTokens;
         entity.MaxContextMessages = dto.MaxContextMessages;
+        // 附图张数在这里钳制：负数是无效输入，过大只会白烧 token 与带宽
+        entity.MaxAttachedImages = Math.Clamp(dto.MaxAttachedImages, 0, AiConfig.CeilingAttachedImages);
         entity.WebSearchEnabled = dto.WebSearchEnabled;
 
         await _dbContext.SaveChangesAsync();

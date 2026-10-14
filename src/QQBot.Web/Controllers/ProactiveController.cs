@@ -49,6 +49,9 @@ public class ProactiveController : ControllerBase
         public int QuietStartHour { get; set; } = 23;
         public int QuietEndHour { get; set; } = 8;
         public int Liveliness { get; set; } = 1;
+        public int MaxAttachedImages { get; set; } = ProactiveChatConfig.DefaultMaxAttachedImages;
+        public int HistoryMaxMessages { get; set; } = ProactiveChatConfig.DefaultHistoryMaxMessages;
+        public int EvalMaxTokens { get; set; } = ProactiveChatConfig.DefaultEvalMaxTokens;
         public bool AllowActiveChannel { get; set; } = true;
         public int ActivePerGroupPerMinute { get; set; } = 3;
         public int ActivePerGroupPerDay { get; set; } = 20;
@@ -59,6 +62,9 @@ public class ProactiveController : ControllerBase
         public int CeilingGroupPerMinute { get; set; } = ProactiveChatConfig.CeilingGroupPerMinute;
         public int CeilingGroupPerDay { get; set; } = ProactiveChatConfig.CeilingGroupPerDay;
         public int CeilingAccountPerMinute { get; set; } = ProactiveChatConfig.CeilingAccountPerMinute;
+
+        /// <summary>附图张数上限，供面板对齐输入框。</summary>
+        public int CeilingAttachedImages { get; set; } = ProactiveChatConfig.CeilingAttachedImages;
     }
 
     /// <summary>当前配置（含官方上限，供表单约束）。</summary>
@@ -84,6 +90,9 @@ public class ProactiveController : ControllerBase
             QuietStartHour = dto.QuietStartHour,
             QuietEndHour = dto.QuietEndHour,
             Liveliness = dto.Liveliness,
+            MaxAttachedImages = dto.MaxAttachedImages,
+            HistoryMaxMessages = dto.HistoryMaxMessages,
+            EvalMaxTokens = dto.EvalMaxTokens,
             AllowActiveChannel = dto.AllowActiveChannel,
             ActivePerGroupPerMinute = dto.ActivePerGroupPerMinute,
             ActivePerGroupPerDay = dto.ActivePerGroupPerDay,
@@ -219,6 +228,9 @@ public class ProactiveController : ControllerBase
         QuietStartHour = c.QuietStartHour,
         QuietEndHour = c.QuietEndHour,
         Liveliness = c.Liveliness,
+        MaxAttachedImages = c.MaxAttachedImages,
+        HistoryMaxMessages = c.HistoryMaxMessages,
+        EvalMaxTokens = c.EvalMaxTokens,
         AllowActiveChannel = c.AllowActiveChannel,
         ActivePerGroupPerMinute = c.ActivePerGroupPerMinute,
         ActivePerGroupPerDay = c.ActivePerGroupPerDay,

@@ -44,6 +44,31 @@ public class ProactiveChatConfig
     /// </summary>
     public int Liveliness { get; set; } = LivelinessNormal;
 
+    /// <summary>
+    /// 判定时最多附带给 AI 的图片张数。0=一张不带（纯文字判定）。
+    /// 默认 3：QQ 图链约一小时失效，取窗口内最近的几张足以覆盖当下话题，再多只是白烧 token。
+    /// </summary>
+    public int MaxAttachedImages { get; set; } = DefaultMaxAttachedImages;
+
+    public const int DefaultMaxAttachedImages = 3;
+    public const int CeilingAttachedImages = 10;
+
+    /// <summary>
+    /// 判定时可参考的背景历史条数。故意与 AI 面板的「上下文条数」分开：
+    /// 择机要的只是"认人设、别接错旧话题"这点背景，跟 @ 回复那种整轮对话需要的量不是一回事。
+    /// </summary>
+    public int HistoryMaxMessages { get; set; } = DefaultHistoryMaxMessages;
+
+    public const int DefaultHistoryMaxMessages = 8;
+
+    /// <summary>
+    /// 单次判定调用的输出上限，同时也是输入预算的换算基准。
+    /// 判定的输出只是一个短 JSON，用 @ 回复那份 2048 是纯浪费——两者需求不同，故分开。
+    /// </summary>
+    public int EvalMaxTokens { get; set; } = DefaultEvalMaxTokens;
+
+    public const int DefaultEvalMaxTokens = 512;
+
     public const int LivelinessRestrained = 0;
     public const int LivelinessNormal = 1;
     public const int LivelinessEager = 2;
@@ -76,6 +101,9 @@ public class ProactiveChatConfig
         QuietStartHour = ClampHour(QuietStartHour);
         QuietEndHour = ClampHour(QuietEndHour);
         Liveliness = Clamp(Liveliness, LivelinessRestrained, LivelinessEager);
+        MaxAttachedImages = Clamp(MaxAttachedImages, 0, CeilingAttachedImages);
+        HistoryMaxMessages = Clamp(HistoryMaxMessages, 0, 50);
+        EvalMaxTokens = Clamp(EvalMaxTokens, 64, 8192);
         ActivePerGroupPerMinute = Clamp(ActivePerGroupPerMinute, 1, CeilingGroupPerMinute);
         ActivePerGroupPerDay = Clamp(ActivePerGroupPerDay, 1, CeilingGroupPerDay);
         ActivePerAccountPerMinute = Clamp(ActivePerAccountPerMinute, 1, CeilingAccountPerMinute);

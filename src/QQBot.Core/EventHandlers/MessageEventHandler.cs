@@ -661,15 +661,27 @@ public class MessageEventHandler
 
             if (parsed.ImageUrls.Count > 0)
             {
-                var historyWithImages = new List<(string Role, string Content, string? ImageUrl)>();
-                foreach (var msg in context.Messages)
-                    historyWithImages.Add((msg.Role, msg.Content, null));
-                if (historyWithImages.Count > 0)
+                // 张数由 AI 面板控制，且先把动图/失效链筛掉——否则"面板选了 3 张"会名不副实。
+                // 旧写法直接取 ImageUrls[0]，群友一次发好几张时其余全丢。
+                var attachable = await _aiService.AttachableImagesAsync(
+                    context.EffectiveConfig.CapAttachedImages(parsed.ImageUrls));
+
+                if (attachable.Count > 0)
                 {
-                    var last = historyWithImages[^1];
-                    historyWithImages[^1] = (last.Role, last.Content, parsed.ImageUrls[0]);
+                    var historyWithImages = new List<(string Role, string Content, IReadOnlyList<string>? ImageUrls)>();
+                    foreach (var msg in context.Messages)
+                        historyWithImages.Add((msg.Role, msg.Content, null));
+                    if (historyWithImages.Count > 0)
+                    {
+                        var last = historyWithImages[^1];
+                        historyWithImages[^1] = (last.Role, last.Content, attachable);
+                    }
+                    response = await _aiService.ChatAsync(systemPrompt, historyWithImages, context.EffectiveConfig);
                 }
-                response = await _aiService.ChatAsync(systemPrompt, historyWithImages, context.EffectiveConfig);
+                else
+                {
+                    response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig);
+                }
             }
             else
             {

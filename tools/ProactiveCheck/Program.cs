@@ -266,6 +266,74 @@ Check(threeImages.ImageCount == 3 && threeImages.CollectImages(2).SequenceEqual(
 Check(ProactivePrompts.BuildUserPrompt(threeImages, noTuple, 1).Contains("共 3 张图片，只附了最近的 1 张"),
     "部分附上时说清附了几张");
 
+Console.WriteLine("== 3c2. 背景历史与窗口消息去重（同一行曾被喂两遍） ==");
+// 线上真实形状：context.Messages = 历史 + 当前条；窗口那批同时也躺在历史里
+var dedupWindow = new ProactiveWindow
+{
+    GroupId = "GD", LastMessageId = "m4", LastMessageUtcAt = now,
+    Messages = new[]
+    {
+        new ObservedMessage("泷奈", "晚点说", "m3", now),
+        new ObservedMessage("千束", "在吗", "m4", now)
+    }
+};
+var ctxMessages = new List<(string Role, string Content)>
+{
+    ("user", "[呆宝]: 早上好"),      // 真正的旧背景，必须保留
+    ("assistant", "早"),             // bot 自己的历史，必须保留
+    ("user", "[泷奈]: 晚点说"),      // 与窗口重复，必须剔除
+    ("user", "[千束]: 在吗")         // 它同时是 context 最后一条，Evaluate 当初靠 [..^1] 剪掉
+};
+var deduped = dedupWindow.ExcludeFrom(ctxMessages);
+Check(deduped.Count == 2 && deduped[0].Content == "[呆宝]: 早上好" && deduped[1].Content == "早",
+    $"窗口消息从背景历史中剔除，只留真正的旧背景（{ctxMessages.Count} → {deduped.Count} 条）");
+Check(!deduped.Any(m => m.Content.Contains("晚点说")) && !deduped.Any(m => m.Content.Contains("[千束]")),
+    "被剔除的正是窗口里那两行，不是别的历史消息");
+
+var afterPrunePrompt = ProactivePrompts.BuildUserPrompt(dedupWindow, deduped, 0);
+Check(afterPrunePrompt.Split("晚点说").Length - 1 == 1 && afterPrunePrompt.Split("在吗").Length - 1 == 1,
+    "最终 prompt 里同一行只出现一次（此前背景段与窗口段各渲染一遍）");
+Check(ProactivePrompts.BuildUserPrompt(dedupWindow, ctxMessages, 0).Split("晚点说").Length - 1 == 2,
+    "反向对照：不做去重时确实渲染两遍，说明这条断言不是空转");
+
+// 不同人说的同一句话不能被当成同一条剔掉（所以要带上昵称一起比）
+var sameWords = new ProactiveWindow
+{
+    GroupId = "GE", LastMessageId = "s2", LastMessageUtcAt = now,
+    Messages = new[] { new ObservedMessage("千束", "好", "s2", now) }
+};
+var sameWordsHistory = new List<(string, string)>
+{
+    ("user", "[泷奈]: 好"),
+    ("user", "[千束]: 好")
+};
+var sameWordsKept = sameWords.ExcludeFrom(sameWordsHistory);
+Check(sameWordsKept.Count == 1 && sameWordsKept[0].Content == "[泷奈]: 好",
+    "同名话不同人：只剔掉窗口里那个人说的，另一个人的原话保留");
+
+// 上游折行清理会改空白，归一化后仍要能匹配上
+var wsWindow = new ProactiveWindow
+{
+    GroupId = "GF", LastMessageId = "w1", LastMessageUtcAt = now,
+    Messages = new[] { new ObservedMessage("呆宝", "我 今 天 不 来 了", "w1", now) }
+};
+Check(wsWindow.ExcludeFrom(new List<(string, string)> { ("user", "[呆宝]: 我今天不来了") }).Count == 0,
+    "只差空白的历史行同样被剔除（窗口压过空白、入库行是上游原文）");
+
+// 同一条消息出现两次时只抵消一次，不能把真实的历史也吃掉
+var twiceWindow = new ProactiveWindow
+{
+    GroupId = "GG", LastMessageId = "t1", LastMessageUtcAt = now,
+    Messages = new[] { new ObservedMessage("呆宝", "哈哈", "t1", now) }
+};
+var twiceKept = twiceWindow.ExcludeFrom(new List<(string, string)>
+{
+    ("user", "[呆宝]: 哈哈"),
+    ("user", "[呆宝]: 哈哈")
+});
+Check(twiceKept.Count == 1, $"按条数逐个抵消而不是整类删光（2 条留 {twiceKept.Count} 条）");
+Check(dedupWindow.ExcludeFrom(new List<(string, string)>()).Count == 0, "空历史原样返回，不抛");
+
 Console.WriteLine("== 3d2. @ 识别码判定（全量模式下 @ 它不回话的正解） ==");
 Check(BotMention.IsMentioned("<@11112222333344445555666677778888> 中午吃什么", "11112222333344445555666677778888"),
     "识别码出现在 at 段里即判为 @ 机器人");
@@ -289,7 +357,33 @@ Check(!AiChatService.SupportedImageMime("image/gif"), "GIF 不附给模型（线
 Check(AiChatService.SupportedImageMime("image/png") && AiChatService.SupportedImageMime("image/jpeg"), "png/jpeg 照附");
 Check(!AiChatService.SupportedImageMime(null) && !AiChatService.SupportedImageMime("image/webp"),
     "类型未知或模型侧没确认过的，宁可只留文字占位");
-Check(ProactivePrompts.MaxAttachedImages == 3, "单次评估最多附带 3 张图（token 与时效的折中）");
+Check(ProactiveChatConfig.DefaultMaxAttachedImages == 3,
+    "附图张数默认仍是 3（token 与时效的折中），但它已从常量变成面板可调项");
+Check(new ProactiveChatConfig { MaxAttachedImages = 99 }.Normalize().MaxAttachedImages
+        == ProactiveChatConfig.CeilingAttachedImages,
+    $"附图张数 99 → {ProactiveChatConfig.CeilingAttachedImages}（上限收敛）");
+Check(new ProactiveChatConfig { MaxAttachedImages = -5 }.Normalize().MaxAttachedImages == 0,
+    "附图张数 -5 → 0，即面板填 0 表示一张图都不带（纯文字判定）");
+Check(ProactiveChatConfig.DefaultHistoryMaxMessages == 8 && ProactiveChatConfig.DefaultEvalMaxTokens == 512,
+    "择机自己的背景条数与输出上限有独立默认值（不再吃 AI 面板的 20 / 2048）");
+Check(new ProactiveChatConfig { HistoryMaxMessages = -1, EvalMaxTokens = 1 }.Normalize()
+        is { HistoryMaxMessages: 0, EvalMaxTokens: 64 },
+    "择机的历史条数与输出上限同样被钳制在可用区间");
+
+Console.WriteLine("== 3e2. @ 回复的附图张数（旧代码固定只取第一张） ==");
+var five = new[] { "u1", "u2", "u3", "u4", "u5" };
+var replyCfg = new AiConfig();
+Check(replyCfg.MaxAttachedImages == 3, $"@ 回复默认带 {replyCfg.MaxAttachedImages} 张（与择机默认一致）");
+Check(replyCfg.CapAttachedImages(five).SequenceEqual(new[] { "u1", "u2", "u3" }),
+    "五张图按原顺序取前三张——旧代码在这里只带 u1，其余四张静默丢弃");
+Check(replyCfg.CapAttachedImages(new[] { "a" }).SequenceEqual(new[] { "a" }),
+    "只发一张时照常带上，不受上限影响");
+Check(new AiConfig { MaxAttachedImages = 0 }.CapAttachedImages(five).Count == 0,
+    "面板填 0 时一张都不带（不回退默认值）");
+Check(new AiConfig { MaxAttachedImages = 10 }.CapAttachedImages(five).Count == 5,
+    "上限高于实际张数时全带，不凭空补图");
+Check(replyCfg.CapAttachedImages(Array.Empty<string>()).Count == 0, "没图时不报错");
+Check(AiConfig.CeilingAttachedImages == 10, "附图上限是 10，服务端按它钳制面板提交值");
 
 Console.WriteLine("== 3f. 上游硬折行清理（全部用线上真实原文） ==");
 Check(CjkTextFixer.Cleanse("伴郎有什么好看的！还没吃呢，饿死了 (ᗜ ˰ ᗜ\n)\n")
@@ -448,6 +542,11 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
         + "WHERE name='MinConfidence'") == 0, "置信度阈值列已从库中删除");
     Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatConfigs') "
         + "WHERE name='Liveliness'") == 1, "发言倾向列已补上");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatConfigs') "
+        + "WHERE name IN ('MaxAttachedImages','HistoryMaxMessages','EvalMaxTokens')") == 3,
+        "择机自己的附图/背景/输出三列已补上（老库补成与原来等价的默认值）");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('AiConfigs') "
+        + "WHERE name='MaxAttachedImages'") == 1, "AiConfigs.附图张数列已补上（@ 回复不再固定只带一张）");
     Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatLogs') "
         + "WHERE name='Confidence'") == 0, "留痕表的置信度列已删除");
     Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatLogs') "
@@ -480,11 +579,15 @@ using (var scope = sp.CreateScope())
 
     await repo.SaveProactiveConfigAsync(new ProactiveChatConfig
     {
-        Enabled = true, WindowSeconds = 3, ActivePerGroupPerMinute = 500, AllowActiveChannel = false
+        Enabled = true, WindowSeconds = 3, ActivePerGroupPerMinute = 500, AllowActiveChannel = false,
+        MaxAttachedImages = 7, HistoryMaxMessages = 15, EvalMaxTokens = 1024
     });
     var saved = await repo.GetProactiveConfigAsync();
     Check(saved.WindowSeconds == 15 && saved.ActivePerGroupPerMinute == 20, "保存时同样钳制到合法区间");
     Check(!saved.AllowActiveChannel, "只允许被动槽的开关能存住（过期即沉默）");
+    // 逐列手工映射最容易漏字段：写进去读不回来，面板就会"保存了但没生效"
+    Check(saved.MaxAttachedImages == 7 && saved.HistoryMaxMessages == 15 && saved.EvalMaxTokens == 1024,
+        $"择机自己的三个规模参数写读一致（附图 {saved.MaxAttachedImages} / 背景 {saved.HistoryMaxMessages} / 输出 {saved.EvalMaxTokens}）");
 
     var groups = await repo.GetAllGroupConfigsAsync();
     var flagsNow = ReadFlagsOn(targetDb);
@@ -501,6 +604,14 @@ using (var scope = sp.CreateScope())
 
     // 熔断复位：留痕表与配置回到关闭态
     await repo.SaveProactiveConfigAsync(new ProactiveChatConfig { Enabled = false });
+
+    // @ 回复的附图张数也要能穿过逐列手工映射（写进去读不回来，面板就会"保存了但没生效"）
+    await repo.SaveAiConfigAsync(new AiConfig { MaxAttachedImages = 6 });
+    var aiBack = await repo.GetAiConfigAsync();
+    Check(aiBack is { MaxAttachedImages: 6 }, $"@ 回复附图张数写读一致（{aiBack?.MaxAttachedImages}）");
+    await repo.SaveAiConfigAsync(new AiConfig { MaxAttachedImages = 0 });
+    Check((await repo.GetAiConfigAsync()) is { MaxAttachedImages: 0 },
+        "@ 回复附图张数填 0 也存得住（不被默认值顶掉）");
 }
 
 Check(sp.GetService<MessageEventHandler>() is not null, "MessageEventHandler 依赖图完整（含观察窗口与 seq 共享）");
@@ -653,6 +764,22 @@ using (var scope = sp.CreateScope())
     var gotJson = JsonSerializer.Serialize(Payload(got), wire);
     Check(gotJson.Contains("\"enabled\":true") && gotJson.Contains("\"ceilingGroupPerDay\":1000"),
         "GET config 回读生效值并附带官方上限供表单约束");
+    Check(gotJson.Contains("\"maxAttachedImages\":3") && gotJson.Contains("\"historyMaxMessages\":8")
+        && gotJson.Contains("\"evalMaxTokens\":512"),
+        "附图/背景/输出三个新旋钮出现在面板契约里，且是择机自己的默认值");
+    Check(gotJson.Contains("\"ceilingAttachedImages\":10"),
+        "附图张数上限随契约下发，面板据此限制输入框");
+    Check(!gotJson.Contains("\"maxContextMessages\"") && !gotJson.Contains("\"maxTokens\""),
+        "择机配置契约里不再出现 AI 面板那两个字段（解耦后两者各管各的）");
+
+    // 面板改成 0 张图必须能存住，否则「不看图」这个选择会被默认值悄悄顶掉
+    await controller.UpdateConfig(new ProactiveController.ProactiveConfigDto
+    {
+        Enabled = true, MaxAttachedImages = 0, HistoryMaxMessages = 0
+    }, default);
+    var zero = JsonSerializer.Serialize(Payload(await controller.GetConfig(default)), wire);
+    Check(zero.Contains("\"maxAttachedImages\":0") && zero.Contains("\"historyMaxMessages\":0"),
+        "附图 0 与背景 0 都存得住（0 是合法选择，不能被当成未填而回退默认值）");
 
     pdb.ProactiveChatLogs.AddRange(
         new ProactiveChatLogEntity { GroupId = "G1", EvaluatedAt = DateTime.UtcNow, Outcome = ProactiveOutcomes.SentPassive, MessageCount = 4, ImageCount = 2, Line = "今晚吃拉面" },

@@ -11,5 +11,9 @@ public class AiConfigEntity
     public double Temperature { get; set; } = 0.7;
     public int MaxTokens { get; set; } = 2048;
     public int MaxContextMessages { get; set; } = 20;
+
+    /// <summary>@ 回复 / 私聊最多附带几张图，0=不带图。</summary>
+    public int MaxAttachedImages { get; set; } = QQBot.Core.Models.Config.AiConfig.DefaultMaxAttachedImages;
+
     public bool WebSearchEnabled { get; set; } = false;
 }

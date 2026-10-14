@@ -139,18 +139,27 @@ public class ProactiveChatHostedService : BackgroundService
         }
 
         var last = window.Messages[^1];
-        var context = await _contextBuilder.BuildGroupContextAsync(
-            window.GroupId, last.Text, last.SenderName, ct);
 
-        // 窗口里已带当前消息，上下文最后一条就是它，去掉避免同一句进 prompt 两次
-        IReadOnlyList<(string Role, string Content)> history = context.Messages.Count > 1
-            ? context.Messages[..^1]
-            : new List<(string Role, string Content)>();
+        // 只继承人设 / 模型 / 接口地址这类"这个 bot 是谁"的设置；
+        // 「上下文条数」与「输出上限」改用择机自己的两个参数。
+        // 此前这里直接吃 AI 面板的全局值，于是同一件事被两个面板的旋钮叠乘着控制。
+        var context = await _contextBuilder.BuildGroupContextAsync(
+            window.GroupId, last.Text, last.SenderName,
+            ai => ai with
+            {
+                MaxContextMessages = config.HistoryMaxMessages,
+                MaxTokens = config.EvalMaxTokens
+            }, ct);
+
+        // 窗口消息同时也躺在上下文历史里，渲染出来是同一行「[昵称]: 正文」。
+        // 不剔除就会在同一份 prompt 里被喂两遍（背景一次、当前窗口一次），
+        // 既白烧 token，又让模型把正在聊的话读成"更早的旧事"。
+        var history = window.ExcludeFrom(context.Messages);
 
         // 窗口里的图片直接交给判定这一调用来读，不另起一次"先描述图片再判断"的调用。
         // 先筛再拼提示词：动图和失效链不附，"附了几张"才不会跟实际发出的对不上。
         var images = await _ai.AttachableImagesAsync(
-            window.CollectImages(ProactivePrompts.MaxAttachedImages), ct);
+            window.CollectImages(config.MaxAttachedImages), ct);
         var startedAt = DateTime.UtcNow;
 
         var verdict = await _structuredAi.GetStructuredAsync<ProactiveVerdict>(

@@ -35,6 +35,17 @@ public class ContextBuilder : IContextBuilder
 
     public async Task<BuildContextResult> BuildGroupContextAsync(
         string groupId, string currentMessage, string senderName, CancellationToken ct = default)
+        => await BuildGroupContextAsync(groupId, currentMessage, senderName, null, ct);
+
+    /// <summary>
+    /// 建群聊上下文。<paramref name="overrideConfig"/> 供非 @ 回复的调用方（目前只有 AI 择机发言）
+    /// 换掉"上下文条数 / 输出上限"这两个字段：它复用建对话与人设解析的全部逻辑，
+    /// 但不再连带继承 AI 面板里为 @ 回复调好的那套规模参数 —— 两者的需求本来就不同。
+    /// 传 null 即完全沿用全局配置（@ 回复与私聊的老行为）。
+    /// </summary>
+    public async Task<BuildContextResult> BuildGroupContextAsync(
+        string groupId, string currentMessage, string senderName,
+        Func<AiConfig, AiConfig>? overrideConfig, CancellationToken ct = default)
     {
         using var scope = _scopeFactory.CreateScope();
         var messageRepo = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
@@ -44,6 +55,8 @@ public class ContextBuilder : IContextBuilder
         var groupConfig = await configRepo.GetGroupConfigAsync(groupId, ct);
 
         var effectiveConfig = ApplyGroupOverrides(globalConfig, groupConfig);
+        if (overrideConfig is not null)
+            effectiveConfig = overrideConfig(effectiveConfig);
 
         var history = await messageRepo.GetGroupHistoryAsync(
             groupId, effectiveConfig.MaxContextMessages * 2, ct);

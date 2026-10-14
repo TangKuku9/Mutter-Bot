@@ -186,6 +186,17 @@ public class AppDbContext : DbContext
         {
         }
 
+        // @ 回复 / 私聊的附图张数。老库补成 3，与它此前"固定只带 ImageUrls[0]"的行为相比是放宽，
+        // 但仍是可用区间内的保守值。
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"AiConfigs\" ADD COLUMN \"MaxAttachedImages\" INTEGER NOT NULL DEFAULT 3", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
         // 自定义人设表（兼容已有数据库）
         await Database.ExecuteSqlRawAsync(
             """
@@ -324,6 +335,9 @@ public class AppDbContext : DbContext
                 "QuietStartHour" INTEGER NOT NULL DEFAULT 23,
                 "QuietEndHour" INTEGER NOT NULL DEFAULT 8,
                 "Liveliness" INTEGER NOT NULL DEFAULT 1,
+                "MaxAttachedImages" INTEGER NOT NULL DEFAULT 3,
+                "HistoryMaxMessages" INTEGER NOT NULL DEFAULT 8,
+                "EvalMaxTokens" INTEGER NOT NULL DEFAULT 512,
                 "AllowActiveChannel" INTEGER NOT NULL DEFAULT 1,
                 "ActivePerGroupPerMinute" INTEGER NOT NULL DEFAULT 3,
                 "ActivePerGroupPerDay" INTEGER NOT NULL DEFAULT 20,
@@ -382,6 +396,35 @@ public class AppDbContext : DbContext
         {
             await Database.ExecuteSqlRawAsync(
                 "ALTER TABLE \"ProactiveChatConfigs\" ADD COLUMN \"Liveliness\" INTEGER NOT NULL DEFAULT 1", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 择机自己的规模参数：附图张数 / 背景历史条数 / 输出上限。
+        // 它们此前分别硬编码、或借 AI 面板的全局值，老库补成与原来等价的默认值。
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatConfigs\" ADD COLUMN \"MaxAttachedImages\" INTEGER NOT NULL DEFAULT 3", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatConfigs\" ADD COLUMN \"HistoryMaxMessages\" INTEGER NOT NULL DEFAULT 8", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatConfigs\" ADD COLUMN \"EvalMaxTokens\" INTEGER NOT NULL DEFAULT 512", ct);
         }
         catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
         {

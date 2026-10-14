@@ -10,6 +10,13 @@ public class AiConfigDto
     public double Temperature { get; set; }
     public int MaxTokens { get; set; }
     public int MaxContextMessages { get; set; }
+
+    /// <summary>@ 回复 / 私聊最多附带几张图，0=不带图。</summary>
+    public int MaxAttachedImages { get; set; }
+
+    /// <summary>附图张数上限，供面板对齐输入框。</summary>
+    public int CeilingAttachedImages { get; set; } = QQBot.Core.Models.Config.AiConfig.CeilingAttachedImages;
+
     public bool WebSearchEnabled { get; set; }
     public List<CharacterDto> AvailableCharacters { get; set; } = new();
     public List<ProviderPresetDto> AvailableProviders { get; set; } = new();

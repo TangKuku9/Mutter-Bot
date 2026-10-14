@@ -89,9 +89,28 @@
           </div>
         </el-form-item>
         <el-form-item label="说与不说">
-          <span class="hint">由 AI 自己判断（should_speak），没有可调的置信度阈值</span>
-          <div class="subline">窗口里的图片与表情包会随文字一起交给 AI 读，最多附带最近 3 张</div>
+          <span class="hint">由 AI 自己判断，没有可调的置信度阈值</span>
           <div class="subline">群友原话要不要写进聊天历史，在「群管理 → 围观范围」按群设置，这里不控制</div>
+        </el-form-item>
+        <el-form-item label="附图张数">
+          <el-input-number v-model="form.maxAttachedImages" :min="0" :max="ceilings.attachedImages" @change="markDirty" />
+          <span class="hint">一次判定最多带给 AI 看几张图，取窗口内最近的；0 = 不看图，纯文字判定</span>
+          <div class="subline">
+            表情包与动图不会附给模型（GIF 会把整次调用打成 500），所以实际附上的可能少于这个数
+          </div>
+        </el-form-item>
+
+        <el-divider content-position="left">判定规模（与「AI 设置」里的上下文/Token 无关）</el-divider>
+        <el-form-item label="背景历史条数">
+          <el-input-number v-model="form.historyMaxMessages" :min="0" :max="50" @change="markDirty" />
+          <span class="hint">判定时额外参考几条更早的群聊，只为认人设与话题走向</span>
+        </el-form-item>
+        <el-form-item label="判定输出上限">
+          <el-input-number v-model="form.evalMaxTokens" :min="64" :max="8192" :step="64" @change="markDirty" />
+          <span class="hint">单次判定调用的 token 上限；判定只输出一小段 JSON，不用给大</span>
+          <div class="subline">
+            「AI 设置」里的「上下文条数」「最大 Tokens」只作用于 @ 回复与私聊，不再影响择机发言
+          </div>
         </el-form-item>
 
         <el-divider content-position="left">节流</el-divider>
@@ -209,7 +228,7 @@ const outcomeOptions = Object.entries(outcomeMap).map(([value, v]) => ({ value, 
 
 const form = ref(emptyForm())
 const status = ref({})
-const ceilings = ref({ groupPerMinute: 20, groupPerDay: 1000, accountPerMinute: 60 })
+const ceilings = ref({ groupPerMinute: 20, groupPerDay: 1000, accountPerMinute: 60, attachedImages: 10 })
 const logs = ref([])
 const logTotal = ref(0)
 const page = ref(1)
@@ -245,6 +264,7 @@ function emptyForm() {
     enabled: false, windowSeconds: 60, windowMaxMessages: 12, cooldownMinutes: 45,
     maxPerGroupPerDay: 3, maxGlobalPerDay: 12, quietStartHour: 23, quietEndHour: 8,
     liveliness: 1, allowActiveChannel: true,
+    maxAttachedImages: 3, historyMaxMessages: 8, evalMaxTokens: 512,
     activePerGroupPerMinute: 3, activePerGroupPerDay: 20, activePerAccountPerMinute: 20,
     updatedAt: null
   }
@@ -262,7 +282,8 @@ const loadConfig = async () => {
     ceilings.value = {
       groupPerMinute: data.ceilingGroupPerMinute,
       groupPerDay: data.ceilingGroupPerDay,
-      accountPerMinute: data.ceilingAccountPerMinute
+      accountPerMinute: data.ceilingAccountPerMinute,
+      attachedImages: data.ceilingAttachedImages
     }
   }
   dirty.value = false

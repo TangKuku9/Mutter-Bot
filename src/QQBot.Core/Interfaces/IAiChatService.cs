@@ -11,9 +11,14 @@ public interface IAiChatService
         AiConfig config,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// 历史里某一条消息可带多张图片（末条即本轮用户消息）。
+    /// 早先这里是单个 <c>string? ImageUrl</c>，调用方只好写 <c>ImageUrls[0]</c>——
+    /// 群友一次发好几张时，只有第一张进模型，其余静默丢弃。
+    /// </summary>
     Task<AiChatResponse> ChatAsync(
         string systemPrompt,
-        List<(string Role, string Content, string? ImageUrl)> conversationHistory,
+        List<(string Role, string Content, IReadOnlyList<string>? ImageUrls)> conversationHistory,
         AiConfig config,
         CancellationToken ct = default);
 
