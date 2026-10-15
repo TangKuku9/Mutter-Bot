@@ -29,6 +29,12 @@ updates:
       npm-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    # major 一律不开 PR：面板的大版本升级必须人工验证（vite 8 / plugin-vue 6 需配套升、
+    # vue-router 5 有破坏性变更）。此前 Dependabot 基于旧基线的 major PR 还带出过
+    # element-plus / vue 的版本回退，因此不再自动跟进，改为需要时手工升。
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # 本仓库的 CI 工作流自身
   - package-ecosystem: "github-actions"
