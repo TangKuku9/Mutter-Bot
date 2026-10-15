@@ -200,7 +200,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
     {
         var url = $"{_apiBaseUrl.TrimEnd('/')}/gateway";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Add("Authorization", $"Mutter {token}");
+        request.Headers.Add("Authorization", $"QQBot {token}");
 
         using var response = await _http.SendAsync(request, ct);
         if (!response.IsSuccessStatusCode)
@@ -542,7 +542,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
             op = GatewayOp.Identify,
             d = new IdentifyData
             {
-                Token = $"Mutter {token}",
+                Token = $"QQBot {token}",
                 Intents = intents,
                 Shard = new[] { 0, 1 }
             }
@@ -560,7 +560,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
             op = GatewayOp.Resume,
             d = new ResumeData
             {
-                Token = $"Mutter {token}",
+                Token = $"QQBot {token}",
                 SessionId = _sessionId!,
                 Seq = GetLastSeq() ?? 0
             }
