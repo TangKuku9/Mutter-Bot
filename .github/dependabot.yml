@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # 后端依赖：csproj 里大量使用 9.0.* 这类浮动版本，安全更新尤其需要自动跟进
+  # 后端依赖：csproj 用浮动版本号（如 Microsoft.Extensions.* 为 10.0.*、EF Core 仍 9.0.*），安全更新尤其需要自动跟进
   - package-ecosystem: "nuget"
     directory: "/"
     schedule:
