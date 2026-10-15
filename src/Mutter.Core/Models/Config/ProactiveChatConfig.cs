@@ -63,11 +63,11 @@ public class ProactiveChatConfig
 
     /// <summary>
     /// 单次判定调用的输出上限，同时也是输入预算的换算基准。
-    /// 判定的输出只是一个短 JSON，用 @ 回复那份 2048 是纯浪费——两者需求不同，故分开。
+    /// 即使判定结果是短 JSON，也需为模型思考留出足够预算；与 @ 回复设置分开。
     /// </summary>
     public int EvalMaxTokens { get; set; } = DefaultEvalMaxTokens;
 
-    public const int DefaultEvalMaxTokens = 512;
+    public const int DefaultEvalMaxTokens = 5120;
 
     public const int LivelinessRestrained = 0;
     public const int LivelinessNormal = 1;

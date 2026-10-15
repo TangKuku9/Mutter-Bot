@@ -107,7 +107,7 @@
         </el-form-item>
         <el-form-item label="判定输出上限">
           <el-input-number v-model="form.evalMaxTokens" :min="64" :max="8192" :step="64" @change="markDirty" />
-          <span class="hint">单次判定调用的 token 上限；判定只输出一小段 JSON，不用给大</span>
+          <span class="hint">过低容易因思考截断输出，推荐设置为 5000 及以上</span>
           <div class="subline">
             「AI 设置」里的「上下文条数」「最大 Tokens」只作用于 @ 回复与私聊，不再影响择机发言
           </div>
@@ -216,6 +216,9 @@ const outcomeMap = {
   skipped_global_cap: ['全局到量', 'warning'],
   skipped_ai_declined: ['AI 没话可说', 'info'],
   skipped_ai_unavailable: ['AI 不可用', 'warning'],
+  failed_ai_call: ['AI 调用失败', 'danger'],
+  skipped_ai_truncated: ['AI 输出被截断', 'warning'],
+  skipped_ai_unparsable: ['AI 输出无法解析', 'warning'],
   skipped_ai_busy: ['评估忙', 'info'],
   skipped_disabled: ['已关闭', 'info'],
   failed_rejected: ['被接收方拒收', 'danger'],

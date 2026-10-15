@@ -7,12 +7,42 @@ namespace Mutter.Core.Interfaces;
 /// </summary>
 public record StructuredResult<T>(T Data, string? Model, int PromptTokens, int CompletionTokens) where T : class;
 
+public enum StructuredAiFailureKind
+{
+    ApiError,
+    Truncated,
+    Unparsable
+}
+
+/// <summary>结构化 AI 调用结果；失败时保留末次响应或调用错误，便于调用方留痕。</summary>
+public record StructuredOutcome<T>(
+    StructuredResult<T>? Result,
+    StructuredAiFailureKind? FailureKind = null,
+    string? ErrorMessage = null,
+    string? RawContent = null,
+    string? Model = null,
+    int PromptTokens = 0,
+    int CompletionTokens = 0) where T : class;
+
 /// <summary>
 /// 结构化 AI 输出服务。封装 JSON mode + 解析降级 + 数值钳制。
 /// 需求方不止游戏域：AI 择机发言的判定（ProactiveVerdict）也走这里。
 /// </summary>
 public interface IStructuredAiService
 {
+    Task<StructuredOutcome<T>> GetStructuredOutcomeAsync<T>(
+        string systemPrompt,
+        string userPrompt,
+        AiConfig config,
+        CancellationToken ct = default) where T : class;
+
+    Task<StructuredOutcome<T>> GetStructuredOutcomeAsync<T>(
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyList<string> imageUrls,
+        AiConfig config,
+        CancellationToken ct = default) where T : class;
+
     /// <summary>
     /// 调用 AI 获取结构化 JSON 并反序列化为 T。
     /// 三级降级：① json_object 模式 → ② prompt 引导 + 正则提取 {...} → ③ 返回 null 由调用方兜底。

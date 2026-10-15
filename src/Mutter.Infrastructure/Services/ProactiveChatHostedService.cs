@@ -161,15 +161,22 @@ public class ProactiveChatHostedService : BackgroundService
             window.CollectImages(config.MaxAttachedImages), ct);
         var startedAt = DateTime.UtcNow;
 
-        var verdict = await _structuredAi.GetStructuredAsync<ProactiveVerdict>(
+        var outcome = await _structuredAi.GetStructuredOutcomeAsync<ProactiveVerdict>(
             BuildJudgePrompt(context, config.Liveliness),
             ProactivePrompts.BuildUserPrompt(window, history, images.Count),
             images,
             context.EffectiveConfig, ct);
 
-        if (verdict is null)
+        if (outcome.Result is null)
         {
-            await WriteLogAsync(window, new LogNote(ProactiveOutcomes.SkippedAiUnavailable, Detail: "结构化输出解析失败"), ct);
+            var (outcomeCode, detail) = outcome.FailureKind switch
+            {
+                StructuredAiFailureKind.ApiError => (ProactiveOutcomes.FailedAiCall, Truncate(outcome.ErrorMessage, 160)),
+                StructuredAiFailureKind.Truncated => (ProactiveOutcomes.SkippedAiTruncated,
+                    $"finish_reason=length；tokens {outcome.PromptTokens}+{outcome.CompletionTokens}"),
+                _ => (ProactiveOutcomes.SkippedAiUnparsable, Truncate(outcome.RawContent, 160))
+            };
+            await WriteLogAsync(window, new LogNote(outcomeCode, Detail: detail, Usage: outcome), ct);
             return;
         }
 
@@ -177,6 +184,7 @@ public class ProactiveChatHostedService : BackgroundService
         _logger.LogInformation("择机评估完成 group={GroupId} 用时={Ms}ms 消息={Count} 附图={Images}/{Total}",
             window.GroupId, tookMs, window.Messages.Count, images.Count, window.ImageCount);
 
+        var verdict = outcome.Result;
         var data = verdict.Data;
         var line = ProactivePrompts.SanitizeLine(data.Line);
 
@@ -184,12 +192,12 @@ public class ProactiveChatHostedService : BackgroundService
         // （它曾把模型已经写好的那句话连同 token 一起丢掉）。
         if (line is null)
         {
-            await WriteLogAsync(window, new LogNote(ProactiveOutcomes.SkippedAiDeclined, data, Usage: verdict), ct);
+            await WriteLogAsync(window, new LogNote(ProactiveOutcomes.SkippedAiDeclined, data, Usage: outcome), ct);
             return;
         }
 
         var result = await _speaker.SpeakAsync(window, line, config, ct);
-        await WriteLogAsync(window, new LogNote(result.Outcome, data, line, result.Detail, result.MessageId, verdict), ct);
+        await WriteLogAsync(window, new LogNote(result.Outcome, data, line, result.Detail, result.MessageId, outcome), ct);
 
         if (result.Outcome is not (ProactiveOutcomes.SentPassive or ProactiveOutcomes.SentActive))
         {
@@ -229,7 +237,7 @@ public class ProactiveChatHostedService : BackgroundService
         string? Line = null,
         string? Detail = null,
         string? SentMessageId = null,
-        StructuredResult<ProactiveVerdict>? Usage = null);
+        StructuredOutcome<ProactiveVerdict>? Usage = null);
 
     private async Task WriteLogAsync(ProactiveWindow window, LogNote note, CancellationToken ct)
     {
