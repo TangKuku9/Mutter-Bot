@@ -1,5 +1,5 @@
 <!--
-提交前请确认目标分支：新功能提 preview-features，缺陷修复提 preview-fixes。
+提交前请确认目标分支：新功能提 preview-features，缺陷修复提 preview-fixes。开发分支应从该目标分支切出（不是 main）。
 详见 CONTRIBUTING.md。
 
 合并由维护者决定。CI 全绿只是前置条件，不代表一定会被合并——

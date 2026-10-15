@@ -38,7 +38,8 @@
   - [7.1 分支规划](#71-分支规划)
   - [7.2 维护与合并权限](#72-维护与合并权限)
   - [7.3 标准 PR 步骤](#73-标准-pr-步骤)
-  - [7.4 CI 自动化流水线](#74-ci-自动化流水线)
+  - [7.4 分支提升与同步（维护者）](#74-分支提升与同步维护者)
+  - [7.5 CI 自动化流水线](#75-ci-自动化流水线)
 - [8. 项目红线（不可协商）](#8-项目红线不可协商)
 - [9. 安全漏洞反馈与开源许可](#9-安全漏洞反馈与开源许可)
 
@@ -265,6 +266,8 @@ npm run build
 | `preview-fixes` | **缺陷修复** PR 目标分支 | 仅维护者 | **接受** Bug 修复 PR |
 | `xianxia` | 历史修仙 RPG 功能只读存档 | 无人（冻结） | **不接受任何 PR** |
 
+开发分支从它将要提 PR 的那个分支切出，不从 `main` 切。
+
 ### 7.2 维护与合并权限
 
 - **写权限隔离**：外部贡献者无主仓库直推权限，必须在自己的 Fork 仓库中工作并提 PR。
@@ -273,18 +276,43 @@ npm run build
 
 ### 7.3 标准 PR 步骤
 
-1. **Fork 仓库**到个人空间，从 `main` 切出开发分支：
+1. **Fork 仓库**到个人空间，从 **PR 的目标分支**切出开发分支（不是 `main`）：
+
    ```bash
-   git switch -c feat/my-new-feature main
-   git push -u origin feat/my-new-feature
+   # 缺陷修复 -> 从 preview-fixes 切，PR 也提给 preview-fixes
+   git switch -c fix/my-bugfix origin/preview-fixes
+
+   # 新功能 -> 从 preview-features 切，PR 也提给 preview-features
+   git switch -c feat/my-new-feature origin/preview-features
+
+   git push -u origin fix/my-bugfix
    ```
+
+   切点与落点一致，PR 的提交列表里就只有你自己的提交。从 `main` 切会把 `main` 上的合并提交一并列进去——内容差异为零，纯属历史噪音。
 2. 保持原子性：**一个 PR 专注于解决一件事**，改动越聚焦，合并越高效。
 3. 提交 PR 时正确选择目标分支：
    - 新功能特性 -> 目标分支选择 `preview-features`
    - 缺陷与问题修复 -> 目标分支选择 `preview-fixes`
 4. 认真填写 PR 描述：说明改动动机、核心变化点及验证方法（建议附带自检输出或复现截图）。
 
-### 7.4 CI 自动化流水线
+### 7.4 分支提升与同步（维护者）
+
+`preview-*` 上的改动按发布节奏攒批提升到 `main`：
+
+1. 开 PR：`preview-fixes → main`（新功能则 `preview-features → main`）。`main` 受仓库规则保护，只能经 PR 进入，直推会被拒绝。
+2. 合并时把合并提交标题写成 `Merge branch 'preview-fixes': <一句话>`，与 `main` 既有历史一致。
+3. 等 `main` 上新合并提交的 CI 全绿。`preview-*` 的直推要求被推提交已有全绿检查，这一步不能跳。
+4. 把两个 `preview-*` 分支快进到 `main` 并推送：
+
+   ```bash
+   git fetch origin
+   git switch preview-fixes && git merge --ff-only origin/main && git push origin preview-fixes:preview-fixes
+   git switch preview-features && git merge --ff-only origin/main && git push origin preview-features:preview-features
+   ```
+
+若某个 `preview-*` 分支还有未提升的独有提交，`--ff-only` 会拒绝：先把它提升到 `main`，再回来对齐。
+
+### 7.5 CI 自动化流水线
 
 每个向本仓库发起的 PR 及推送均会自动执行 GitHub Actions [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：
 1. **构建与自检 (.NET)**：在 Linux 环境下验证 `dotnet restore` + `dotnet build`（含警告即错误）+ `ProactiveCheck --logic-only`。
