@@ -10,6 +10,7 @@ INSTALL_DIR="/opt/mutter-bot"
 SERVICE_NAME="mutter-bot"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DB_FILE="mutter-bot.db"
+CONFIG_FILE="appsettings.json"
 
 echo "========================================="
 echo "  mutter-bot Linux 部署脚本"
@@ -63,6 +64,19 @@ if [ -f "$INSTALL_DIR/$DB_FILE" ]; then
         fi
     done
 fi
+
+# 保护已有的 appsettings.json：publish 里那份是模板（AppId、ClientSecret、PanelAuth
+# 均为占位值），直接 cp 会把线上真实配置冲掉。与数据库同样处理：先备份，再把模板挪走。
+# 首次安装没有该文件，模板会被正常铺出来。
+if [ -f "$INSTALL_DIR/$CONFIG_FILE" ]; then
+    CONFIG_BACKUP="$INSTALL_DIR/$CONFIG_FILE.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$INSTALL_DIR/$CONFIG_FILE" "$CONFIG_BACKUP"
+    echo "  已备份现有配置 -> $CONFIG_BACKUP"
+    if [ -f "$PUBLISH_DIR/$CONFIG_FILE" ]; then
+        mv "$PUBLISH_DIR/$CONFIG_FILE" "$PUBLISH_DIR/.$CONFIG_FILE.skip"
+    fi
+fi
+
 cp -r "$PUBLISH_DIR"/* "$INSTALL_DIR/"
 # 还原 publish 中被临时移走的数据库及 WAL/SHM 文件
 for f in "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-shm"; do
@@ -70,6 +84,10 @@ for f in "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-shm"; do
         mv "$PUBLISH_DIR/.$f.skip" "$PUBLISH_DIR/$f"
     fi
 done
+# 还原 publish 中被临时移走的配置文件
+if [ -f "$PUBLISH_DIR/.$CONFIG_FILE.skip" ]; then
+    mv "$PUBLISH_DIR/.$CONFIG_FILE.skip" "$PUBLISH_DIR/$CONFIG_FILE"
+fi
 chown -R "$SERVICE_NAME:$SERVICE_NAME" "$INSTALL_DIR"
 chmod +x "$INSTALL_DIR/mutter-bot"
 
