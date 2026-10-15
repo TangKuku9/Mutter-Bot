@@ -297,14 +297,20 @@ public class AiChatService : IAiChatService
         var json = await response.Content.ReadFromJsonAsync<JsonElement>(ct);
 
         string content;
+        string rawContent;
         string? model;
+        string? finishReason = null;
         int promptTokens = 0, completionTokens = 0;
 
         try
         {
-            content = json.GetProperty("choices")[0]
-                .GetProperty("message")
+            var choice = json.GetProperty("choices")[0];
+            rawContent = choice.GetProperty("message")
                 .GetProperty("content").GetString() ?? "";
+            content = rawContent;
+            if (choice.TryGetProperty("finish_reason", out var reason)
+                && reason.ValueKind == JsonValueKind.String)
+                finishReason = reason.GetString();
 
             // 出口统一清理：代理按列宽硬折进来的换行与行首空格，既弄丑了发进群的话，
             // 也是结构化输出里那些"裸换行让 JSON 解析失败"的同一个源头。
@@ -332,7 +338,9 @@ public class AiChatService : IAiChatService
         var result = new AiChatResponse
         {
             Content = content,
+            RawContent = rawContent,
             Model = model,
+            FinishReason = finishReason,
             PromptTokens = promptTokens,
             CompletionTokens = completionTokens
         };

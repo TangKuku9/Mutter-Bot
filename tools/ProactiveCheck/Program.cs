@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Mutter.Core.EventHandlers;
 using Mutter.Core;
 using Mutter.Core.Interfaces;
+using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
 using Mutter.Core.Models.QQOfficial;
 using Mutter.Core.Proactive;
@@ -222,6 +223,46 @@ var withProse = StructuredAiService.ExtractRepairableJson("{\"should_speak\": tr
 Check(withProse is not null && withProse.Contains("should_speak"), "普通对象输出照常解析");
 Check(StructuredAiService.ExtractRepairableJson("模型今天不肯输出 JSON") is null, "没有对象时返回 null 让调用方兜底");
 
+using (var testServices = new ServiceCollection().AddLogging().BuildServiceProvider())
+{
+    var logger = testServices.GetRequiredService<ILogger<StructuredAiService>>();
+    var scopeFactory = testServices.GetRequiredService<IServiceScopeFactory>();
+    var secondRoundRaw = "第二轮原文：模型拒绝输出 JSON";
+    var secondRoundService = new StructuredAiService(scopeFactory, new ScriptedAiChatService(
+        new AiChatResponse { Content = "第一轮没有 JSON" },
+        new AiChatResponse
+        {
+            Content = "第二轮清洗后内容",
+            RawContent = secondRoundRaw,
+            Model = "test-model",
+            PromptTokens = 91,
+            CompletionTokens = 17
+        }), logger);
+    var secondRoundOutcome = await secondRoundService.GetStructuredOutcomeAsync<ProactiveVerdict>(
+        "system", "user", new AiConfig());
+    Check(secondRoundOutcome.FailureKind == StructuredAiFailureKind.Unparsable
+        && secondRoundOutcome.RawContent == secondRoundRaw
+        && secondRoundOutcome.PromptTokens == 91 && secondRoundOutcome.CompletionTokens == 17,
+        "第二轮解析失败保留模型原文与本次用量");
+
+    var truncatedService = new StructuredAiService(scopeFactory, new ScriptedAiChatService(
+        new AiChatResponse { Content = "第一轮没有 JSON" },
+        new AiChatResponse { Content = "截断内容", FinishReason = "length", PromptTokens = 33, CompletionTokens = 64 }), logger);
+    var truncatedOutcome = await truncatedService.GetStructuredOutcomeAsync<ProactiveVerdict>(
+        "system", "user", new AiConfig());
+    Check(truncatedOutcome.FailureKind == StructuredAiFailureKind.Truncated
+        && truncatedOutcome.PromptTokens == 33 && truncatedOutcome.CompletionTokens == 64,
+        "finish_reason=length 单独分类并保留 tokens");
+
+    var apiErrorService = new StructuredAiService(scopeFactory, new ScriptedAiChatService(
+        new InvalidOperationException("第一轮错误"), new InvalidOperationException("第二轮 API 错误摘要")), logger);
+    var apiErrorOutcome = await apiErrorService.GetStructuredOutcomeAsync<ProactiveVerdict>(
+        "system", "user", new AiConfig());
+    Check(apiErrorOutcome.FailureKind == StructuredAiFailureKind.ApiError
+        && apiErrorOutcome.ErrorMessage == "第二轮 API 错误摘要",
+        "API 调用失败返回末次异常摘要");
+}
+
 Console.WriteLine("== 3c. 表情贴纸文案归一化 ==");
 var parser = new MessageParser();
 var sticker = parser.Parse("<faceType=6,faceId=\"0\",ext=\"eyJ0ZXh0IjoiIn0=\">",
@@ -369,7 +410,7 @@ Check(new ProactiveChatConfig { MaxAttachedImages = 99 }.Normalize().MaxAttached
     $"附图张数 99 → {ProactiveChatConfig.CeilingAttachedImages}（上限收敛）");
 Check(new ProactiveChatConfig { MaxAttachedImages = -5 }.Normalize().MaxAttachedImages == 0,
     "附图张数 -5 → 0，即面板填 0 表示一张图都不带（纯文字判定）");
-Check(ProactiveChatConfig.DefaultHistoryMaxMessages == 8 && ProactiveChatConfig.DefaultEvalMaxTokens == 512,
+Check(ProactiveChatConfig.DefaultHistoryMaxMessages == 8 && ProactiveChatConfig.DefaultEvalMaxTokens == 5120,
     "择机自己的背景条数与输出上限有独立默认值（不再吃 AI 面板的 20 / 2048）");
 Check(new ProactiveChatConfig { HistoryMaxMessages = -1, EvalMaxTokens = 1 }.Normalize()
         is { HistoryMaxMessages: 0, EvalMaxTokens: 64 },
@@ -1015,4 +1056,38 @@ file sealed class NoopNotification : INotificationService
     public Task NotifyConnectionStatusAsync(bool isConnected, string info) => Task.CompletedTask;
     public Task NotifyAiResponseStartedAsync(string? groupId, string senderName) => Task.CompletedTask;
     public Task NotifyAiResponseCompletedAsync(object responseDto) => Task.CompletedTask;
+}
+
+file sealed class ScriptedAiChatService : IAiChatService
+{
+    private readonly Queue<object> _responses;
+
+    public ScriptedAiChatService(params object[] responses) => _responses = new Queue<object>(responses);
+
+    public Task<AiChatResponse> ChatAsync(string systemPrompt,
+        List<(string Role, string Content)> conversationHistory, AiConfig config,
+        CancellationToken ct = default) => Next();
+
+    public Task<AiChatResponse> ChatAsync(string systemPrompt,
+        List<(string Role, string Content, IReadOnlyList<string>? ImageUrls)> conversationHistory,
+        AiConfig config, CancellationToken ct = default) => Next();
+
+    public Task<AiChatResponse> ChatWithImagesAsync(string systemPrompt, string userPrompt,
+        IReadOnlyList<string> imageUrls, AiConfig config, string? responseFormat = null,
+        CancellationToken ct = default) => Next();
+
+    public Task<IReadOnlyList<string>> AttachableImagesAsync(IReadOnlyList<string> imageUrls,
+        CancellationToken ct = default) => Task.FromResult(imageUrls);
+
+    public Task<AiChatResponse> ChatAsync(string systemPrompt,
+        List<(string Role, string Content)> conversationHistory, AiConfig config,
+        string? responseFormat, CancellationToken ct = default) => Next();
+
+    private Task<AiChatResponse> Next()
+    {
+        var response = _responses.Dequeue();
+        return response is Exception exception
+            ? Task.FromException<AiChatResponse>(exception)
+            : Task.FromResult((AiChatResponse)response);
+    }
 }
