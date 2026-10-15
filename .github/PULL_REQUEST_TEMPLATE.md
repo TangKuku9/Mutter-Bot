@@ -1,5 +1,5 @@
 <!--
-提交前请确认目标分支：新功能提 preview-features，缺陷修复提 preview-fixes。
+提交前请确认目标分支：新功能提 preview-features，缺陷修复提 preview-fixes。开发分支应从该目标分支切出（不是 main）。
 详见 CONTRIBUTING.md。
 
 合并由维护者决定。CI 全绿只是前置条件，不代表一定会被合并——
@@ -28,7 +28,7 @@
 - [ ] 改动了业务逻辑时，`tools/ProactiveCheck` 跑完没有 `FAIL`
 - [ ] 提交里没有混进无关的格式化或重构噪音
 
-## 红线确认（详见 CONTRIBUTING.md 第 6 节）
+## 红线确认（详见 CONTRIBUTING.md 第 8 节）
 
 - [ ] **没有**提交任何真实凭据（AppId / ClientSecret / ApiKey / 面板口令 / token）
 - [ ] **没有**出现真实群号、群/成员 openid、昵称或聊天内容；测试一律用合成假数据

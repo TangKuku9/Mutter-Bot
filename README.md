@@ -42,6 +42,8 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 | `preview-fixes` | **缺陷修复** 目标分支 | 维护中 | **✓ 接收** Bug 修复 PR |
 | `xianxia` | 历史文字 RPG（修仙游戏）只读归档 | **永久冻结** | ✗ 不接受任何 PR |
 
+开发分支从对应的目标分支切出（新功能从 `preview-features`，缺陷修复从 `preview-fixes`），不从 `main` 切。
+
 > 贡献代码前请务必仔细阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。任何安全漏洞请通过 [SECURITY.md](SECURITY.md) 私密提交，请勿公开开启 Issue。
 
 ---
