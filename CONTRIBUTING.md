@@ -299,7 +299,7 @@ npm run build
 
 `preview-*` 上的改动按发布节奏攒批提升到 `main`：
 
-1. 开 PR：`preview-fixes → main`（新功能则 `preview-features → main`）。`main` 受仓库规则保护，只能经 PR 进入，直推会被拒绝。
+1. 开 PR：`preview-fixes → main`（新功能则 `preview-features → main`），让改动先过 CI。
 2. 合并时把合并提交标题写成 `Merge branch 'preview-fixes': <一句话>`，与 `main` 既有历史一致。
 3. 等 `main` 上新合并提交的 CI 全绿。`preview-*` 的直推要求被推提交已有全绿检查，这一步不能跳。
 4. 把两个 `preview-*` 分支快进到 `main` 并推送：
@@ -309,6 +309,8 @@ npm run build
    git switch preview-fixes && git merge --ff-only origin/main && git push origin preview-fixes:preview-fixes
    git switch preview-features && git merge --ff-only origin/main && git push origin preview-features:preview-features
    ```
+
+   两步指向同一个新提交，推第一个会按分支重新触发一次 CI；推第二个时可能撞上 `required status checks are in progress`，等那一轮跑完再重推即可。
 
 若某个 `preview-*` 分支还有未提升的独有提交，`--ff-only` 会拒绝：先把它提升到 `main`，再回来对齐。
 
