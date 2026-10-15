@@ -48,7 +48,7 @@
 
 ### 1.1 工具依赖
 
-- **[.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)**（`net9.0`，工程采用 `9.0.*` 版本号浮动）
+- **[.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)**（`net9.0`；依赖采用浮动版本号：`Microsoft.Extensions.*` 为 `10.0.*`，`EntityFrameworkCore.*` / `Microsoft.Data.Sqlite` 仍为 `9.0.*`——库版本线独立于框架版本）
 - **[Node.js](https://nodejs.org/)**（`^18.0.0 || ^20.0.0 || >=22.0.0`，推荐使用 LTS 20.x，Vite 6 编译前端面板所需）
 - **[Git](https://git-scm.com/)**
 
