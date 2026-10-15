@@ -16,6 +16,9 @@ public static class ProactiveOutcomes
     /// <summary>AI 这回没话可说（Line 为空）。</summary>
     public const string SkippedAiDeclined = "skipped_ai_declined";
     public const string SkippedAiUnavailable = "skipped_ai_unavailable";
+    public const string FailedAiCall = "failed_ai_call";
+    public const string SkippedAiTruncated = "skipped_ai_truncated";
+    public const string SkippedAiUnparsable = "skipped_ai_unparsable";
     public const string SkippedAiBusy = "skipped_ai_busy";
     public const string SkippedDisabled = "skipped_disabled";
 

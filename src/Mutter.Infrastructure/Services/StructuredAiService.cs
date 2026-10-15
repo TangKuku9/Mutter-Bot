@@ -44,7 +44,7 @@ public class StructuredAiService : IStructuredAiService
         string userPrompt,
         AiConfig config,
         CancellationToken ct = default) where T : class
-        => await GetStructuredAsync<T>(systemPrompt, userPrompt, Array.Empty<string>(), config, ct);
+        => (await GetStructuredOutcomeAsync<T>(systemPrompt, userPrompt, Array.Empty<string>(), config, ct)).Result;
 
     public async Task<StructuredResult<T>?> GetStructuredAsync<T>(
         string systemPrompt,
@@ -52,33 +52,57 @@ public class StructuredAiService : IStructuredAiService
         IReadOnlyList<string> imageUrls,
         AiConfig config,
         CancellationToken ct = default) where T : class
+        => (await GetStructuredOutcomeAsync<T>(systemPrompt, userPrompt, imageUrls, config, ct)).Result;
+
+    public async Task<StructuredOutcome<T>> GetStructuredOutcomeAsync<T>(
+        string systemPrompt,
+        string userPrompt,
+        AiConfig config,
+        CancellationToken ct = default) where T : class
+        => await GetStructuredOutcomeAsync<T>(systemPrompt, userPrompt, Array.Empty<string>(), config, ct);
+
+    public async Task<StructuredOutcome<T>> GetStructuredOutcomeAsync<T>(
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyList<string> imageUrls,
+        AiConfig config,
+        CancellationToken ct = default) where T : class
     {
         // ① 优先 json_object 模式
-        var (resp1, _) = await CallAsync(systemPrompt, userPrompt, imageUrls, config, "json_object", ct);
-        if (resp1 is not null)
+        var first = await CallAsync(systemPrompt, userPrompt, imageUrls, config, "json_object", ct);
+        if (first.Response is not null)
         {
-            var parsed = Deserialize<T>(resp1.Content);
+            var parsed = first.Response.FinishReason == "length" ? null : Deserialize<T>(first.Response.Content);
             if (parsed is not null)
-                return new StructuredResult<T>(parsed, resp1.Model, resp1.PromptTokens, resp1.CompletionTokens);
-            _logger.LogWarning("json_object 模式解析失败，降级 prompt 引导。raw={Raw}", Truncate(resp1.Content, 200));
+                return Success(parsed, first.Response);
+            _logger.LogWarning("json_object 模式解析失败或输出被截断，降级 prompt 引导。raw={Raw}", Truncate(first.Response.Content, 200));
         }
 
         // ② prompt 引导 + 正则提取 {...}
         var fallbackPrompt = systemPrompt + "\n\n注意：只输出一个合法的 JSON 对象，不要 Markdown、不要多余文字。";
-        var (resp2, _) = await CallAsync(fallbackPrompt, userPrompt, imageUrls, config, null, ct);
-        if (resp2 is not null)
+        var second = await CallAsync(fallbackPrompt, userPrompt, imageUrls, config, null, ct);
+        if (second.Response is not null)
         {
-            var parsed = Deserialize<T>(resp2.Content);
+            var parsed = second.Response.FinishReason == "length" ? null : Deserialize<T>(second.Response.Content);
             if (parsed is not null)
-                return new StructuredResult<T>(parsed, resp2.Model, resp2.PromptTokens, resp2.CompletionTokens);
+                return Success(parsed, second.Response);
         }
 
-        // ③ 返回 null，由调用方走预设模板兜底
-        _logger.LogWarning("结构化 AI 输出解析失败，返回 null 由调用方兜底。type={Type}", typeof(T).Name);
-        return null;
+        // ③ 将末次调用的具体失败与响应带回，避免调用方把 API 错误、截断和解析失败混为一谈。
+        if (second.Response is { } response)
+        {
+            var kind = response.FinishReason == "length"
+                ? StructuredAiFailureKind.Truncated
+                : StructuredAiFailureKind.Unparsable;
+            _logger.LogWarning("结构化 AI 输出失败 kind={Kind} type={Type}", kind, typeof(T).Name);
+            return Failure<T>(kind, response);
+        }
+
+        _logger.LogWarning("结构化 AI 调用失败 type={Type} error={Error}", typeof(T).Name, second.ErrorMessage);
+        return new StructuredOutcome<T>(null, StructuredAiFailureKind.ApiError, second.ErrorMessage);
     }
 
-    private async Task<(AiChatResponse? Response, bool UsedJsonMode)> CallAsync(
+    private async Task<(AiChatResponse? Response, string? ErrorMessage)> CallAsync(
         string systemPrompt, string userPrompt, IReadOnlyList<string> imageUrls,
         AiConfig config, string? responseFormat, CancellationToken ct)
     {
@@ -88,15 +112,30 @@ public class StructuredAiService : IStructuredAiService
                 ? await _ai.ChatWithImagesAsync(systemPrompt, userPrompt, imageUrls, config, responseFormat, ct)
                 : await _ai.ChatAsync(systemPrompt,
                     new List<(string Role, string Content)> { ("user", userPrompt) }, config, responseFormat, ct);
-            return (resp, responseFormat is not null);
+            return (resp, null);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "AI 结构化调用失败 responseFormat={Fmt} images={Images}",
                 responseFormat ?? "null", imageUrls.Count);
-            return (null, false);
+            return (null, ex.Message);
         }
     }
+
+    private static StructuredOutcome<T> Success<T>(T data, AiChatResponse response) where T : class
+    {
+        var result = new StructuredResult<T>(data, response.Model, response.PromptTokens, response.CompletionTokens);
+        return new StructuredOutcome<T>(result, Model: response.Model,
+            PromptTokens: response.PromptTokens, CompletionTokens: response.CompletionTokens);
+    }
+
+    private static StructuredOutcome<T> Failure<T>(StructuredAiFailureKind kind, AiChatResponse response) where T : class =>
+        new(null, kind, RawContent: response.RawContent ?? response.Content, Model: response.Model,
+            PromptTokens: response.PromptTokens, CompletionTokens: response.CompletionTokens);
 
     private T? Deserialize<T>(string? raw) where T : class
     {
