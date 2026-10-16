@@ -69,7 +69,7 @@
           <ParamHelpButton :label="helpLabel('aiProactiveEnabled')" @click="openHelp('aiProactiveEnabled')" />
         </el-form-item>
         <el-form-item label="@ 识别码">
-          <el-input v-model="form.botMentionOpenId" clearable placeholder="留空 = 认不出有人 @ 机器人" style="width: 420px" />
+          <el-input v-model="form.botMentionOpenId" clearable placeholder="留空 = 认不出有人 @ 机器人" style="width: 355px" />
           <ParamHelpButton :label="helpLabel('botMentionOpenId')" @click="openHelp('botMentionOpenId')" />
         </el-form-item>
         <el-form-item label="人设">
@@ -323,4 +323,7 @@ onMounted(load)
 .dialog-head { display: flex; justify-content: space-between; align-items: center; }
 /* 摘要读取失败与上次更新是当前状态，不是参数说明 */
 .sub-hint { color: #909399; font-size: 12px; line-height: 1.5; }
+/* 整行控件给右边的「?」留出位置，否则宽度占满会把按钮挤到下一行 */
+.el-form-item__content > .el-input,
+.el-form-item__content > .el-textarea { width: calc(100% - 32px); }
 </style>

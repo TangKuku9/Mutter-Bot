@@ -342,4 +342,7 @@ onMounted(load)
 .card-head { display: flex; justify-content: space-between; align-items: center; }
 /* 预设提示是选中后才知道的结果，留在原地更醒目；width 100% 保证它独占一行 */
 .hint { width: 100%; color: #909399; font-size: 12px; margin-top: 4px; }
+/* 整行控件给右边的「?」留出位置，否则宽度占满会把按钮挤到下一行 */
+.el-form-item__content > .el-input,
+.el-form-item__content > .el-textarea { width: calc(100% - 32px); }
 </style>
