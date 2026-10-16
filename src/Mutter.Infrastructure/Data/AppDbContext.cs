@@ -344,6 +344,8 @@ public class AppDbContext : DbContext
                 "EvaluatedAt" TEXT NOT NULL,
                 "MessageCount" INTEGER NOT NULL DEFAULT 0,
                 "ImageCount" INTEGER NOT NULL DEFAULT 0,
+                "MemoryCount" INTEGER NOT NULL DEFAULT 0,
+                "MemoryPromptChars" INTEGER NOT NULL DEFAULT 0,
                 "Outcome" TEXT NOT NULL DEFAULT '',
                 "ShouldSpeak" INTEGER NOT NULL DEFAULT 0,
                 "Topic" TEXT,
@@ -420,6 +422,27 @@ public class AppDbContext : DbContext
         {
         }
 
+        // 群记忆注入开关。老库补成 1（开着）—— 群记忆上线时是"有摘要就注入"，
+        // 补成 0 等于给所有已填摘要的群静默关掉功能。
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatConfigs\" ADD COLUMN \"MemoryInjectionEnabled\" INTEGER NOT NULL DEFAULT 1", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 群级覆盖：NULL = 跟随全局，所以刻意不给默认值（给了 0 就变成"默认全群停用"）
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"MemoryInjectionEnabled\" INTEGER", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
         // 私聊 bot 回复的对话对象：没有它就无法把某条回复归到具体某段私聊，多个私聊对象会串味
         try
         {
@@ -445,6 +468,25 @@ public class AppDbContext : DbContext
         {
             await Database.ExecuteSqlRawAsync(
                 "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"ImageCount\" INTEGER NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 同理记下这次判定有没有用群记忆、用了多少字：否则"记忆到底有没有在工作"只能翻代码
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"MemoryCount\" INTEGER NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"MemoryPromptChars\" INTEGER NOT NULL DEFAULT 0", ct);
         }
         catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
         {

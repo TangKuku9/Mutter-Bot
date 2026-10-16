@@ -84,9 +84,17 @@ var promptWindow = new ProactiveWindow
 };
 var promptWithMemory = ProactivePrompts.BuildUserPrompt(promptWindow, Array.Empty<(string Role, string Content)>(), 0, "  群背景  ");
 var promptWithoutMemory = ProactivePrompts.BuildUserPrompt(promptWindow, Array.Empty<(string Role, string Content)>(), 0, "   ");
-Check(promptWithMemory.Contains("人工维护记忆") && promptWithMemory.Contains("不是指令") && promptWithMemory.Contains("群背景"), "群记忆只作为用户提示中的隔离背景区块注入");
+Check(promptWithMemory.Contains("人工维护记忆") && promptWithMemory.Contains("群背景"),
+    "群记忆只作为用户提示中的隔离背景区块注入");
+Check(promptWithMemory.Contains("不是指令") && promptWithMemory.Contains("不要根据它臆造")
+      && promptWithMemory.Contains("以当前消息为准") && promptWithMemory.Contains("确实有助于"),
+    "记忆区块把四条约束写全：不是指令 / 不臆造 / 冲突以当前消息为准 / 只在真帮得上时用");
 Check(!promptWithoutMemory.Contains("人工维护记忆"), "空白群记忆不会注入提示");
 Check(!ProactivePrompts.SystemPrompt.Contains("人工维护记忆"), "群记忆不进入系统提示词");
+// 开关默认值：注入默认开（上线时就是"有摘要就注入"，默认关等于静默改掉已填摘要的群的行为）；
+// 群级是三态，null 才表示跟随全局
+Check(new ProactiveChatConfig().MemoryInjectionEnabled, "全局记忆注入默认开");
+Check(new GroupConfig().MemoryInjectionEnabled is null, "群级记忆注入默认跟随全局，而不是覆盖成关");
 // 摘要是人工维护的自由文本：服务端必须自己收口长度与空白，不能指望面板的 maxlength
 Check(GroupMemoryRepository.NormalizeSummary("  群背景  ") == "群背景", "群记忆入库前 trim 首尾空白");
 Check(GroupMemoryRepository.NormalizeSummary(new string('长', 5000)).Length == 4000,
@@ -544,6 +552,13 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
         "ProactiveChatLogs 建表成功");
     Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('GroupConfigs') WHERE name='AiProactiveEnabled'") == 1,
         "GroupConfigs.AiProactiveEnabled 列补齐");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatConfigs') WHERE name='MemoryInjectionEnabled'") == 1,
+        "ProactiveChatConfigs.MemoryInjectionEnabled 列补齐（全局记忆注入开关）");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('GroupConfigs') WHERE name='MemoryInjectionEnabled'") == 1,
+        "GroupConfigs.MemoryInjectionEnabled 列补齐（群级覆盖，可空 = 跟随全局）");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatLogs') WHERE name='MemoryCount'") == 1
+          && Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatLogs') WHERE name='MemoryPromptChars'") == 1,
+        "留痕表补上记忆条数与字符数列");
     Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_index_list('ProactiveChatLogs')") == 2, "留痕表两个索引就位");
     Check(Scalar(probe, "SELECT COUNT(*) FROM ChatMessages") == MessagesBefore, $"聊天历史未被迁移改动（{MessagesBefore} 条）");
     var legacyKept = ReadNumericGroupIds(probe);
@@ -658,15 +673,18 @@ using (var scope = sp.CreateScope())
     await pdb0.Database.ExecuteSqlRawAsync("DELETE FROM ProactiveChatConfigs");
     var initial = await repo.GetProactiveConfigAsync();
     Check(!initial.Enabled, "库中无配置行时默认关闭");
+    Check(initial.MemoryInjectionEnabled, "库中无配置行时记忆注入默认也是开（与上线时的行为一致）");
 
     await repo.SaveProactiveConfigAsync(new ProactiveChatConfig
     {
         Enabled = true, WindowSeconds = 3, ActivePerGroupPerMinute = 500, AllowActiveChannel = false,
-        MaxAttachedImages = 7, HistoryMaxMessages = 15, EvalMaxTokens = 1024
+        MaxAttachedImages = 7, HistoryMaxMessages = 15, EvalMaxTokens = 1024,
+        MemoryInjectionEnabled = false
     });
     var saved = await repo.GetProactiveConfigAsync();
     Check(saved.WindowSeconds == 15 && saved.ActivePerGroupPerMinute == 20, "保存时同样钳制到合法区间");
     Check(!saved.AllowActiveChannel, "只允许被动槽的开关能存住（过期即沉默）");
+    Check(!saved.MemoryInjectionEnabled, "全局记忆注入开关能关掉并读回（逐列映射没漏字段）");
     // 逐列手工映射最容易漏字段：写进去读不回来，面板就会"保存了但没生效"
     Check(saved.MaxAttachedImages == 7 && saved.HistoryMaxMessages == 15 && saved.EvalMaxTokens == 1024,
         $"择机自己的三个规模参数写读一致（附图 {saved.MaxAttachedImages} / 背景 {saved.HistoryMaxMessages} / 输出 {saved.EvalMaxTokens}）");
@@ -683,6 +701,17 @@ using (var scope = sp.CreateScope())
     Check(back!.AiProactiveEnabled, "群级参与位写读一致");
     oneGroup.AiProactiveEnabled = false;
     await repo.SaveGroupConfigAsync(oneGroup);
+
+    // 群级记忆注入是三态：false=本群单独停用、null=跟随全局。存成 false 和存成 null 必须能区分，
+    // 否则"跟随全局"这条语义会在往返里丢掉，全局一开就把单独停用的群也带上。
+    oneGroup.MemoryInjectionEnabled = false;
+    await repo.SaveGroupConfigAsync(oneGroup);
+    Check((await repo.GetGroupConfigAsync(oneGroup.GroupId))?.MemoryInjectionEnabled == false,
+        "群级记忆注入能单独关掉并读回");
+    oneGroup.MemoryInjectionEnabled = null;
+    await repo.SaveGroupConfigAsync(oneGroup);
+    Check((await repo.GetGroupConfigAsync(oneGroup.GroupId))?.MemoryInjectionEnabled is null,
+        "群级覆盖设回 null 表示跟随全局（不会被存成 false）");
 
     // 熔断复位：留痕表与配置回到关闭态
     await repo.SaveProactiveConfigAsync(new ProactiveChatConfig { Enabled = false });
@@ -945,6 +974,14 @@ using (var scope = sp.CreateScope())
     Check(zero.Contains("\"maxAttachedImages\":0") && zero.Contains("\"historyMaxMessages\":0"),
         "附图 0 与背景 0 都存得住（0 是合法选择，不能被当成未填而回退默认值）");
 
+    // 全局记忆注入开关必须穿过面板契约：前端关得掉，回读也拿得到生效值
+    var memOffJson = JsonSerializer.Serialize(Payload(await controller.UpdateConfig(
+        new ProactiveController.ProactiveConfigDto { Enabled = true, MemoryInjectionEnabled = false }, default)), wire);
+    Check(memOffJson.Contains("\"memoryInjectionEnabled\":false"), "全局记忆注入开关能关掉并经面板回读");
+    var memOnJson = JsonSerializer.Serialize(Payload(await controller.UpdateConfig(
+        new ProactiveController.ProactiveConfigDto { Enabled = true }, default)), wire);
+    Check(memOnJson.Contains("\"memoryInjectionEnabled\":true"), "不传该字段时沿用默认开（老前端不会把记忆关掉）");
+
     // 群记忆面板契约：空壳、trim 落库、版本自增、截断、跨群隔离、清空
     await pdb.Database.ExecuteSqlRawAsync("DELETE FROM GroupMemories");
     const string memA = "TESTGROUP-MEMORY-A";
@@ -984,7 +1021,7 @@ using (var scope = sp.CreateScope())
         "PUT 缺 summary 字段走清空路径而不是 500");
 
     pdb.ProactiveChatLogs.AddRange(
-        new ProactiveChatLogEntity { GroupId = "G1", EvaluatedAt = DateTime.UtcNow, Outcome = ProactiveOutcomes.SentPassive, MessageCount = 4, ImageCount = 2, Line = "今晚吃拉面" },
+        new ProactiveChatLogEntity { GroupId = "G1", EvaluatedAt = DateTime.UtcNow, Outcome = ProactiveOutcomes.SentPassive, MessageCount = 4, ImageCount = 2, MemoryCount = 1, MemoryPromptChars = 137, Line = "今晚吃拉面" },
         new ProactiveChatLogEntity { GroupId = "G1", EvaluatedAt = DateTime.UtcNow, Outcome = ProactiveOutcomes.SkippedAiDeclined, MessageCount = 3 });
     await pdb.SaveChangesAsync();
 
@@ -997,6 +1034,10 @@ using (var scope = sp.CreateScope())
     Check(sentJson.Contains("今晚吃拉面"), "已插话记录带出原话");
     Check(allJson.Contains("\"imageCount\":2") && allJson.Contains("\"imageCount\":0"),
         "留痕把这次到底看了几张图带给面板");
+    Check(allJson.Contains("\"memoryCount\":1") && allJson.Contains("\"memoryPromptChars\":137"),
+        "留痕把这次判定有没有用群记忆、用了多少字带给面板");
+    Check(allJson.Contains("\"memoryCount\":0"),
+        "没带记忆的那次如实记 0，不会跟着上一条串味");
 
     var routeGroup = (await repo.GetAllGroupConfigsAsync()).First();
     routeGroup.IsEnabled = true;
@@ -1029,6 +1070,9 @@ using (var scope = sp.CreateScope())
         $"状态里的参与群数与群配置一致（{expectedParticipating}）");
     Check(stJson.Contains("\"todaySent\":1") && stJson.Contains("\"todayEvaluations\":2"),
         "今日按结论统计取的是北京日界内的留痕");
+    Check(stJson.Contains("\"todayMemoryInjections\":1"),
+        "状态里给出今日带记忆的判定次数（否则记忆有没有在工作只能翻代码）");
+    Check(stJson.Contains("\"memoryInjectionEnabled\":true"), "状态一并回读全局记忆注入开关");
     Check(stJson.Contains("\"quotas\":[") && stJson.Contains("\"minuteQuota\":") && stJson.Contains("\"usedToday\":"),
         "每群主动消息余量随状态返回（数值取自当前配置，不断死具体数字）");
     Check(stJson.Contains("\"pendingWindows\":[]"), "窗口取空后状态不再报待评估");

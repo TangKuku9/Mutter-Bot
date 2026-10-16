@@ -80,7 +80,19 @@
           <el-input v-model="form.groupMemory" type="textarea" :rows="5" maxlength="4000" show-word-limit
             placeholder="人工维护的群背景摘要，仅用于择机发言参考；留空可清空" />
           <div class="sub-hint" v-if="memoryUnavailable">摘要读取失败，本次保存不会改动群记忆；关闭后重新打开可重试。</div>
-          <div class="sub-hint" v-else>最多 4000 字。不会自动摘要或更新，也不会用于普通 @ 回复。</div>
+          <template v-else>
+            <div class="sub-hint">最多 4000 字。不会自动摘要或更新，也不会用于普通 @ 回复。</div>
+            <div class="sub-hint" v-if="memoryUpdatedAt">上次更新 {{ fmt(memoryUpdatedAt) }}</div>
+          </template>
+        </el-form-item>
+        <el-form-item label="本群记忆注入">
+          <el-select v-model="form.memoryInjectionEnabled" clearable placeholder="跟随全局" style="width: 260px">
+            <el-option :value="true" label="开启：本群注入" />
+            <el-option :value="false" label="关闭：本群不注入" />
+          </el-select>
+          <div class="sub-hint">
+            留空 = 跟随「择机发言」页的全局开关。关闭只停本群的注入，摘要仍保留在上面
+          </div>
         </el-form-item>
         <el-form-item label="群专属提示词">
           <el-input v-model="form.customSystemPrompt" type="textarea" :rows="3"
@@ -132,6 +144,7 @@ const saving = ref(false)
 const form = ref(null)
 const editingId = ref('')
 const memoryUnavailable = ref(false)
+const memoryUpdatedAt = ref(null)
 
 const fmt = (s) => s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '-'
 const triggerText = (m) => m === 2 ? '围观全部' : '仅被 @'
@@ -159,9 +172,11 @@ const edit = async (row) => {
   editingId.value = row.groupOpenId
   const id = editingId.value
   memoryUnavailable.value = false
+  memoryUpdatedAt.value = null
   form.value = {
     isEnabled: row.config?.isEnabled ?? true,
     groupMemory: '',
+    memoryInjectionEnabled: row.config?.memoryInjectionEnabled ?? null,
     triggerMode: row.config?.triggerMode ?? 0,
     aiProactiveEnabled: row.config?.aiProactiveEnabled ?? false,
     botMentionOpenId: row.config?.botMentionOpenId ?? '',
@@ -172,7 +187,10 @@ const edit = async (row) => {
   dialog.value = true
   try {
     const { data } = await api.get(`/proactive/groups/${encodeURIComponent(id)}/memory`)
-    if (editingId.value === id) form.value.groupMemory = data.summary ?? ''
+    if (editingId.value !== id) return
+    form.value.groupMemory = data.summary ?? ''
+    // 空摘要回的是 DateTime.MinValue，显示成"上次更新 0001 年"没有意义
+    memoryUpdatedAt.value = data.summary ? (data.updatedAt ?? null) : null
   } catch {
     // 摘要拉取失败不该连群配置都改不了：弹窗照常可用，只是本次不碰群记忆
     if (editingId.value === id) memoryUnavailable.value = true
@@ -183,6 +201,11 @@ const save = async () => {
   saving.value = true
   try {
     const { groupMemory, ...config } = form.value
+    // el-select 清空给的是空串，而服务端这一列是可空 bool：空串会直接 400
+    config.memoryInjectionEnabled =
+      config.memoryInjectionEnabled === '' || config.memoryInjectionEnabled == null
+        ? null
+        : config.memoryInjectionEnabled
     const { data } = await api.put(`/groups/${editingId.value}/config`, config)
     // 读取失败时跳过，避免拿空串把已有摘要误清空；空串交给服务端当清空处理
     if (!memoryUnavailable.value) {

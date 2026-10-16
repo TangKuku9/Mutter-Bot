@@ -16,4 +16,7 @@ public class GroupConfigEntity
     public string? BotMentionOpenId { get; set; }
 
     public string? ActiveCharacter { get; set; }
+
+    /// <summary>群级群记忆注入覆盖（null = 跟随全局），见 <see cref="Mutter.Core.Models.Config.GroupConfig.MemoryInjectionEnabled"/>。</summary>
+    public bool? MemoryInjectionEnabled { get; set; }
 }
