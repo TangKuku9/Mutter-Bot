@@ -23,19 +23,62 @@ public class ProactiveController : ControllerBase
     private readonly IActiveMessageService _activeMessage;
     private readonly ProactiveObserveService _observe;
     private readonly IQqGatewayConnection _gateway;
+    private readonly IGroupMemoryRepository _memoryRepo;
 
     public ProactiveController(
         AppDbContext db,
         IConfigRepository configRepo,
         IActiveMessageService activeMessage,
         ProactiveObserveService observe,
-        IQqGatewayConnection gateway)
+        IQqGatewayConnection gateway,
+        IGroupMemoryRepository memoryRepo)
     {
         _db = db;
         _configRepo = configRepo;
         _activeMessage = activeMessage;
         _observe = observe;
         _gateway = gateway;
+        _memoryRepo = memoryRepo;
+    }
+
+    private static string? NormalizeGroupId(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    public sealed class GroupMemoryDto
+    {
+        public string? Summary { get; set; }
+    }
+
+    [HttpGet("groups/{groupId}/memory")]
+    public async Task<IActionResult> GetGroupMemory(string groupId, CancellationToken ct)
+    {
+        var id = NormalizeGroupId(groupId);
+        if (id is null) return BadRequest(new { error = "缺少群 ID" });
+        var memory = await _memoryRepo.GetAsync(id, ct);
+        return Ok(memory ?? new Mutter.Core.Models.GroupMemory
+        {
+            GroupId = id,
+            Summary = string.Empty,
+            UpdatedAt = DateTime.MinValue,
+            Version = 0
+        });
+    }
+
+    [HttpPut("groups/{groupId}/memory")]
+    public async Task<IActionResult> PutGroupMemory(string groupId, [FromBody] GroupMemoryDto dto, CancellationToken ct)
+    {
+        var id = NormalizeGroupId(groupId);
+        if (id is null) return BadRequest(new { error = "缺少群 ID" });
+        var memory = await _memoryRepo.SaveAsync(id, dto.Summary ?? string.Empty, ct);
+        return Ok(memory);
+    }
+
+    [HttpDelete("groups/{groupId}/memory")]
+    public async Task<IActionResult> DeleteGroupMemory(string groupId, CancellationToken ct)
+    {
+        var id = NormalizeGroupId(groupId);
+        if (id is null) return BadRequest(new { error = "缺少群 ID" });
+        await _memoryRepo.DeleteAsync(id, ct);
+        return Ok(new { message = "群记忆已清空", GroupId = id });
     }
 
     public class ProactiveConfigDto

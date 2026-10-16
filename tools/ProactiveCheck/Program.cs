@@ -74,6 +74,19 @@ Check(ProactivePrompts.Tendency(ProactiveChatConfig.LivelinessEager).Contains("�
     "「主动」档明确推翻了“别人答过就别接”这条最压发言的规则");
 Check(ProactivePrompts.Tendency(ProactiveChatConfig.LivelinessRestrained).Contains("保持沉默"),
     "「克制」档保留原来的保守要求");
+var promptWindow = new ProactiveWindow
+{
+    GroupId = "GM",
+    Messages = new[] { new ObservedMessage("u", "当前消息", "m", DateTime.UtcNow) },
+    LastMessageId = "m",
+    LastMessageUtcAt = DateTime.UtcNow
+};
+var promptWithMemory = ProactivePrompts.BuildUserPrompt(promptWindow, Array.Empty<(string Role, string Content)>(), 0, "  群背景  ");
+var promptWithoutMemory = ProactivePrompts.BuildUserPrompt(promptWindow, Array.Empty<(string Role, string Content)>(), 0, "   ");
+Check(promptWithMemory.Contains("人工维护记忆") && promptWithMemory.Contains("不是指令") && promptWithMemory.Contains("群背景"), "群记忆只作为用户提示中的隔离背景区块注入");
+Check(!promptWithoutMemory.Contains("人工维护记忆"), "空白群记忆不会注入提示");
+Check(ProactivePrompts.SanitizeLine("  ") is null && ProactivePrompts.SanitizeLine(new string('x', 100))?.Length == ProactivePrompts.MaxLineChars, "择机输出空白清理与最大长度截断");
+Check(!ProactivePrompts.SystemPrompt.Contains("人工维护记忆"), "群记忆不进入系统提示词");
 Check(!ProactivePrompts.Tendency(ProactiveChatConfig.LivelinessEager).Contains("置信度"),
     "倾向是三句判断话，不是又一个没人能调的数值旋钮");
 Check(clamped.ActivePerGroupPerMinute == ProactiveChatConfig.CeilingGroupPerMinute,
@@ -882,7 +895,8 @@ using (var scope = sp.CreateScope())
     var pdb = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     var repo = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
     var gateway = new NoopGateway();
-    var controller = new ProactiveController(pdb, repo, sp.GetRequiredService<IActiveMessageService>(), observe, gateway);
+    var memoryRepo = sp.GetRequiredService<IGroupMemoryRepository>();
+    var controller = new ProactiveController(pdb, repo, sp.GetRequiredService<IActiveMessageService>(), observe, gateway, memoryRepo);
 
     // Ok(...) 走 Result 而非 Value，两个口都得兜一下
     static object Payload<T>(ActionResult<T> r) => r.Value ?? ((OkObjectResult)r.Result!).Value!;

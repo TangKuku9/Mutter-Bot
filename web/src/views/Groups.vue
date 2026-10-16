@@ -76,6 +76,11 @@
             </el-option>
           </el-select>
         </el-form-item>
+        <el-form-item label="群记忆摘要">
+          <el-input v-model="form.groupMemory" type="textarea" :rows="5" maxlength="4000" show-word-limit
+            placeholder="人工维护的群背景摘要，仅用于择机发言参考；留空可清空" />
+          <div class="sub-hint">最多 4000 字。不会自动摘要或更新，也不会用于普通 @ 回复。</div>
+        </el-form-item>
         <el-form-item label="群专属提示词">
           <el-input v-model="form.customSystemPrompt" type="textarea" :rows="3"
             placeholder="留空则用全局系统提示词" />
@@ -148,10 +153,12 @@ const load = async () => {
   } finally { loading.value = false }
 }
 
-const edit = (row) => {
+const edit = async (row) => {
   editingId.value = row.groupOpenId
+  const memory = await api.get(`/proactive/groups/${encodeURIComponent(editingId.value)}/memory`)
   form.value = {
     isEnabled: row.config?.isEnabled ?? true,
+    groupMemory: memory.data.summary ?? '',
     triggerMode: row.config?.triggerMode ?? 0,
     aiProactiveEnabled: row.config?.aiProactiveEnabled ?? false,
     botMentionOpenId: row.config?.botMentionOpenId ?? '',
@@ -165,7 +172,13 @@ const edit = (row) => {
 const save = async () => {
   saving.value = true
   try {
-    const { data } = await api.put(`/groups/${editingId.value}/config`, form.value)
+    const { groupMemory, ...config } = form.value
+    const { data } = await api.put(`/groups/${editingId.value}/config`, config)
+    if (groupMemory?.trim()) {
+      await api.put(`/proactive/groups/${encodeURIComponent(editingId.value)}/memory`, { summary: groupMemory })
+    } else {
+      await api.delete(`/proactive/groups/${encodeURIComponent(editingId.value)}/memory`)
+    }
     ElMessage.success(data.message)
     dialog.value = false
     load()

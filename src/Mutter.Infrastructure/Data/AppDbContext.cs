@@ -17,6 +17,7 @@ public class AppDbContext : DbContext
     public DbSet<CustomCharacterEntity> CustomCharacters => Set<CustomCharacterEntity>();
     public DbSet<ProactiveChatConfigEntity> ProactiveChatConfigs => Set<ProactiveChatConfigEntity>();
     public DbSet<ProactiveChatLogEntity> ProactiveChatLogs => Set<ProactiveChatLogEntity>();
+    public DbSet<GroupMemoryEntity> GroupMemories => Set<GroupMemoryEntity>();
 
     // 修仙RPG 的 5 张表（PlayerProfiles / GroupWorlds / PlayerInventories /
     // GameCooldowns / CultivationEventLogs）保留建表语句与补列迁移，但不再建实体：
@@ -89,6 +90,13 @@ public class AppDbContext : DbContext
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.EvaluatedAt);
             e.HasIndex(x => new { x.GroupId, x.EvaluatedAt });
+        });
+
+        modelBuilder.Entity<GroupMemoryEntity>(e =>
+        {
+            e.HasKey(x => x.GroupId);
+            e.Property(x => x.Summary).IsRequired();
+            e.HasIndex(x => x.UpdatedAt);
         });
     }
 
@@ -201,6 +209,11 @@ public class AppDbContext : DbContext
                 "IsActive" INTEGER NOT NULL DEFAULT 1
             );
             """, ct);
+        await Database.ExecuteSqlRawAsync(
+            "CREATE TABLE IF NOT EXISTS \"GroupMemories\" (\"GroupId\" TEXT NOT NULL CONSTRAINT \"PK_GroupMemories\" PRIMARY KEY, \"Summary\" TEXT NOT NULL DEFAULT '', \"UpdatedAt\" TEXT NOT NULL, \"Version\" INTEGER NOT NULL DEFAULT 1)", ct);
+        await Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS \"IX_GroupMemories_UpdatedAt\" ON \"GroupMemories\" (\"UpdatedAt\")", ct);
+
         await Database.ExecuteSqlRawAsync(
             "CREATE UNIQUE INDEX IF NOT EXISTS \"IX_PlayerProfiles_GroupId_MemberOpenId\" ON \"PlayerProfiles\" (\"GroupId\", \"MemberOpenId\")", ct);
         await Database.ExecuteSqlRawAsync(

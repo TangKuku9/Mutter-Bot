@@ -161,9 +161,16 @@ public class ProactiveChatHostedService : BackgroundService
             window.CollectImages(config.MaxAttachedImages), ct);
         var startedAt = DateTime.UtcNow;
 
+        GroupMemory? memory = null;
+        using (var memoryScope = _scopeFactory.CreateScope())
+        {
+            var memoryRepo = memoryScope.ServiceProvider.GetRequiredService<IGroupMemoryRepository>();
+            memory = await memoryRepo.GetAsync(window.GroupId, ct);
+        }
+
         var outcome = await _structuredAi.GetStructuredOutcomeAsync<ProactiveVerdict>(
             BuildJudgePrompt(context, config.Liveliness),
-            ProactivePrompts.BuildUserPrompt(window, history, images.Count),
+            ProactivePrompts.BuildUserPrompt(window, history, images.Count, memory?.Summary),
             images,
             context.EffectiveConfig, ct);
 
