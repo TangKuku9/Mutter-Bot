@@ -58,6 +58,11 @@ public sealed class GroupMemoryRepository : IGroupMemoryRepository
 
     private static GroupMemory ToModel(GroupMemoryEntity e) => new()
     {
-        GroupId = e.GroupId, Summary = e.Summary, UpdatedAt = e.UpdatedAt, Version = e.Version
+        GroupId = e.GroupId,
+        Summary = e.Summary,
+        // SQLite 的 TEXT 列不带时区，EF 读回来 Kind 是 Unspecified，而刚保存的那份是 Utc。
+        // 不显式标回去，同一行会在 PUT 响应里带 Z、在 GET 响应里不带，两种时间形状。
+        UpdatedAt = DateTime.SpecifyKind(e.UpdatedAt, DateTimeKind.Utc),
+        Version = e.Version
     };
 }

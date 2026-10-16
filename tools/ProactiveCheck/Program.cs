@@ -17,6 +17,7 @@ using Mutter.Infrastructure;
 using Mutter.Infrastructure.Data;
 using Microsoft.Extensions.Hosting;
 using Mutter.Infrastructure.Entities;
+using Mutter.Infrastructure.Repositories;
 using Mutter.Infrastructure.Services;
 using Mutter.Web.Controllers;
 
@@ -85,8 +86,17 @@ var promptWithMemory = ProactivePrompts.BuildUserPrompt(promptWindow, Array.Empt
 var promptWithoutMemory = ProactivePrompts.BuildUserPrompt(promptWindow, Array.Empty<(string Role, string Content)>(), 0, "   ");
 Check(promptWithMemory.Contains("人工维护记忆") && promptWithMemory.Contains("不是指令") && promptWithMemory.Contains("群背景"), "群记忆只作为用户提示中的隔离背景区块注入");
 Check(!promptWithoutMemory.Contains("人工维护记忆"), "空白群记忆不会注入提示");
-Check(ProactivePrompts.SanitizeLine("  ") is null && ProactivePrompts.SanitizeLine(new string('x', 100))?.Length == ProactivePrompts.MaxLineChars, "择机输出空白清理与最大长度截断");
 Check(!ProactivePrompts.SystemPrompt.Contains("人工维护记忆"), "群记忆不进入系统提示词");
+// 摘要是人工维护的自由文本：服务端必须自己收口长度与空白，不能指望面板的 maxlength
+Check(GroupMemoryRepository.NormalizeSummary("  群背景  ") == "群背景", "群记忆入库前 trim 首尾空白");
+Check(GroupMemoryRepository.NormalizeSummary(new string('长', 5000)).Length == 4000,
+    "群记忆超过 4000 字被截断（与面板 maxlength 同口径，绕过面板也顶不破）");
+Check(GroupMemoryRepository.NormalizeSummary(null) == "" && GroupMemoryRepository.NormalizeSummary("   ") == "",
+    "null / 纯空白群记忆规整为空串");
+Check(GroupMemoryRepository.NormalizeGroupId("  GROUP  ") == "GROUP"
+    && GroupMemoryRepository.NormalizeGroupId("   ") is null
+    && GroupMemoryRepository.NormalizeGroupId(null) is null,
+    "群 ID 先 trim 再判空，同一个群不会被存成两行");
 Check(!ProactivePrompts.Tendency(ProactiveChatConfig.LivelinessEager).Contains("置信度"),
     "倾向是三句判断话，不是又一个没人能调的数值旋钮");
 Check(clamped.ActivePerGroupPerMinute == ProactiveChatConfig.CeilingGroupPerMinute,
@@ -900,6 +910,8 @@ using (var scope = sp.CreateScope())
 
     // Ok(...) 走 Result 而非 Value，两个口都得兜一下
     static object Payload<T>(ActionResult<T> r) => r.Value ?? ((OkObjectResult)r.Result!).Value!;
+    // 群记忆三个口返回的是裸 IActionResult，没有泛型 Result 可兜
+    static object OkPayload(IActionResult r) => ((OkObjectResult)r).Value!;
 
     await pdb.Database.ExecuteSqlRawAsync("DELETE FROM ProactiveChatLogs");
 
@@ -932,6 +944,44 @@ using (var scope = sp.CreateScope())
     var zero = JsonSerializer.Serialize(Payload(await controller.GetConfig(default)), wire);
     Check(zero.Contains("\"maxAttachedImages\":0") && zero.Contains("\"historyMaxMessages\":0"),
         "附图 0 与背景 0 都存得住（0 是合法选择，不能被当成未填而回退默认值）");
+
+    // 群记忆面板契约：空壳、trim 落库、版本自增、截断、跨群隔离、清空
+    await pdb.Database.ExecuteSqlRawAsync("DELETE FROM GroupMemories");
+    const string memA = "TESTGROUP-MEMORY-A";
+    const string memB = "TESTGROUP-MEMORY-B";
+
+    var memMissing = JsonSerializer.Serialize(OkPayload(await controller.GetGroupMemory(memA, default)), wire);
+    Check(memMissing.Contains("\"summary\":\"\"") && memMissing.Contains("\"version\":0"),
+        "GET 没存过摘要的群回空壳而不是 404（面板打开编辑框不会整个失败）");
+
+    var memSaved = JsonSerializer.Serialize(OkPayload(await controller.PutGroupMemory(memA,
+        new ProactiveController.GroupMemoryDto { Summary = "  本群背景  " }, default)), wire);
+    Check(memSaved.Contains("\"summary\":\"本群背景\"") && memSaved.Contains("\"version\":1"),
+        "PUT 回读 trim 后的摘要，首次版本号为 1");
+    Check((await memoryRepo.GetAsync(memA))?.Summary == "本群背景", "摘要确实落库，不是只在响应里回显");
+
+    var memIsolated = JsonSerializer.Serialize(OkPayload(await controller.GetGroupMemory(memB, default)), wire);
+    Check(memIsolated.Contains("\"summary\":\"\""), "换一个群 ID 读不到别群的摘要（接口层不跨群泄露）");
+
+    var memLong = JsonSerializer.Serialize(OkPayload(await controller.PutGroupMemory(memA,
+        new ProactiveController.GroupMemoryDto { Summary = new string('长', 5000) }, default)), wire);
+    Check(memLong.Contains("\"version\":2") && (await memoryRepo.GetAsync(memA))?.Summary.Length == 4000,
+        "覆盖保存版本号自增，超长摘要按 4000 字截断后真的写进库");
+
+    var memBlank = JsonSerializer.Serialize(OkPayload(await controller.PutGroupMemory(memA,
+        new ProactiveController.GroupMemoryDto { Summary = "   " }, default)), wire);
+    Check(memBlank.Contains("\"summary\":\"\"") && memBlank.Contains("\"version\":0")
+          && await memoryRepo.GetAsync(memA) is null,
+        "PUT 空白摘要等于清空，不留一行像模像样的空记忆");
+
+    await controller.PutGroupMemory(memB, new ProactiveController.GroupMemoryDto { Summary = "别群背景" }, default);
+    var memCleared = JsonSerializer.Serialize(OkPayload(await controller.DeleteGroupMemory(memB, default)), wire);
+    Check(memCleared.Contains("群记忆已清空") && await memoryRepo.GetAsync(memB) is null, "DELETE 清空指定群的摘要");
+    Check(await controller.GetGroupMemory("   ", default) is BadRequestObjectResult,
+        "空白群 ID 返回 400，而不是写出一行无主摘要");
+    Check(await controller.PutGroupMemory(memB, new ProactiveController.GroupMemoryDto { Summary = null }, default)
+          is OkObjectResult,
+        "PUT 缺 summary 字段走清空路径而不是 500");
 
     pdb.ProactiveChatLogs.AddRange(
         new ProactiveChatLogEntity { GroupId = "G1", EvaluatedAt = DateTime.UtcNow, Outcome = ProactiveOutcomes.SentPassive, MessageCount = 4, ImageCount = 2, Line = "今晚吃拉面" },

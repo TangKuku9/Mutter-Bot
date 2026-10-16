@@ -43,6 +43,12 @@ public class ProactiveController : ControllerBase
 
     private static string? NormalizeGroupId(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    /// <summary>没存过摘要时的空壳：面板拿到它照样能渲染，不必处理 404。</summary>
+    private static Mutter.Core.Models.GroupMemory EmptyMemory(string groupId) => new()
+    {
+        GroupId = groupId, Summary = string.Empty, UpdatedAt = DateTime.MinValue, Version = 0
+    };
+
     public sealed class GroupMemoryDto
     {
         public string? Summary { get; set; }
@@ -54,13 +60,7 @@ public class ProactiveController : ControllerBase
         var id = NormalizeGroupId(groupId);
         if (id is null) return BadRequest(new { error = "缺少群 ID" });
         var memory = await _memoryRepo.GetAsync(id, ct);
-        return Ok(memory ?? new Mutter.Core.Models.GroupMemory
-        {
-            GroupId = id,
-            Summary = string.Empty,
-            UpdatedAt = DateTime.MinValue,
-            Version = 0
-        });
+        return Ok(memory ?? EmptyMemory(id));
     }
 
     [HttpPut("groups/{groupId}/memory")]
@@ -68,7 +68,16 @@ public class ProactiveController : ControllerBase
     {
         var id = NormalizeGroupId(groupId);
         if (id is null) return BadRequest(new { error = "缺少群 ID" });
-        var memory = await _memoryRepo.SaveAsync(id, dto.Summary ?? string.Empty, ct);
+
+        // 空摘要等于清空：面板把内容删干净就该回到"这群没有记忆"，
+        // 而不是留一行 Summary 为空、但 UpdatedAt/Version 看着像模像样的空记忆。
+        if (string.IsNullOrWhiteSpace(dto.Summary))
+        {
+            await _memoryRepo.DeleteAsync(id, ct);
+            return Ok(EmptyMemory(id));
+        }
+
+        var memory = await _memoryRepo.SaveAsync(id, dto.Summary, ct);
         return Ok(memory);
     }
 
