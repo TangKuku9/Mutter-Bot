@@ -29,5 +29,9 @@ public class ProactiveChatConfigEntity
     public int ActivePerGroupPerMinute { get; set; } = 3;
     public int ActivePerGroupPerDay { get; set; } = 20;
     public int ActivePerAccountPerMinute { get; set; } = 20;
+
+    /// <summary>是否把群记忆注入择机判定（群级可覆盖），见 <see cref="ProactiveChatConfig.MemoryInjectionEnabled"/>。</summary>
+    public bool MemoryInjectionEnabled { get; set; } = true;
+
     public DateTime UpdatedAt { get; set; }
 }

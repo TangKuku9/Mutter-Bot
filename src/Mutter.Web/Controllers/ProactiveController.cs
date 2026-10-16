@@ -117,6 +117,9 @@ public class ProactiveController : ControllerBase
 
         /// <summary>附图张数上限，供面板对齐输入框。</summary>
         public int CeilingAttachedImages { get; set; } = ProactiveChatConfig.CeilingAttachedImages;
+
+        /// <summary>是否把群记忆注入择机判定（群级可覆盖）。</summary>
+        public bool MemoryInjectionEnabled { get; set; } = true;
     }
 
     /// <summary>当前配置（含官方上限，供表单约束）。</summary>
@@ -148,7 +151,8 @@ public class ProactiveController : ControllerBase
             AllowActiveChannel = dto.AllowActiveChannel,
             ActivePerGroupPerMinute = dto.ActivePerGroupPerMinute,
             ActivePerGroupPerDay = dto.ActivePerGroupPerDay,
-            ActivePerAccountPerMinute = dto.ActivePerAccountPerMinute
+            ActivePerAccountPerMinute = dto.ActivePerAccountPerMinute,
+            MemoryInjectionEnabled = dto.MemoryInjectionEnabled
         };
 
         await _configRepo.SaveProactiveConfigAsync(config, ct);
@@ -190,6 +194,8 @@ public class ProactiveController : ControllerBase
             l.Outcome,
             l.ShouldSpeak,
             l.ImageCount,
+            l.MemoryCount,
+            l.MemoryPromptChars,
             l.Topic,
             l.Line,
             l.Reason,
@@ -220,6 +226,11 @@ public class ProactiveController : ControllerBase
             .Where(g => g.AiProactiveEnabled && g.IsEnabled)
             .Select(g => g.GroupId)
             .ToListAsync(ct);
+
+        // 今天有多少次判定真的带了群记忆。留痕里已经有每次的记录，这里给一个一眼能看的数，
+        // 否则"记忆到底有没有在工作"只能去翻日志或读代码。
+        var memoryInjectionsToday = await _db.ProactiveChatLogs.AsNoTracking()
+            .CountAsync(l => l.EvaluatedAt >= todayUtcStart && l.MemoryCount > 0, ct);
 
         var groupNames = await _db.KnownGroups.AsNoTracking()
             .ToDictionaryAsync(g => g.GroupOpenId, g => g.Name, ct);
@@ -259,6 +270,8 @@ public class ProactiveController : ControllerBase
             DeliveryHint = hint,
             config.Enabled,
             config.AllowActiveChannel,
+            config.MemoryInjectionEnabled,
+            TodayMemoryInjections = memoryInjectionsToday,
             ParticipatingGroups = participating.Count,
             TodayByOutcome = sinceRows,
             TodaySent = sinceRows.Where(r => SentOutcomes.Contains(r.Outcome)).Sum(r => r.Count),
@@ -287,6 +300,7 @@ public class ProactiveController : ControllerBase
         ActivePerGroupPerMinute = c.ActivePerGroupPerMinute,
         ActivePerGroupPerDay = c.ActivePerGroupPerDay,
         ActivePerAccountPerMinute = c.ActivePerAccountPerMinute,
+        MemoryInjectionEnabled = c.MemoryInjectionEnabled,
         UpdatedAt = c.UpdatedAt
     };
 }

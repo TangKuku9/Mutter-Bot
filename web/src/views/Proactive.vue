@@ -43,6 +43,7 @@
       <el-descriptions :column="4" border size="small" style="margin-top: 10px">
         <el-descriptions-item label="今日评估">{{ status.todayEvaluations ?? '-' }}</el-descriptions-item>
         <el-descriptions-item label="今日已发言">{{ status.todaySent ?? '-' }}</el-descriptions-item>
+        <el-descriptions-item label="今日带记忆">{{ status.todayMemoryInjections ?? '-' }} 次</el-descriptions-item>
         <el-descriptions-item label="参与群数">{{ status.participatingGroups ?? '-' }}</el-descriptions-item>
         <el-descriptions-item label="待评估窗口">{{ pendingText }}</el-descriptions-item>
       </el-descriptions>
@@ -110,6 +111,14 @@
           <span class="hint">过低容易因思考截断输出，推荐设置为 5000 及以上</span>
           <div class="subline">
             「AI 设置」里的「上下文条数」「最大 Tokens」只作用于 @ 回复与私聊，不再影响择机发言
+          </div>
+        </el-form-item>
+        <el-form-item label="群记忆注入">
+          <el-switch v-model="form.memoryInjectionEnabled" @change="markDirty" />
+          <span class="hint">把「群管理」里各群维护的摘要作为背景参考，交给判定时一起看</span>
+          <div class="subline">
+            关掉只是暂停注入，各群的摘要原样保留（要连内容一起删去「群管理」清空）；
+            单个群还能在「群管理」里单独覆盖这一项。留痕表会记下每次判定带没带记忆、带了多少字
           </div>
         </el-form-item>
 
@@ -182,6 +191,14 @@
         <el-table-column prop="messageCount" label="条数" width="60" />
         <el-table-column label="附图" width="60">
           <template #default="{ row }">{{ row.imageCount ? row.imageCount + ' 张' : '-' }}</template>
+        </el-table-column>
+        <el-table-column label="记忆" width="90">
+          <template #default="{ row }">
+            <el-tooltip v-if="row.memoryCount" :content="`本次判定注入了 ${row.memoryCount} 条群记忆`" placement="top">
+              <span>{{ row.memoryPromptChars }} 字</span>
+            </el-tooltip>
+            <span v-else>-</span>
+          </template>
         </el-table-column>
         <el-table-column label="结论" width="120">
           <template #default="{ row }">
@@ -269,6 +286,7 @@ function emptyForm() {
     liveliness: 1, allowActiveChannel: true,
     maxAttachedImages: 3, historyMaxMessages: 8, evalMaxTokens: 512,
     activePerGroupPerMinute: 3, activePerGroupPerDay: 20, activePerAccountPerMinute: 20,
+    memoryInjectionEnabled: true,
     updatedAt: null
   }
 }
