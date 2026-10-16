@@ -17,6 +17,7 @@ public class AppDbContext : DbContext
     public DbSet<CustomCharacterEntity> CustomCharacters => Set<CustomCharacterEntity>();
     public DbSet<ProactiveChatConfigEntity> ProactiveChatConfigs => Set<ProactiveChatConfigEntity>();
     public DbSet<ProactiveChatLogEntity> ProactiveChatLogs => Set<ProactiveChatLogEntity>();
+    public DbSet<GroupMemoryEntity> GroupMemories => Set<GroupMemoryEntity>();
 
     // 修仙RPG 的 5 张表（PlayerProfiles / GroupWorlds / PlayerInventories /
     // GameCooldowns / CultivationEventLogs）保留建表语句与补列迁移，但不再建实体：
@@ -89,6 +90,13 @@ public class AppDbContext : DbContext
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.EvaluatedAt);
             e.HasIndex(x => new { x.GroupId, x.EvaluatedAt });
+        });
+
+        modelBuilder.Entity<GroupMemoryEntity>(e =>
+        {
+            e.HasKey(x => x.GroupId);
+            e.Property(x => x.Summary).IsRequired();
+            e.HasIndex(x => x.UpdatedAt);
         });
     }
 
@@ -173,6 +181,20 @@ public class AppDbContext : DbContext
             );
             """, ct);
 
+        // 群记忆：每群一条人工维护的摘要，择机发言判定时作背景参考。
+        // 幂等建表，兼容没有这张表的历史库；不回填，旧库升级后从"没有记忆"开始。
+        await Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "GroupMemories" (
+                "GroupId" TEXT NOT NULL CONSTRAINT "PK_GroupMemories" PRIMARY KEY,
+                "Summary" TEXT NOT NULL DEFAULT '',
+                "UpdatedAt" TEXT NOT NULL,
+                "Version" INTEGER NOT NULL DEFAULT 1
+            );
+            """, ct);
+        await Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS \"IX_GroupMemories_UpdatedAt\" ON \"GroupMemories\" (\"UpdatedAt\")", ct);
+
         // ===== 修仙RPG 游戏域建表（主分支不再使用，仅保留结构） =====
         // 功能已拆到 xianxia 分支。这里刻意保留建表与补列：
         //   1) 已有部署的库里这 5 张表可能存着玩家数据，删表不可逆；
@@ -201,6 +223,7 @@ public class AppDbContext : DbContext
                 "IsActive" INTEGER NOT NULL DEFAULT 1
             );
             """, ct);
+
         await Database.ExecuteSqlRawAsync(
             "CREATE UNIQUE INDEX IF NOT EXISTS \"IX_PlayerProfiles_GroupId_MemberOpenId\" ON \"PlayerProfiles\" (\"GroupId\", \"MemberOpenId\")", ct);
         await Database.ExecuteSqlRawAsync(

@@ -76,6 +76,12 @@
             </el-option>
           </el-select>
         </el-form-item>
+        <el-form-item label="群记忆摘要">
+          <el-input v-model="form.groupMemory" type="textarea" :rows="5" maxlength="4000" show-word-limit
+            placeholder="人工维护的群背景摘要，仅用于择机发言参考；留空可清空" />
+          <div class="sub-hint" v-if="memoryUnavailable">摘要读取失败，本次保存不会改动群记忆；关闭后重新打开可重试。</div>
+          <div class="sub-hint" v-else>最多 4000 字。不会自动摘要或更新，也不会用于普通 @ 回复。</div>
+        </el-form-item>
         <el-form-item label="群专属提示词">
           <el-input v-model="form.customSystemPrompt" type="textarea" :rows="3"
             placeholder="留空则用全局系统提示词" />
@@ -125,6 +131,7 @@ const dialog = ref(false)
 const saving = ref(false)
 const form = ref(null)
 const editingId = ref('')
+const memoryUnavailable = ref(false)
 
 const fmt = (s) => s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '-'
 const triggerText = (m) => m === 2 ? '围观全部' : '仅被 @'
@@ -148,10 +155,13 @@ const load = async () => {
   } finally { loading.value = false }
 }
 
-const edit = (row) => {
+const edit = async (row) => {
   editingId.value = row.groupOpenId
+  const id = editingId.value
+  memoryUnavailable.value = false
   form.value = {
     isEnabled: row.config?.isEnabled ?? true,
+    groupMemory: '',
     triggerMode: row.config?.triggerMode ?? 0,
     aiProactiveEnabled: row.config?.aiProactiveEnabled ?? false,
     botMentionOpenId: row.config?.botMentionOpenId ?? '',
@@ -160,12 +170,24 @@ const edit = (row) => {
     customTemperature: row.config?.customTemperature ?? null
   }
   dialog.value = true
+  try {
+    const { data } = await api.get(`/proactive/groups/${encodeURIComponent(id)}/memory`)
+    if (editingId.value === id) form.value.groupMemory = data.summary ?? ''
+  } catch {
+    // 摘要拉取失败不该连群配置都改不了：弹窗照常可用，只是本次不碰群记忆
+    if (editingId.value === id) memoryUnavailable.value = true
+  }
 }
 
 const save = async () => {
   saving.value = true
   try {
-    const { data } = await api.put(`/groups/${editingId.value}/config`, form.value)
+    const { groupMemory, ...config } = form.value
+    const { data } = await api.put(`/groups/${editingId.value}/config`, config)
+    // 读取失败时跳过，避免拿空串把已有摘要误清空；空串交给服务端当清空处理
+    if (!memoryUnavailable.value) {
+      await api.put(`/proactive/groups/${encodeURIComponent(editingId.value)}/memory`, { summary: groupMemory })
+    }
     ElMessage.success(data.message)
     dialog.value = false
     load()

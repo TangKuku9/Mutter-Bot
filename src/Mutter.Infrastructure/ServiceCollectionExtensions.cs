@@ -18,6 +18,7 @@ public static class ServiceCollectionExtensions
         services.AddDbContext<AppDbContext>();
         services.AddScoped<IMessageRepository, MessageRepository>();
         services.AddScoped<IConfigRepository, ConfigRepository>();
+        services.AddScoped<IGroupMemoryRepository, GroupMemoryRepository>();
         services.AddSingleton<IStructuredAiService, StructuredAiService>();
 
         // QQ 官方开放平台通信层
