@@ -101,7 +101,7 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 ```
 
 - **语言框架**：C# 13 / .NET 9.0
-- **持久化层**：SQLite + Entity Framework Core（自动幂等升级迁移）
+- **持久化层**：SQLite + Entity Framework Core（启动时自动幂等升级表结构，不走 EF 迁移）
 - **通信接口**：QQ 官方机器人 WebSocket 网关 + OpenAPI Client
 - **管理前端**：Vue 3 + Vite 6 + Element Plus + Pinia + SignalR Client
 

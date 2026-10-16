@@ -108,7 +108,8 @@ npm run dev
 
 ### 1.6 数据库说明
 
-- 本地开发采用 **SQLite**，首次启动程序会自动完成建表（`AppDbContext.EnsureSchemaUpgradedAsync` 执行幂等初始化与迁移）。
+- 本地开发采用 **SQLite**，首次启动程序会自动完成建表（`AppDbContext.EnsureSchemaUpgradedAsync` 执行幂等初始化与升级）。
+- 项目**不使用 EF Core 迁移**。`src/Mutter.Infrastructure/Migrations/` 下只有一份 2026-07-30 的旧基线，已冻结，与当前模型早已不符。加表、加列、改列请直接改 `AppDbContext.EnsureSchemaUpgradedAsync()`，写成可在已有库上重复执行的幂等 SQL；不要执行 `dotnet ef migrations add`，原因见该目录下的 `README.md`。
 - 运行时生成的数据库文件存放在 `data/` 或根目录，均已被 `.gitignore` 忽略，不得提交到 Git。
 
 ---
