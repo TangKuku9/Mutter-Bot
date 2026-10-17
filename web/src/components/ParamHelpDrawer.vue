@@ -33,16 +33,16 @@ const opened = computed({
 </script>
 
 <style scoped>
-.help { font-size: 13px; color: #606266; line-height: 1.8; }
+.help { font-size: 13px; color: var(--el-text-color-regular); line-height: 1.8; }
 .help p { margin: 0 0 8px; }
 .help-cur {
   display: flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 8px 12px;
-  background: #f5f7fa; border-radius: 4px; font-size: 12px; color: #909399;
+  background: var(--el-fill-color-light); border-radius: 4px; font-size: 12px; color: var(--el-text-color-secondary);
 }
-.help-cur b { color: #303133; font-size: 13px; }
+.help-cur b { color: var(--el-text-color-primary); font-size: 13px; }
 .help-nav {
   display: flex; align-items: center; justify-content: space-between;
-  margin-top: 20px; padding-top: 14px; border-top: 1px solid #ebeef5;
+  margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--el-border-color-lighter);
 }
-.help-pos { font-size: 12px; color: #a8abb2; }
+.help-pos { font-size: 12px; color: var(--el-text-color-placeholder); }
 </style>
