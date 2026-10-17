@@ -298,6 +298,16 @@ public class ProactiveChatHostedService : BackgroundService
                 CompletionTokens = note.Usage?.CompletionTokens ?? 0
             });
             await db.SaveChangesAsync(ct);
+
+            // 每条留痕（说与不说都算）都推给面板：择机页的今日统计与决策留痕
+            // 靠这个事件自动更新，否则管理员看到的一直是进页时的旧数字。
+            var evalNotifier = scope.ServiceProvider.GetRequiredService<INotificationService>();
+            await evalNotifier.NotifyProactiveEvaluatedAsync(new
+            {
+                GroupId = window.GroupId,
+                Outcome = note.Outcome,
+                EvaluatedAt = DateTime.UtcNow
+            });
         }
         catch (Exception ex)
         {

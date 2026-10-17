@@ -217,8 +217,9 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { HubConnectionBuilder, LogLevel } from '@microsoft/signalr'
 import api from '../api'
 import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
@@ -495,7 +496,40 @@ const loadAll = async () => {
   await Promise.all([loadConfig(), loadStatus(), loadLogs()])
 }
 
-onMounted(loadAll)
+// 后端每写一行决策留痕（说与不说都算）就推一次 ProactiveEvaluated，
+// 这里节流刷新：不翻页时留痕与今日统计自动跟上，翻页查看不被打断
+let conn = null
+let refreshTimer = null
+const refreshSoon = () => {
+  if (refreshTimer) return
+  refreshTimer = setTimeout(async () => {
+    refreshTimer = null
+    await loadStatus()
+    if (page.value === 1) await loadLogs()
+  }, 1500)
+}
+
+const connectHub = async () => {
+  conn = new HubConnectionBuilder()
+    .withUrl('/hub/botstatus')
+    .configureLogging(LogLevel.None)
+    .withAutomaticReconnect()
+    .build()
+  conn.on('ProactiveEvaluated', refreshSoon)
+  try { await conn.start() } catch { /* 面板离线时退回手动刷新 */ }
+}
+
+const disconnectHub = async () => {
+  if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null }
+  if (conn) { await conn.stop().catch(() => {}); conn = null }
+}
+
+onMounted(async () => {
+  await loadAll()
+  await connectHub()
+})
+
+onUnmounted(disconnectHub)
 </script>
 
 <style scoped>
