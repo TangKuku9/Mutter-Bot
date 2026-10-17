@@ -132,8 +132,8 @@ public class ConfigController : ControllerBase
         using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct, overallCts.Token);
         var probeCt = probeCts.Token;
 
-        // 基线：不带任何搜索形状，供 token 差分。基线失败则整个探测没有意义，直接返回。
-        var (baseStatus, baseRoot, baseError) = await runner.SendOnceAsync(apiBaseUrl, apiKey, "__baseline__", model, probeCt);
+        // 基线：OpenAI 兼容端不带任何搜索形状，供 token 差分。基线失败则整个探测没有意义，直接返回。
+        var (baseStatus, baseRoot, baseError) = await runner.SendAsync(apiBaseUrl, apiKey, "openai", null, model, probeCt);
         if (baseStatus is null)
             return Ok(new WebSearchProbeReportDto
             {
@@ -153,19 +153,23 @@ public class ConfigController : ControllerBase
         var baseTokens = Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(baseRoot ?? default);
 
         var results = new List<WebSearchProbeResultDto>();
-        foreach (var (shape, desc) in Mutter.Core.Services.WebSearchProbe.Shapes)
+        foreach (var probeCase in Mutter.Core.Services.WebSearchProbe.Cases)
         {
-            var (status, root, error) = await runner.SendOnceAsync(apiBaseUrl, apiKey, shape, model, probeCt);
+            var (status, root, error) = await runner.SendAsync(apiBaseUrl, apiKey, probeCase.Endpoint, probeCase.Shape, model, probeCt);
             int? delta = status is not null && baseTokens is int b
                 ? Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(root ?? default) - b
                 : null;
             var verdict = status is null
                 ? new Mutter.Core.Services.WebSearchProbeVerdict("unreachable", Note: error)
-                : Mutter.Core.Services.WebSearchProbe.Verdict(shape, status, root, delta);
+                : Mutter.Core.Services.WebSearchProbe.Verdict(probeCase.Shape, status, root, delta);
+            // 原生端点整条路径都 404 时不是"形状被拒"，是这地址没挂原生端点——换说人话
+            if (probeCase.Endpoint == "gemini" && status == 404)
+                verdict = new Mutter.Core.Services.WebSearchProbeVerdict("no_native_endpoint",
+                    Note: "该地址下没有找到 Gemini 原生 :generateContent 端点，无法探测原生通道");
             results.Add(new WebSearchProbeResultDto
             {
-                Shape = shape,
-                Description = desc,
+                Shape = probeCase.Shape,
+                Description = probeCase.Description,
                 Status = verdict.Status,
                 GroundingField = verdict.GroundingField,
                 Note = verdict.Note,

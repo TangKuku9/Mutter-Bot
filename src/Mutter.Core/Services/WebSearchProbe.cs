@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 
 namespace Mutter.Core.Services;
@@ -11,6 +12,9 @@ public record WebSearchProbeVerdict(
     string? GroundingField = null,
     string? Note = null,
     int? PromptTokensDelta = null);
+
+/// <summary>一个探测用例：形状 + 所走端点。OpenAI 兼容形状打 /chat/completions，Gemini 形状打原生 :generateContent。</summary>
+public sealed record WebSearchProbeCase(string Shape, string Description, string Endpoint);
 
 /// <summary>
 /// 联网搜索探测的核心逻辑：对给定形状构造请求体、解析响应证据。
@@ -32,18 +36,21 @@ public static class WebSearchProbe
     ];
 
     /// <summary>
-    /// 探测的请求形状。矩阵逐个全跑，不命中即停：中转站可能同时接受多种形状但只有一种真生效。
+    /// 探测用例矩阵。全量逐个跑、不命中即停：中转站可能同时接受多种形状但只有一种真生效。
+    /// OpenAI 兼容形状覆盖常见厂商；gemini_native 单独走原生端点——部分地址（含 Google 官方
+    /// /v1beta/openai 兼容层）的联网检索只在原生端点上生效，兼容层会静默丢弃或拒绝。
     /// </summary>
-    public static readonly (string Shape, string Description)[] Shapes =
+    public static readonly WebSearchProbeCase[] Cases =
     [
-        ("enable_search", "顶层 enable_search:true（通义/百炼）"),
-        ("web_search_tool", "tools 声明 web_search（智谱 GLM）"),
-        ("google_search_tool", "tools 声明 google_search（Gemini 风格）"),
-        ("web_search_options", "顶层 web_search_options:{}（OpenAI Responses 风格）"),
-        ("builtin_web_search", "tools 声明 builtin_function google_search（Gemini 兼容层）")
+        new("enable_search", "OpenAI 兼容：顶层 enable_search:true（通义/百炼）", "openai"),
+        new("web_search_tool", "OpenAI 兼容：tools 声明 web_search（智谱 GLM）", "openai"),
+        new("google_search_tool", "OpenAI 兼容：tools 声明 function google_search", "openai"),
+        new("web_search_options", "OpenAI 兼容：顶层 web_search_options（OpenAI Responses 风格）", "openai"),
+        new("builtin_web_search", "OpenAI 兼容：tools 内联 google_search（Gemini 兼容层直传）", "openai"),
+        new("gemini_native", "Gemini 原生 :generateContent + tools:[{google_search}]（declarative tool）", "gemini")
     ];
 
-    /// <summary>按形状构造 OpenAI 兼容请求体；不做任何网络操作。</summary>
+    /// <summary>按 OpenAI 兼容形状构造请求体；未知形状（基线 "__baseline__"）不附任何搜索参数。</summary>
     public static Dictionary<string, object> BuildRequestBody(string shape, string model, string question)
     {
         var body = new Dictionary<string, object>
@@ -73,6 +80,60 @@ public static class WebSearchProbe
         return body;
     }
 
+    /// <summary>Gemini 原生 :generateContent 请求体；withTool=false 即原生侧基线。</summary>
+    public static Dictionary<string, object> BuildGeminiBody(bool withTool, string question)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["contents"] = new List<object>
+            {
+                new Dictionary<string, object>
+                {
+                    ["role"] = "user",
+                    ["parts"] = new List<object> { new Dictionary<string, object> { ["text"] = question } }
+                }
+            },
+            ["generationConfig"] = new Dictionary<string, object> { ["maxOutputTokens"] = 64 }
+        };
+        if (withTool)
+            body["tools"] = new List<object> { new Dictionary<string, object> { ["google_search"] = new Dictionary<string, object>() } };
+        return body;
+    }
+
+    /// <summary>
+    /// Gemini 原生端点的候选路径，按可能性排序。裸地址先试官方 /v1beta 再试直拼；
+    /// 地址挂在 Google 官方 OpenAI 兼容层（/v1beta/openai）或各家兼容后缀下时，剥离后从上一级找原生端点。
+    /// </summary>
+    public static string[] GeminiUrlCandidates(string apiBaseUrl, string model)
+    {
+        var modelSeg = Uri.EscapeDataString(model);
+        void Collect(string root, List<string> into)
+        {
+            var r = root.TrimEnd('/');
+            if (r.EndsWith("/v1beta") || r.EndsWith("/v1alpha") || r.EndsWith("/v1"))
+                into.Add($"{r}/models/{modelSeg}:generateContent");
+            else
+            {
+                into.Add($"{r}/v1beta/models/{modelSeg}:generateContent");
+                into.Add($"{r}/models/{modelSeg}:generateContent");
+            }
+        }
+
+        var b = apiBaseUrl.TrimEnd('/');
+        var list = new List<string>();
+        var stem = Regex.Replace(b, "/(openai|compatible-mode|compat)$", "");
+        if (stem != b)
+        {
+            // 已知挂在兼容层下：原生端点只可能在剥离后的路径上，不浪费候选去探兼容层自身
+            Collect(stem, list);
+        }
+        else
+        {
+            Collect(b, list);
+        }
+        return list.Distinct().ToArray();
+    }
+
     /// <summary>
     /// 递归扫描响应 JSON 找 grounding 证据字段。返回首个命中的字段名，找不到为 null。
     /// </summary>
@@ -97,17 +158,16 @@ public static class WebSearchProbe
         return null;
     }
 
-    /// <summary>从 usage.prompt_tokens 读请求侧 token；缺失返回 null。</summary>
+    /// <summary>读请求侧 token：OpenAI 兼容是 usage.prompt_tokens，Gemini 原生是 usageMetadata.promptTokenCount。</summary>
     public static int? ReadPromptTokens(JsonElement root)
     {
-        if (root.ValueKind == JsonValueKind.Object &&
-            root.TryGetProperty("usage", out var usage) &&
-            usage.ValueKind == JsonValueKind.Object &&
-            usage.TryGetProperty("prompt_tokens", out var pt) &&
-            pt.ValueKind == JsonValueKind.Number)
-        {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object &&
+            usage.TryGetProperty("prompt_tokens", out var pt) && pt.ValueKind == JsonValueKind.Number)
             return pt.GetInt32();
-        }
+        if (root.TryGetProperty("usageMetadata", out var um) && um.ValueKind == JsonValueKind.Object &&
+            um.TryGetProperty("promptTokenCount", out var pc) && pc.ValueKind == JsonValueKind.Number)
+            return pc.GetInt32();
         return null;
     }
 
@@ -156,6 +216,9 @@ public static class WebSearchProbe
     };
 }
 
+/// <summary>单次探测请求的结果。</summary>
+public sealed record ProbeSendResult(int? Status, JsonElement? Root, string? Error);
+
 /// <summary>
 /// 探测端点的运行时壳：真实发 HTTP。逻辑部分全部委托给 <see cref="WebSearchProbe"/>。
 /// </summary>
@@ -164,8 +227,17 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
     /// <summary>单形状请求超时；探测不该让用户等太久。</summary>
     private static readonly TimeSpan PerRequestTimeout = TimeSpan.FromSeconds(20);
 
-    public async Task<(int? Status, JsonElement? Root, string? Error)> SendOnceAsync(
-        string apiBaseUrl, string apiKey, string shape, string model, CancellationToken ct = default)
+    /// <summary>shape 为 null 表示该端点的基线请求（不带任何搜索参数）。</summary>
+    public async Task<ProbeSendResult> SendAsync(
+        string apiBaseUrl, string apiKey, string endpoint, string? shape, string model, CancellationToken ct = default)
+    {
+        return endpoint == "gemini"
+            ? await SendGeminiAsync(apiBaseUrl, apiKey, withTool: shape is not null, model, ct)
+            : await SendOpenAiAsync(apiBaseUrl, apiKey, shape ?? "__baseline__", model, ct);
+    }
+
+    private async Task<ProbeSendResult> SendOpenAiAsync(
+        string apiBaseUrl, string apiKey, string shape, string model, CancellationToken ct)
     {
         var body = WebSearchProbe.BuildRequestBody(shape, model, WebSearchProbe.ProbeQuestion);
         var url = $"{apiBaseUrl.TrimEnd('/')}/chat/completions";
@@ -179,18 +251,61 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
             using var response = await httpClient.SendAsync(request, cts.Token);
             var raw = await response.Content.ReadAsStringAsync(cts.Token);
             JsonElement? root = null;
-            try { root = JsonDocument.Parse(raw).RootElement.Clone(); } catch { /* 非 JSON 响应保留 raw */ }
-            return ((int)response.StatusCode, root, null);
+            try { root = JsonDocument.Parse(raw).RootElement.Clone(); } catch { /* 非 JSON 响应保留状态码 */ }
+            return new ProbeSendResult((int)response.StatusCode, root, null);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning("Web search probe timed out for {Url} shape={Shape}", url, shape);
-            return (null, null, $"请求超时（>{PerRequestTimeout.TotalSeconds:F0}s）");
+            return new ProbeSendResult(null, null, $"请求超时（>{PerRequestTimeout.TotalSeconds:F0}s）");
         }
         catch (HttpRequestException ex)
         {
             logger.LogWarning("Web search probe failed for {Url}: {Message}", url, ex.Message);
-            return (null, null, ex.Message);
+            return new ProbeSendResult(null, null, ex.Message);
         }
+    }
+
+    private async Task<ProbeSendResult> SendGeminiAsync(
+        string apiBaseUrl, string apiKey, bool withTool, string model, CancellationToken ct)
+    {
+        var json = JsonSerializer.Serialize(WebSearchProbe.BuildGeminiBody(withTool, WebSearchProbe.ProbeQuestion));
+        string? lastPath = null;
+        foreach (var url in WebSearchProbe.GeminiUrlCandidates(apiBaseUrl, model))
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(PerRequestTimeout);
+                using var request = new HttpRequestMessage(HttpMethod.Post, url);
+                request.Headers.Add("x-goog-api-key", apiKey);
+                // Google 官方 Key 认 x-goog-api-key；中转通常认 Bearer。Key 不是 AIza 开头时两个都带，无害。
+                if (!apiKey.StartsWith("AIza"))
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                using var response = await httpClient.SendAsync(request, cts.Token);
+                var raw = await response.Content.ReadAsStringAsync(cts.Token);
+                JsonElement? root = null;
+                try { root = JsonDocument.Parse(raw).RootElement.Clone(); } catch { }
+                if ((int)response.StatusCode == 404)
+                {
+                    lastPath = url;
+                    continue; // 该路径没有原生端点，试下一个候选
+                }
+                return new ProbeSendResult((int)response.StatusCode, root, null);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning("Web search probe timed out for {Url}", url);
+                return new ProbeSendResult(null, null, $"请求超时（>{PerRequestTimeout.TotalSeconds:F0}s）");
+            }
+            catch (HttpRequestException ex)
+            {
+                logger.LogWarning("Web search probe failed for {Url}: {Message}", url, ex.Message);
+                return new ProbeSendResult(null, null, ex.Message);
+            }
+        }
+        // 全部候选 404：以 404 状态回传，让上层报"无原生端点"而不是笼统的拒绝
+        return new ProbeSendResult(404, null, $"未找到 Gemini 原生端点（最后尝试 {lastPath}）");
     }
 }

@@ -525,6 +525,27 @@ Check(vReject.Status == "rejected", "4xx 判为被上游拒绝");
 var vAuth = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 401, null, null);
 Check(vAuth.Status == "auth_failed", "401 判为鉴权失败而非形状问题");
 
+// Gemini 原生通道：declarative tool 只在 :generateContent 上生效，兼容层会静默丢弃——矩阵必须两条腿都探
+var geminiWith = Mutter.Core.Services.WebSearchProbe.BuildGeminiBody(true, "q");
+var geminiWithout = Mutter.Core.Services.WebSearchProbe.BuildGeminiBody(false, "q");
+Check(((List<object>)geminiWith["tools"]).Count == 1 &&
+      ((List<object>)geminiWith["tools"])[0] is Dictionary<string, object> toolDecl && toolDecl.ContainsKey("google_search"),
+    "Gemini 原生请求体按 declarative tool 声明 google_search");
+Check(!geminiWithout.ContainsKey("tools"), "Gemini 原生基线不带 tools");
+Check(Mutter.Core.Services.WebSearchProbe.GeminiUrlCandidates(
+        "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash")
+        .SequenceEqual(["https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"]),
+    "官方 OpenAI 兼容层地址剥离 openai 段后从 /v1beta 找原生端点");
+Check(Mutter.Core.Services.WebSearchProbe.GeminiUrlCandidates(
+        "https://api.example.com/v1", "m1")
+        .SequenceEqual(["https://api.example.com/v1/models/m1:generateContent", "https://api.example.com/v1beta/models/m1:generateContent"]) is false,
+    "非官方后缀地址先试直拼再试补 v1beta（中转布局不定）");
+using var geminiDoc = JsonDocument.Parse("""{"usageMetadata":{"promptTokenCount":250},"candidates":[]}""");
+Check(Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(geminiDoc.RootElement) == 250,
+    "Gemini 原生 usageMetadata.promptTokenCount 可读出");
+Check(Mutter.Core.Services.WebSearchProbe.Cases.Any(c => c.Endpoint == "gemini" && c.Shape == "gemini_native"),
+    "矩阵含 Gemini 原生探测用例");
+
 if (logicOnly)
 {
     Console.WriteLine("\n--logic-only：跳过依赖数据库的第 4~6 段。");

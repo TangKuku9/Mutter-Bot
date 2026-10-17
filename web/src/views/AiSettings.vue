@@ -191,11 +191,13 @@ const verifiedCount = computed(() => (probeReport.value?.results || []).filter((
 const ignoredCount = computed(() => (probeReport.value?.results || []).filter((r) => r.status === 'no_evidence').length)
 const verdictLabel = (s) => ({
   verified: '已验证', no_evidence: '被静默忽略', rejected: '被上游拒绝',
-  auth_failed: '鉴权失败', unreachable: '不可达', upstream_error: '上游错误'
+  auth_failed: '鉴权失败', unreachable: '不可达', upstream_error: '上游错误',
+  no_native_endpoint: '无原生端点'
 }[s] || s)
 const verdictType = (s) => ({
   verified: 'success', no_evidence: 'warning', rejected: 'info',
-  auth_failed: 'danger', unreachable: 'danger', upstream_error: 'danger'
+  auth_failed: 'danger', unreachable: 'danger', upstream_error: 'danger',
+  no_native_endpoint: 'info'
 }[s] || 'info')
 
 const probeWebSearch = async () => {
