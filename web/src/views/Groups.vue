@@ -53,6 +53,10 @@
         </div>
       </template>
       <el-form :model="form" label-width="110px" v-if="form">
+        <el-form-item label="群名">
+          <el-input v-model="form.name" maxlength="50" clearable
+            placeholder="仅面板内显示；QQ 不向普通机器人提供群名称" />
+        </el-form-item>
         <el-form-item label="启用响应">
           <el-switch v-model="form.isEnabled" />
           <ParamHelpButton :label="helpLabel('isEnabled')" @click="openHelp('isEnabled')" />
@@ -119,7 +123,9 @@
       <el-table :data="quotas" size="small">
         <el-table-column prop="month" label="月份" width="100" />
         <el-table-column prop="scope" label="范围" width="90" />
-        <el-table-column prop="key" label="目标" show-overflow-tooltip />
+        <el-table-column label="目标" show-overflow-tooltip>
+          <template #default="{ row }">{{ quotaTarget(row) }}</template>
+        </el-table-column>
         <el-table-column prop="count" label="已用条数" width="90" />
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
@@ -162,6 +168,10 @@ const characterLabel = (name) => {
   if (!name) return '-'
   const c = characters.value.find((x) => x.name === name)
   return c ? c.displayName : name
+}
+const quotaTarget = (row) => {
+  if (row.scope !== 'group') return row.key
+  return groups.value.find((g) => g.groupOpenId === row.key)?.name || row.key
 }
 
 const HELP_ORDER = [
@@ -272,6 +282,7 @@ const edit = async (row) => {
   memoryUnavailable.value = false
   memoryUpdatedAt.value = null
   form.value = {
+    name: row.name ?? '',
     isEnabled: row.config?.isEnabled ?? true,
     groupMemory: '',
     memoryInjectionEnabled: row.config?.memoryInjectionEnabled ?? null,

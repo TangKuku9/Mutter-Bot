@@ -278,7 +278,12 @@ public class ProactiveController : ControllerBase
             TodayEvaluations = sinceRows.Sum(r => r.Count),
             Quotas = quotas,
             PendingWindows = _observe.PendingWindows()
-                .Select(p => new { GroupId = p.GroupId, p.Pending })
+                .Select(p => new
+                {
+                    GroupId = p.GroupId,
+                    Name = groupNames.TryGetValue(p.GroupId, out var pendingName) ? pendingName : null,
+                    p.Pending
+                })
         });
     }
 

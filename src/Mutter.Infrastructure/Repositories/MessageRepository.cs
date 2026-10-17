@@ -147,11 +147,15 @@ public class MessageRepository : IMessageRepository
             .Where(m => m.PromptTokens != null && m.ChatType == 0 && m.GroupId != null && m.CreatedAt >= since)
             .ToListAsync(ct);
 
+        var names = await _dbContext.KnownGroups.AsNoTracking()
+            .ToDictionaryAsync(g => g.GroupOpenId, g => g.Name, ct);
+
         return aiMessages
             .GroupBy(m => m.GroupId)
             .Select(g => new GroupTokenStats
             {
                 GroupId = g.Key!,
+                GroupName = names.TryGetValue(g.Key!, out var name) ? name ?? string.Empty : string.Empty,
                 TotalTokens = g.Sum(m => (m.PromptTokens ?? 0) + (m.CompletionTokens ?? 0)),
                 CallCount = g.Count()
             })
