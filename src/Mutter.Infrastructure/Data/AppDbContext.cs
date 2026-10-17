@@ -168,6 +168,24 @@ public class AppDbContext : DbContext
         {
         }
 
+        // 已选用的联网搜索策略：探测结果“选用”后落库，运行时优先于按 URL 推断。
+        // 老库补空值，行为与升级前一致（继续按地址推断）。
+        foreach (var sql in new[]
+                 {
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchEndpoint\" TEXT NOT NULL DEFAULT ''",
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchShape\" TEXT NOT NULL DEFAULT ''",
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchVerifiedAt\" TEXT"
+                 })
+        {
+            try
+            {
+                await Database.ExecuteSqlRawAsync(sql, ct);
+            }
+            catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+            {
+            }
+        }
+
         // 自定义人设表（兼容已有数据库）
         await Database.ExecuteSqlRawAsync(
             """

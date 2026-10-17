@@ -32,7 +32,10 @@ public class ConfigRepository : IConfigRepository
             MaxTokens = entity.MaxTokens,
             MaxContextMessages = entity.MaxContextMessages,
             MaxAttachedImages = entity.MaxAttachedImages,
-            WebSearchEnabled = entity.WebSearchEnabled
+            WebSearchEnabled = entity.WebSearchEnabled,
+            WebSearchEndpoint = entity.WebSearchEndpoint,
+            WebSearchShape = entity.WebSearchShape,
+            WebSearchVerifiedAt = entity.WebSearchVerifiedAt
         };
     }
 
@@ -72,7 +75,10 @@ public class ConfigRepository : IConfigRepository
                 MaxTokens = config.MaxTokens,
                 MaxContextMessages = config.MaxContextMessages,
                 MaxAttachedImages = config.MaxAttachedImages,
-                WebSearchEnabled = config.WebSearchEnabled
+                WebSearchEnabled = config.WebSearchEnabled,
+                WebSearchEndpoint = config.WebSearchEndpoint,
+                WebSearchShape = config.WebSearchShape,
+                WebSearchVerifiedAt = config.WebSearchVerifiedAt
             };
             _dbContext.AiConfigs.Add(entity);
         }
@@ -88,6 +94,9 @@ public class ConfigRepository : IConfigRepository
             entity.MaxContextMessages = config.MaxContextMessages;
             entity.MaxAttachedImages = config.MaxAttachedImages;
             entity.WebSearchEnabled = config.WebSearchEnabled;
+            entity.WebSearchEndpoint = config.WebSearchEndpoint;
+            entity.WebSearchShape = config.WebSearchShape;
+            entity.WebSearchVerifiedAt = config.WebSearchVerifiedAt;
         }
 
         await _dbContext.SaveChangesAsync(ct);
