@@ -490,6 +490,41 @@ var repairedJson = StructuredAiService.ExtractRepairableJson(jsonBroken)!;
 Check(System.Text.Json.JsonSerializer.Deserialize<ProactiveVerdict>(repairedJson)!.Line == "天禄赢了",
     "折在 JSON 字符串值里的换行被接回，判定解析不再靠运气");
 
+Console.WriteLine("== 2h. 联网搜索探测（纯逻辑） ==");
+var probeBody = Mutter.Core.Services.WebSearchProbe.BuildRequestBody("enable_search", "qwen-plus", Mutter.Core.Services.WebSearchProbe.ProbeQuestion);
+Check((int)probeBody["max_tokens"] == 64 && probeBody["model"].ToString() == "qwen-plus",
+    "探测请求体带最小输出上限与指定模型");
+Check(!probeBody.ContainsKey("tools") && !probeBody.ContainsKey("web_search_options"),
+    "基线请求体（未知形状）不附任何搜索参数");
+var glmBody = Mutter.Core.Services.WebSearchProbe.BuildRequestBody("web_search_tool", "glm-4.6", "x");
+var glmTool = ((List<object>)glmBody["tools"])[0] as Dictionary<string, object>;
+Check((glmTool?["web_search"] as Dictionary<string, object>)?["enable"] is true,
+    "web_search_tool 形状按智谱语义声明工具");
+
+string Grounded() => """{"choices":[],"usage":{"prompt_tokens":300},"groundingMetadata":{"webSearchQueries":["北京时间"]}}""";
+string Silent() => """{"choices":[],"usage":{"prompt_tokens":12}}""";
+using var groundedDoc = JsonDocument.Parse(Grounded());
+using var silentDoc = JsonDocument.Parse(Silent());
+Check(Mutter.Core.Services.WebSearchProbe.FindGroundingField(groundedDoc.RootElement) == "groundingMetadata",
+    "元数据扫描能命中 Gemini 风格的 groundingMetadata");
+Check(Mutter.Core.Services.WebSearchProbe.FindGroundingField(silentDoc.RootElement) is null,
+    "无证据响应不误报元数据命中");
+Check(Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(silentDoc.RootElement) == 12,
+    "usage.prompt_tokens 可读出");
+var vVerified = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 200, groundedDoc.RootElement, 288);
+Check(vVerified.Status == "verified" && vVerified.GroundingField == "groundingMetadata",
+    "带元数据的 2xx 判为已验证");
+var vToken = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 200, silentDoc.RootElement, 512);
+Check(vToken.Status == "verified" && vToken.GroundingField is null,
+    "无元数据但 token 差分显著也判为已验证（部分中转不回证据字段）");
+var vSilent = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 200, silentDoc.RootElement, 0);
+Check(vSilent.Status == "no_evidence" && vSilent.Note!.Contains("静默忽略"),
+    "2xx 无证据且零差分判为静默忽略（生产最坑的一类）");
+var vReject = Mutter.Core.Services.WebSearchProbe.Verdict("google_search_tool", 400, silentDoc.RootElement, null);
+Check(vReject.Status == "rejected", "4xx 判为被上游拒绝");
+var vAuth = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 401, null, null);
+Check(vAuth.Status == "auth_failed", "401 判为鉴权失败而非形状问题");
+
 if (logicOnly)
 {
     Console.WriteLine("\n--logic-only：跳过依赖数据库的第 4~6 段。");

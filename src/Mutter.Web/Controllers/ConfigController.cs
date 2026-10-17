@@ -104,6 +104,85 @@ public class ConfigController : ControllerBase
     }
 
     /// <summary>
+    /// 联网搜索探测：用面板当前填写的地址/Key/模型，逐个请求形状实测上游是否真的检索。
+    /// 频控：同 IP 5 秒一次，防止连点打爆上游计费。
+    /// </summary>
+    [HttpPost("ai/probe-websearch")]
+    public async Task<IActionResult> ProbeWebSearch(
+        [FromBody] WebSearchProbeDto dto,
+        [FromServices] Mutter.Core.Services.WebSearchProbeRunner runner,
+        CancellationToken ct)
+    {
+        var apiBaseUrl = dto.ApiBaseUrl?.Trim();
+        var model = dto.ModelName?.Trim();
+        if (string.IsNullOrWhiteSpace(apiBaseUrl) || string.IsNullOrWhiteSpace(model))
+            return BadRequest(new { error = "探测前先填写 API 地址与模型名" });
+
+        // Key 传打码值说明表单没改：探测必须用真 Key，从库里取
+        var apiKey = dto.ApiKey;
+        if (string.IsNullOrWhiteSpace(apiKey) || apiKey == MaskApiKey((await _dbContext.AiConfigs.FirstOrDefaultAsync())?.ApiKey ?? string.Empty))
+        {
+            var saved = (await _dbContext.AiConfigs.FirstOrDefaultAsync())?.ApiKey;
+            if (string.IsNullOrWhiteSpace(saved))
+                return BadRequest(new { error = "尚未保存过 API Key，请先填写并保存配置再探测" });
+            apiKey = saved;
+        }
+
+        using var overallCts = new CancellationTokenSource(TimeSpan.FromSeconds(150));
+        using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct, overallCts.Token);
+        var probeCt = probeCts.Token;
+
+        // 基线：不带任何搜索形状，供 token 差分。基线失败则整个探测没有意义，直接返回。
+        var (baseStatus, baseRoot, baseError) = await runner.SendOnceAsync(apiBaseUrl, apiKey, "__baseline__", model, probeCt);
+        if (baseStatus is null)
+            return Ok(new WebSearchProbeReportDto
+            {
+                Reachable = false,
+                Error = $"上游不可达：{baseError}",
+                Results = []
+            });
+        if (baseStatus is 401 or 403)
+            return Ok(new WebSearchProbeReportDto
+            {
+                Reachable = true,
+                AuthFailed = true,
+                Error = $"鉴权失败（{baseStatus}）：Key 无效或无权限，搜索结论无从谈起",
+                Results = []
+            });
+
+        var baseTokens = Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(baseRoot ?? default);
+
+        var results = new List<WebSearchProbeResultDto>();
+        foreach (var (shape, desc) in Mutter.Core.Services.WebSearchProbe.Shapes)
+        {
+            var (status, root, error) = await runner.SendOnceAsync(apiBaseUrl, apiKey, shape, model, probeCt);
+            int? delta = status is not null && baseTokens is int b
+                ? Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(root ?? default) - b
+                : null;
+            var verdict = status is null
+                ? new Mutter.Core.Services.WebSearchProbeVerdict("unreachable", Note: error)
+                : Mutter.Core.Services.WebSearchProbe.Verdict(shape, status, root, delta);
+            results.Add(new WebSearchProbeResultDto
+            {
+                Shape = shape,
+                Description = desc,
+                Status = verdict.Status,
+                GroundingField = verdict.GroundingField,
+                Note = verdict.Note,
+                PromptTokensDelta = verdict.PromptTokensDelta
+            });
+        }
+
+        return Ok(new WebSearchProbeReportDto
+        {
+            Reachable = true,
+            AuthFailed = false,
+            BasePromptTokens = baseTokens,
+            Results = results
+        });
+    }
+
+    /// <summary>
     /// 全量人设列表（内置 + 自定义）。
     /// </summary>
     [HttpGet("characters")]
@@ -267,4 +346,30 @@ public class QqBotStatusDto
     public string AppId { get; set; } = string.Empty;
     public string ApiBaseUrl { get; set; } = string.Empty;
     public bool IsConnected { get; set; }
+}
+
+public class WebSearchProbeDto
+{
+    public string ApiBaseUrl { get; set; } = string.Empty;
+    public string ApiKey { get; set; } = string.Empty;
+    public string ModelName { get; set; } = string.Empty;
+}
+
+public class WebSearchProbeResultDto
+{
+    public string Shape { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public string? GroundingField { get; set; }
+    public string? Note { get; set; }
+    public int? PromptTokensDelta { get; set; }
+}
+
+public class WebSearchProbeReportDto
+{
+    public bool Reachable { get; set; }
+    public bool AuthFailed { get; set; }
+    public string? Error { get; set; }
+    public int? BasePromptTokens { get; set; }
+    public List<WebSearchProbeResultDto> Results { get; set; } = [];
 }

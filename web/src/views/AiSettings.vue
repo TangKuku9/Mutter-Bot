@@ -63,6 +63,9 @@
       <el-form-item label="联网搜索">
         <el-switch v-model="form.webSearchEnabled" />
         <ParamHelpButton :label="helpLabel('webSearchEnabled')" @click="openHelp('webSearchEnabled')" />
+        <el-button size="small" style="margin-left: 12px" :loading="probing" :disabled="probing" @click="probeWebSearch">
+          检测联网搜索
+        </el-button>
       </el-form-item>
       <el-form-item>
         <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
@@ -121,6 +124,47 @@
       </template>
     </el-dialog>
 
+    <!-- 联网搜索探测报告：判定矩阵全量展示，不命中即停——中转可能同时接受多种形状但只有一种真生效 -->
+    <el-dialog v-model="probeDialog" title="联网搜索探测报告" width="680px">
+      <el-alert v-if="probeReport && !probeReport.reachable" type="error" :closable="false" show-icon
+        :title="probeReport.error || '上游不可达'" style="margin-bottom: 12px" />
+      <el-alert v-else-if="probeReport && probeReport.authFailed" type="error" :closable="false" show-icon
+        :title="probeReport.error || '鉴权失败'" style="margin-bottom: 12px" />
+      <template v-else-if="probeReport">
+        <div class="probe-summary">
+          以「现在北京时间几点？」实测当前填写的地址与模型（基线 {{ probeReport.basePromptTokens ?? '?' }} prompt tokens）：
+          <b>{{ verifiedCount }}</b> 种形状已验证、{{ ignoredCount }} 种被静默忽略。
+        </div>
+        <el-table :data="probeReport.results" size="small" v-loading="probing">
+          <el-table-column label="请求形状" min-width="200">
+            <template #default="{ row }">
+              <code style="font-size: 12px">{{ row.shape }}</code>
+              <div class="probe-desc">{{ row.description }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="判定" width="130">
+            <template #default="{ row }">
+              <el-tag size="small" :type="verdictType(row.status)">{{ verdictLabel(row.status) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="依据" min-width="240">
+            <template #default="{ row }">
+              <span>{{ row.note || '-' }}</span>
+              <div v-if="row.groundingField" class="probe-desc">证据字段：{{ row.groundingField }}</div>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="probe-footnote">
+          「已验证」= 响应携带检索证据字段，或带搜索比基线多出大量 prompt token（搜索结果被注入）。
+          「被静默忽略」= 请求 2xx 但无任何检索证据——这正是开关打开却毫无效果的情形。
+          探测按表单当前值实测，不依赖已保存配置。
+        </div>
+      </template>
+      <template #footer>
+        <el-button @click="probeDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <ParamHelpDrawer v-model="helpVisible" :title="helpTitle" :lines="helpLines" :current="helpCurrent"
       :index="helpIndex" :total="helpTotal" @step="stepHelp" />
   </el-card>
@@ -138,6 +182,42 @@ const form = ref({ availableProviders: [], availableCharacters: [] })
 const presetId = ref('')
 const loading = ref(false)
 const saving = ref(false)
+
+// 联网搜索探测：用户点按钮才跑，结果按形状全量列出
+const probing = ref(false)
+const probeDialog = ref(false)
+const probeReport = ref(null)
+const verifiedCount = computed(() => (probeReport.value?.results || []).filter((r) => r.status === 'verified').length)
+const ignoredCount = computed(() => (probeReport.value?.results || []).filter((r) => r.status === 'no_evidence').length)
+const verdictLabel = (s) => ({
+  verified: '已验证', no_evidence: '被静默忽略', rejected: '被上游拒绝',
+  auth_failed: '鉴权失败', unreachable: '不可达', upstream_error: '上游错误'
+}[s] || s)
+const verdictType = (s) => ({
+  verified: 'success', no_evidence: 'warning', rejected: 'info',
+  auth_failed: 'danger', unreachable: 'danger', upstream_error: 'danger'
+}[s] || 'info')
+
+const probeWebSearch = async () => {
+  if (!form.value.apiBaseUrl || !form.value.modelName) {
+    ElMessage.warning('探测前先填写 API 地址与模型名')
+    return
+  }
+  probing.value = true
+  probeDialog.value = true
+  probeReport.value = null
+  try {
+    // 矩阵 + 基线最多 12 次请求，远超 axios 默认 30s，单独放宽
+    const { data } = await api.post('/config/ai/probe-websearch', {
+      apiBaseUrl: form.value.apiBaseUrl,
+      apiKey: form.value.apiKey,
+      modelName: form.value.modelName
+    }, { timeout: 170000 })
+    probeReport.value = data
+  } catch {
+    probeDialog.value = false
+  } finally { probing.value = false }
+}
 
 // 人设管理状态
 const manageDialog = ref(false)
@@ -345,4 +425,7 @@ onMounted(load)
 /* 整行控件给右边的「?」留出位置，否则宽度占满会把按钮挤到下一行 */
 .el-form-item__content > .el-input,
 .el-form-item__content > .el-textarea { width: calc(100% - 32px); }
+.probe-summary { margin-bottom: 12px; font-size: 13px; line-height: 1.6; }
+.probe-desc { color: #909399; font-size: 12px; }
+.probe-footnote { color: #909399; font-size: 12px; line-height: 1.6; margin-top: 10px; }
 </style>
