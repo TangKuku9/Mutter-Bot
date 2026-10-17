@@ -1186,6 +1186,10 @@ using (var scope = sp.CreateScope())
     await pdb.SaveChangesAsync();
 }
 
+// 副本里可能存着线上群聊原文，跑完必须删干净。SQLite 的连接池会一直握着文件句柄，
+// Windows 上不先清池就删不掉（Linux 允许 unlink 已打开的文件，所以 CI 不会暴露这个问题，
+// 只有本地全量跑会以一句"文件被另一进程占用"的异常收尾，把前面的全绿结论盖掉）。
+SqliteConnection.ClearAllPools();
 foreach (var suffix in new[] { "", "-wal", "-shm" })
 {
     var f = Path.Combine(AppContext.BaseDirectory, "mutter-bot.db" + suffix);
