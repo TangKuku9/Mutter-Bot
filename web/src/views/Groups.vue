@@ -87,11 +87,20 @@
         </el-form-item>
         <el-form-item label="群记忆摘要">
           <el-input v-model="form.groupMemory" type="textarea" :rows="5" maxlength="4000" show-word-limit
-            placeholder="人工维护的群背景摘要，仅用于择机发言参考；留空可清空" />
+            :disabled="memoryLoading || memoryUnavailable" v-loading="memoryLoading"
+            placeholder="人工维护的群背景摘要，仅用于择机发言参考" />
           <ParamHelpButton :label="helpLabel('groupMemory')" @click="openHelp('groupMemory')" />
-          <!-- 下面两行是当前状态，不是参数说明，留在原地 -->
-          <div class="sub-hint" v-if="memoryUnavailable">摘要读取失败，本次保存不会改动群记忆；关闭后重新打开可重试。</div>
-          <div class="sub-hint" v-else-if="memoryUpdatedAt">上次更新 {{ fmt(memoryUpdatedAt) }}</div>
+          <!-- 下面几行是当前状态，不是参数说明，留在原地 -->
+          <div class="sub-hint" v-if="memoryLoading">正在读取已有摘要，请稍候……</div>
+          <div class="sub-hint" v-else-if="memoryUnavailable">摘要读取失败，本次保存不会改动群记忆；关闭后重新打开可重试。</div>
+          <div class="sub-hint" v-else-if="memoryUpdatedAt">
+            上次更新 {{ fmt(memoryUpdatedAt) }}
+            <el-popconfirm title="确定清空本群记忆？删除后不可恢复。" width="220" @confirm="clearMemory">
+              <template #reference>
+                <el-button size="small" type="danger" link :loading="clearingMemory">清空记忆</el-button>
+              </template>
+            </el-popconfirm>
+          </div>
         </el-form-item>
         <el-form-item label="本群记忆注入">
           <el-select v-model="form.memoryInjectionEnabled" clearable placeholder="跟随全局" style="width: 260px">
@@ -114,7 +123,7 @@
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+        <el-button type="primary" :loading="saving || memoryLoading" :disabled="memoryLoading" @click="save">保存</el-button>
       </template>
     </el-dialog>
 
@@ -160,7 +169,9 @@ const saving = ref(false)
 const form = ref(null)
 const editingId = ref('')
 const memoryUnavailable = ref(false)
+const memoryLoading = ref(false)
 const memoryUpdatedAt = ref(null)
+const clearingMemory = ref(false)
 
 const fmt = (s) => s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '-'
 const triggerText = (m) => m === 2 ? '围观全部' : '仅被 @'
@@ -228,7 +239,7 @@ const HELP = {
     lines: [
       '人工维护的群背景，只在择机发言判定时作为参考带上。',
       '不会自动摘要或更新，也不会用于普通 @ 回复。',
-      '最多 4000 字。清空并保存就是删除本群记忆。'
+      '最多 4000 字。删除用下方「清空记忆」按钮，有确认且立即生效。'
     ]
   },
   memoryInjectionEnabled: {
@@ -294,6 +305,8 @@ const edit = async (row) => {
     customTemperature: row.config?.customTemperature ?? null
   }
   dialog.value = true
+  // 摘要回来前禁止保存：此刻 groupMemory 还是空串，点了保存等于把已有摘要清空
+  memoryLoading.value = true
   try {
     const { data } = await api.get(`/proactive/groups/${encodeURIComponent(id)}/memory`)
     if (editingId.value !== id) return
@@ -303,7 +316,19 @@ const edit = async (row) => {
   } catch {
     // 摘要拉取失败不该连群配置都改不了：弹窗照常可用，只是本次不碰群记忆
     if (editingId.value === id) memoryUnavailable.value = true
+  } finally {
+    if (editingId.value === id) memoryLoading.value = false
   }
+}
+
+const clearMemory = async () => {
+  clearingMemory.value = true
+  try {
+    await api.delete(`/proactive/groups/${encodeURIComponent(editingId.value)}/memory`)
+    form.value.groupMemory = ''
+    memoryUpdatedAt.value = null
+    ElMessage.success('群记忆已清空')
+  } finally { clearingMemory.value = false }
 }
 
 const save = async () => {
