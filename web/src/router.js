@@ -11,7 +11,8 @@ const routes = [
   { path: '/proactive', component: () => import('./views/Proactive.vue'), meta: { title: '择机发言' } },
   { path: '/private-chats', component: () => import('./views/PrivateChats.vue'), meta: { title: '私聊管理' } },
   { path: '/logs', component: () => import('./views/Logs.vue'), meta: { title: '实时日志' } },
-  { path: '/account', component: () => import('./views/Account.vue'), meta: { title: '账号中心' } }
+  { path: '/account', component: () => import('./views/Account.vue'), meta: { title: '账号中心' } },
+  { path: '/about', component: () => import('./views/About.vue'), meta: { title: '关于' } }
 ]
 
 const router = createRouter({

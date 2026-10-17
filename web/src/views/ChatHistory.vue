@@ -175,7 +175,7 @@ onUnmounted(() => {
 
 <style scoped>
 .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.count { color: #909399; font-size: 12px; margin-left: auto; }
-:deep(.row-observe) { color: #909399; }
-:deep(.row-proactive) { background: #f0f9eb; }
+.count { color: var(--el-text-color-secondary); font-size: 12px; margin-left: auto; }
+:deep(.row-observe) { color: var(--el-text-color-secondary); }
+:deep(.row-proactive) { background: var(--el-color-success-light-9); }
 </style>
