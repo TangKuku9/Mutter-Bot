@@ -145,7 +145,7 @@ public class StructuredAiService : IStructuredAiService
 
     /// <summary>
     /// 取出模型输出里的 JSON 对象并修成可解析形态：剥掉 ```json 围栏，再把字符串值里的裸
-    /// 换行/制表符转义。代理层（faroapi→gemini 这类）常在长中文值中间折行，裸换行会让整份
+    /// 换行/制表符转义。代理层（中转→gemini 这类）常在长中文值中间折行，裸换行会让整份
     /// JSON 变成非法；此前严格解析直接判失败，既浪费一次降级调用，也把整条链路打成 null。
     /// </summary>
     public static string? ExtractRepairableJson(string? raw)

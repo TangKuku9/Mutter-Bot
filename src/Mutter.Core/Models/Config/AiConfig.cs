@@ -58,6 +58,18 @@ public record AiConfig
     public bool WebSearchEnabled { get; set; } = false;
 
     /// <summary>
+    /// 已选用的联网搜索通道：空=按地址自动推断；<c>openai</c>=OpenAI 兼容形状；<c>gemini</c>=原生 :generateContent。
+    /// 由探测结果“选用”写入，运行时优先于地址推断。
+    /// </summary>
+    public string WebSearchEndpoint { get; set; } = string.Empty;
+
+    /// <summary>已选用的探测形状 id（如 enable_search / web_search_tool / gemini_native）。</summary>
+    public string WebSearchShape { get; set; } = string.Empty;
+
+    /// <summary>该策略的验证时间；为空表示只是自动推断，尚未实测。</summary>
+    public DateTime? WebSearchVerifiedAt { get; set; }
+
+    /// <summary>
     /// 组装最终送给 AI 的系统提示词：SystemPrompt（空则用默认值）+ 性格特点
     /// </summary>
     public string BuildEffectiveSystemPrompt()

@@ -11,7 +11,8 @@ public record WebSearchProbeVerdict(
     string Status,
     string? GroundingField = null,
     string? Note = null,
-    int? PromptTokensDelta = null);
+    int? PromptTokensDelta = null,
+    string? Evidence = null);
 
 /// <summary>一个探测用例：形状 + 所走端点。OpenAI 兼容形状打 /chat/completions，Gemini 形状打原生 :generateContent。</summary>
 public sealed record WebSearchProbeCase(string Shape, string Description, string Endpoint);
@@ -22,8 +23,18 @@ public sealed record WebSearchProbeCase(string Shape, string Description, string
 /// </summary>
 public static class WebSearchProbe
 {
-    /// <summary>探测用最小 prompt：短到输出只可能来自模型本身，token 差值只可能来自注入的搜索结果。</summary>
-    public const string ProbeQuestion = "现在北京时间几点？直接回答时间，不要解释。";
+    /// <summary>
+    /// 探测用 prompt：要求可机读的时间格式。除了看元数据和 token 差，还要能从回答里认出
+    /// "当前北京时间"——部分中转会把 groundingMetadata 与 token 增量一起抹掉，
+    /// 只有回答内容能证明检索真的发生。
+    /// </summary>
+    public const string ProbeQuestion = "现在北京时间几点？请按「YYYY-MM-DD HH:mm」格式只回答日期和时间，不要解释。";
+
+    /// <summary>
+    /// 探测请求的输出上限。64 对带思考的 Gemini 3.x / o 系列不够：思考 token 会吃满额度，
+    /// 最终答复变成空串（finishReason=MAX_TOKENS），看起来像"没检索"，其实是没答完。
+    /// </summary>
+    public const int ProbeMaxOutputTokens = 512;
 
     /// <summary>
     /// 已知携带"确实检索过"证据的响应字段（递归匹配）。各家叫法不同，命中任一即视为已验证。
@@ -56,9 +67,19 @@ public static class WebSearchProbe
         var body = new Dictionary<string, object>
         {
             ["model"] = model,
-            ["max_tokens"] = 64,
+            ["max_tokens"] = ProbeMaxOutputTokens,
             ["messages"] = new List<object> { new Dictionary<string, object> { ["role"] = "user", ["content"] = question } }
         };
+        ApplyShapeToBody(body, shape);
+        return body;
+    }
+
+    /// <summary>
+    /// 把搜索形状写进请求体。探测与运行时共用这一份定义，避免"探测用一种、正式请求用另一种"。
+    /// 未知形状（含基线）不附加任何参数。
+    /// </summary>
+    public static void ApplyShapeToBody(Dictionary<string, object> body, string shape)
+    {
         switch (shape)
         {
             case "enable_search":
@@ -77,7 +98,6 @@ public static class WebSearchProbe
                 body["tools"] = new List<object> { new Dictionary<string, object> { ["google_search"] = new Dictionary<string, object>() } };
                 break;
         }
-        return body;
     }
 
     /// <summary>Gemini 原生 :generateContent 请求体；withTool=false 即原生侧基线。</summary>
@@ -93,7 +113,7 @@ public static class WebSearchProbe
                     ["parts"] = new List<object> { new Dictionary<string, object> { ["text"] = question } }
                 }
             },
-            ["generationConfig"] = new Dictionary<string, object> { ["maxOutputTokens"] = 64 }
+            ["generationConfig"] = new Dictionary<string, object> { ["maxOutputTokens"] = ProbeMaxOutputTokens }
         };
         if (withTool)
             body["tools"] = new List<object> { new Dictionary<string, object> { ["google_search"] = new Dictionary<string, object>() } };
@@ -110,11 +130,22 @@ public static class WebSearchProbe
         void Collect(string root, List<string> into)
         {
             var r = root.TrimEnd('/');
-            if (r.EndsWith("/v1beta") || r.EndsWith("/v1alpha") || r.EndsWith("/v1"))
+            if (r.EndsWith("/v1beta") || r.EndsWith("/v1alpha"))
+            {
                 into.Add($"{r}/models/{modelSeg}:generateContent");
+                into.Add($"{Regex.Replace(r, "/(v1beta|v1alpha)$", "/v1")}/models/{modelSeg}:generateContent");
+            }
+            else if (r.EndsWith("/v1"))
+            {
+                // 以 /v1 结尾的中转原生端点通常挂在 /v1beta；
+                // 也有网关直接挂 /v1 下，两条都试，404 就换下一条。
+                into.Add($"{Regex.Replace(r, "/v1$", "/v1beta")}/models/{modelSeg}:generateContent");
+                into.Add($"{r}/models/{modelSeg}:generateContent");
+            }
             else
             {
                 into.Add($"{r}/v1beta/models/{modelSeg}:generateContent");
+                into.Add($"{r}/v1/models/{modelSeg}:generateContent");
                 into.Add($"{r}/models/{modelSeg}:generateContent");
             }
         }
@@ -171,8 +202,136 @@ public static class WebSearchProbe
         return null;
     }
 
+    /// <summary>
+    /// 读出响应里的正文。OpenAI 兼容取 choices[0].message.content，Gemini 原生取
+    /// candidates[0].content.parts[].text 并跳过 thought 部分。
+    /// </summary>
+    public static string ReadResponseText(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return string.Empty;
+
+        if (root.TryGetProperty("choices", out var choices) && choices.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var choice in choices.EnumerateArray())
+            {
+                if (choice.ValueKind != JsonValueKind.Object ||
+                    !choice.TryGetProperty("message", out var message) ||
+                    message.ValueKind != JsonValueKind.Object ||
+                    !message.TryGetProperty("content", out var content))
+                    continue;
+
+                if (content.ValueKind == JsonValueKind.String)
+                    return content.GetString() ?? string.Empty;
+
+                if (content.ValueKind == JsonValueKind.Array)
+                {
+                    var sb = new StringBuilder();
+                    foreach (var part in content.EnumerateArray())
+                        if (part.ValueKind == JsonValueKind.Object &&
+                            part.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
+                            sb.Append(t.GetString());
+                    return sb.ToString();
+                }
+            }
+        }
+
+        if (root.TryGetProperty("candidates", out var candidates) && candidates.ValueKind == JsonValueKind.Array)
+        {
+            var sb = new StringBuilder();
+            foreach (var cand in candidates.EnumerateArray())
+            {
+                if (cand.ValueKind != JsonValueKind.Object ||
+                    !cand.TryGetProperty("content", out var content) ||
+                    content.ValueKind != JsonValueKind.Object ||
+                    !content.TryGetProperty("parts", out var parts) ||
+                    parts.ValueKind != JsonValueKind.Array)
+                    continue;
+
+                foreach (var part in parts.EnumerateArray())
+                {
+                    if (part.ValueKind != JsonValueKind.Object) continue;
+                    // 思考段不是给用户的答复，且常夹带"我无法获取实时时间"之类的自述
+                    if (part.TryGetProperty("thought", out var thought) && thought.ValueKind == JsonValueKind.True)
+                        continue;
+                    if (part.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
+                        sb.Append(t.GetString());
+                }
+            }
+            return sb.ToString();
+        }
+
+        return string.Empty;
+    }
+
+    private static readonly Regex FullDateTimePattern = new(
+        @"(20\d{2})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})\s*日?[^\d]{0,8}(\d{1,2})\s*[:：]\s*(\d{1,2})",
+        RegexOptions.Compiled);
+
+    private static readonly Regex TimeOnlyPattern = new(
+        @"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)",
+        RegexOptions.Compiled);
+
+    private static readonly Regex RefusalPattern = new(
+        @"无法(获取|提供|获得|得知)|不能(获取|提供|获得)|没有实时|不具备实时|虚拟时间",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// 回答里是否给出了"此刻的北京时间"。用于会同时抹掉 groundingMetadata 与 token
+    /// 增量一起抹掉的中转：基线答不出、候选答得出，就是检索发生过的行为证据。
+    /// 必须与基线做差分——端点自己带时钟时两边都能答对，不能算检索。
+    /// </summary>
+    public static bool ContainsCurrentBeijingTime(string? text, DateTimeOffset? now = null)
+    {
+        if (string.IsNullOrWhiteSpace(text) || RefusalPattern.IsMatch(text)) return false;
+
+        var bj = (now ?? DateTimeOffset.UtcNow).ToOffset(TimeSpan.FromHours(8));
+
+        var full = FullDateTimePattern.Matches(text);
+        if (full.Count > 0)
+        {
+            foreach (Match m in full)
+            {
+                if (!int.TryParse(m.Groups[1].Value, out var y) ||
+                    !int.TryParse(m.Groups[2].Value, out var mo) ||
+                    !int.TryParse(m.Groups[3].Value, out var d) ||
+                    !int.TryParse(m.Groups[4].Value, out var h) ||
+                    !int.TryParse(m.Groups[5].Value, out var mi)) continue;
+                if (mo is < 1 or > 12 || d < 1 || h is < 0 or > 23 || mi is < 0 or > 59) continue;
+                try
+                {
+                    var dt = new DateTime(y, mo, d, h, mi, 0);
+                    if (dt.Date == bj.Date && WithinMinutes(dt.TimeOfDay, bj.TimeOfDay, ToleranceMinutes))
+                        return true;
+                }
+                catch (ArgumentOutOfRangeException) { /* 非法日期，跳过 */ }
+            }
+            // 有完整日期时只认完整日期，避免把错误日期里的时间部分单独当成证据
+            return false;
+        }
+
+        foreach (Match m in TimeOnlyPattern.Matches(text))
+        {
+            if (!int.TryParse(m.Groups[1].Value, out var h) ||
+                !int.TryParse(m.Groups[2].Value, out var mi)) continue;
+            if (h is < 0 or > 23 || mi is < 0 or > 59) continue;
+            if (WithinMinutes(new TimeSpan(h, mi, 0), bj.TimeOfDay, ToleranceMinutes))
+                return true;
+        }
+        return false;
+    }
+
+    private const int ToleranceMinutes = 20;
+
+    private static bool WithinMinutes(TimeSpan a, TimeSpan b, int tolerance)
+    {
+        var diff = Math.Abs((a - b).TotalMinutes);
+        return Math.Min(diff, 1440 - diff) <= tolerance;
+    }
+
     /// <summary>把一次探测的原始证据归约为判定。</summary>
-    public static WebSearchProbeVerdict Verdict(string shape, int? httpStatus, JsonElement? responseRoot, int? promptTokensDelta)
+    public static WebSearchProbeVerdict Verdict(
+        string shape, int? httpStatus, JsonElement? responseRoot, int? promptTokensDelta,
+        string? baselineText = null, string? responseText = null, DateTimeOffset? now = null)
     {
         if (httpStatus is null)
             return new WebSearchProbeVerdict("unreachable", Note: "请求未得到响应");
@@ -191,12 +350,25 @@ public static class WebSearchProbe
         {
             var field = FindGroundingField(root);
             if (field is not null)
-                return new WebSearchProbeVerdict("verified", field, "响应携带检索证据字段", promptTokensDelta);
+                return new WebSearchProbeVerdict("verified", field, "响应携带检索证据字段", promptTokensDelta, "grounding_metadata");
 
             if (promptTokensDelta is >= 50)
                 return new WebSearchProbeVerdict("verified", null,
                     $"无元数据字段，但带搜索比不带多 {promptTokensDelta} 个 prompt token——搜索结果被注入了上下文",
+                    promptTokensDelta, "prompt_token_delta");
+
+            // 第三类证据：内容差分。部分中转把元数据和 token 增量全抹掉，只有回答本身能证明检索发生。
+            if (ContainsCurrentBeijingTime(responseText, now))
+            {
+                if (!ContainsCurrentBeijingTime(baselineText, now))
+                    return new WebSearchProbeVerdict("verified", null,
+                        "回答给出了与当前北京时间吻合的时刻，而基线给不出——检索已生效",
+                        promptTokensDelta, "content_time");
+
+                return new WebSearchProbeVerdict("no_evidence", null,
+                    "回答给出了当前时间，但基线也能给出——端点本身可能带时钟，不能证明检索生效",
                     promptTokensDelta);
+            }
 
             return new WebSearchProbeVerdict("no_evidence", null,
                 promptTokensDelta is int d

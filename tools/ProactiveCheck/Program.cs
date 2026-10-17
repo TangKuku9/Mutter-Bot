@@ -492,14 +492,23 @@ Check(System.Text.Json.JsonSerializer.Deserialize<ProactiveVerdict>(repairedJson
 
 Console.WriteLine("== 2h. 联网搜索探测（纯逻辑） ==");
 var probeBody = Mutter.Core.Services.WebSearchProbe.BuildRequestBody("enable_search", "qwen-plus", Mutter.Core.Services.WebSearchProbe.ProbeQuestion);
-Check((int)probeBody["max_tokens"] == 64 && probeBody["model"].ToString() == "qwen-plus",
-    "探测请求体带最小输出上限与指定模型");
+Check((int)probeBody["max_tokens"] == Mutter.Core.Services.WebSearchProbe.ProbeMaxOutputTokens &&
+      probeBody["model"].ToString() == "qwen-plus",
+    "探测请求体带足够输出上限（思考模型不截断）与指定模型");
 Check(!probeBody.ContainsKey("tools") && !probeBody.ContainsKey("web_search_options"),
     "基线请求体（未知形状）不附任何搜索参数");
 var glmBody = Mutter.Core.Services.WebSearchProbe.BuildRequestBody("web_search_tool", "glm-4.6", "x");
 var glmTool = ((List<object>)glmBody["tools"])[0] as Dictionary<string, object>;
 Check((glmTool?["web_search"] as Dictionary<string, object>)?["enable"] is true,
     "web_search_tool 形状按智谱语义声明工具");
+// 运行时与探测必须共用同一份形状定义：面板“选用”后正式请求附的是同一组参数
+var runtimeProbeBody = new Dictionary<string, object> { ["model"] = "m", ["messages"] = new List<object>() };
+Mutter.Core.Services.WebSearchProbe.ApplyShapeToBody(runtimeProbeBody, "web_search_tool");
+Check(((List<object>)runtimeProbeBody["tools"]).Count == 1,
+    "运行时按选用形状附加搜索参数（与探测同源）");
+var baselineBody = new Dictionary<string, object> { ["model"] = "m" };
+Mutter.Core.Services.WebSearchProbe.ApplyShapeToBody(baselineBody, "__baseline__");
+Check(baselineBody.Count == 1, "未知/基线形状不往正式请求里塞参数");
 
 string Grounded() => """{"choices":[],"usage":{"prompt_tokens":300},"groundingMetadata":{"webSearchQueries":["北京时间"]}}""";
 string Silent() => """{"choices":[],"usage":{"prompt_tokens":12}}""";
@@ -525,6 +534,31 @@ Check(vReject.Status == "rejected", "4xx 判为被上游拒绝");
 var vAuth = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 401, null, null);
 Check(vAuth.Status == "auth_failed", "401 判为鉴权失败而非形状问题");
 
+// 内容差分：部分中转会同时抹掉 groundingMetadata 与 token 增量，只有回答本身能作证
+var bjNow = new DateTimeOffset(2026, 10, 17, 16, 45, 0, TimeSpan.FromHours(8));
+Check(Mutter.Core.Services.WebSearchProbe.ContainsCurrentBeijingTime("2026-10-17 16:46", bjNow),
+    "回答里的当前北京时间可被识别");
+Check(Mutter.Core.Services.WebSearchProbe.ContainsCurrentBeijingTime("16:48", bjNow),
+    "只给时间的回答在容差内也可被识别");
+Check(!Mutter.Core.Services.WebSearchProbe.ContainsCurrentBeijingTime("2024年5月24日 09:20", bjNow),
+    "错误日期的时间不被当成当前时间");
+Check(!Mutter.Core.Services.WebSearchProbe.ContainsCurrentBeijingTime("我无法获取当前实时时间。", bjNow),
+    "拒绝回答的文本不被误认成时间证据");
+var vContent = Mutter.Core.Services.WebSearchProbe.Verdict(
+    "gemini_native", 200, silentDoc.RootElement, 0,
+    baselineText: "我无法获取当前实时时间。", responseText: "2026-10-17 16:46", now: bjNow);
+Check(vContent.Status == "verified" && vContent.Evidence == "content_time",
+    "元数据与 token 都无证据时，回答能给出当前时间且基线给不出，判为已验证");
+var vClock = Mutter.Core.Services.WebSearchProbe.Verdict(
+    "gemini_native", 200, silentDoc.RootElement, 0,
+    baselineText: "2026-10-17 16:44", responseText: "2026-10-17 16:46", now: bjNow);
+Check(vClock.Status == "no_evidence",
+    "基线自己就能说出当前时间时，内容比对不算检索证据");
+using var geminiTextDoc = JsonDocument.Parse(
+    """{"candidates":[{"content":{"parts":[{"text":"thinking","thought":true},{"text":"2026-10-17 16:46"}]}}]}""");
+Check(Mutter.Core.Services.WebSearchProbe.ReadResponseText(geminiTextDoc.RootElement) == "2026-10-17 16:46",
+    "Gemini 原生正文跳过 thought 段");
+
 // Gemini 原生通道：declarative tool 只在 :generateContent 上生效，兼容层会静默丢弃——矩阵必须两条腿都探
 var geminiWith = Mutter.Core.Services.WebSearchProbe.BuildGeminiBody(true, "q");
 var geminiWithout = Mutter.Core.Services.WebSearchProbe.BuildGeminiBody(false, "q");
@@ -534,12 +568,15 @@ Check(((List<object>)geminiWith["tools"]).Count == 1 &&
 Check(!geminiWithout.ContainsKey("tools"), "Gemini 原生基线不带 tools");
 Check(Mutter.Core.Services.WebSearchProbe.GeminiUrlCandidates(
         "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash")
-        .SequenceEqual(["https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"]),
-    "官方 OpenAI 兼容层地址剥离 openai 段后从 /v1beta 找原生端点");
+        .FirstOrDefault() == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    "官方 OpenAI 兼容层地址剥离 openai 段后优先从 /v1beta 找原生端点");
 Check(Mutter.Core.Services.WebSearchProbe.GeminiUrlCandidates(
         "https://api.example.com/v1", "m1")
-        .SequenceEqual(["https://api.example.com/v1/models/m1:generateContent", "https://api.example.com/v1beta/models/m1:generateContent"]) is false,
-    "非官方后缀地址先试直拼再试补 v1beta（中转布局不定）");
+        .SequenceEqual([
+            "https://api.example.com/v1beta/models/m1:generateContent",
+            "https://api.example.com/v1/models/m1:generateContent"
+        ]),
+    "以 /v1 结尾的中转先试 /v1beta 再试 /v1（部分网关原生端点挂 v1beta）");
 using var geminiDoc = JsonDocument.Parse("""{"usageMetadata":{"promptTokenCount":250},"candidates":[]}""");
 Check(Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(geminiDoc.RootElement) == 250,
     "Gemini 原生 usageMetadata.promptTokenCount 可读出");

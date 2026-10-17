@@ -18,6 +18,16 @@ public class AiConfigDto
     public int CeilingAttachedImages { get; set; } = Mutter.Core.Models.Config.AiConfig.CeilingAttachedImages;
 
     public bool WebSearchEnabled { get; set; }
+
+    /// <summary>已选用的联网搜索通道：空=按地址推断，openai=兼容接口形状，gemini=原生通道。</summary>
+    public string WebSearchEndpoint { get; set; } = string.Empty;
+
+    /// <summary>已选用的探测形状 id。</summary>
+    public string WebSearchShape { get; set; } = string.Empty;
+
+    /// <summary>该策略的验证时间（只读，由服务端在选用时写入）。</summary>
+    public DateTime? WebSearchVerifiedAt { get; set; }
+
     public List<CharacterDto> AvailableCharacters { get; set; } = new();
     public List<ProviderPresetDto> AvailableProviders { get; set; } = new();
 }

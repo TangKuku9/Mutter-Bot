@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -204,6 +206,34 @@ public class AiChatService : IAiChatService
 
     private async Task<AiChatResponse> SendRequestAsync(List<object> messages, AiConfig config, string? responseFormat, CancellationToken ct)
     {
+        // 已选用的 Gemini 原生通道：只有纯文本、非结构化请求才能无损转换。
+        // 转换不了（带图/JSON 输出）时继续走兼容接口，宁可本次不检索也不破坏原有能力。
+        if (config.WebSearchEnabled &&
+            config.WebSearchEndpoint == "gemini" &&
+            config.WebSearchShape == "gemini_native")
+        {
+            if (responseFormat is null &&
+                TryBuildGeminiContents(messages, out var geminiContents, out var systemInstruction))
+            {
+                try
+                {
+                    return await SendGeminiNativeAsync(geminiContents, systemInstruction, config, ct);
+                }
+                catch (Exception ex)
+                {
+                    // 原生通道失败时退回兼容接口，回复不断；搜索可能失效，日志留痕
+                    _logger.LogWarning(ex,
+                        "Gemini 原生联网请求失败，退回兼容接口（本次可能不检索）url={Url} model={Model}",
+                        config.ApiBaseUrl, config.ModelName);
+                }
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Gemini 原生联网跳过：请求含图片或结构化输出，本次走兼容接口 url={Url}", config.ApiBaseUrl);
+            }
+        }
+
         // 使用 Dictionary 动态构造请求体，以支持按服务商附加联网搜索参数
         var requestBody = new Dictionary<string, object>
         {
@@ -222,36 +252,35 @@ public class AiChatService : IAiChatService
             };
         }
 
-        // 联网搜索：根据 API 地址推断服务商模式，附加对应参数
+        // 联网搜索：优先用探测报告里“选用”的策略；没有才回退到旧的按地址推断。
         if (config.WebSearchEnabled)
         {
-            var mode = AiProviderPreset.InferWebSearchMode(config.ApiBaseUrl);
-            switch (mode)
+            if (config.WebSearchEndpoint == "openai" && !string.IsNullOrEmpty(config.WebSearchShape))
             {
-                case "enable_search":
-                    // 通义千问：顶层附加 enable_search，平台自动检索并融入回答
-                    requestBody["enable_search"] = true;
-                    _logger.LogInformation("Web search enabled (enable_search mode) for {Url}", config.ApiBaseUrl);
-                    break;
-                case "web_search_tool":
-                    // 智谱 GLM：tools 声明 web_search 工具，enable=true，平台自动执行
-                    requestBody["tools"] = new List<object>
-                    {
-                        new Dictionary<string, object>
-                        {
-                            ["type"] = "web_search",
-                            ["web_search"] = new Dictionary<string, object>
-                            {
-                                ["enable"] = true,
-                                ["search_result"] = true
-                            }
-                        }
-                    };
-                    _logger.LogInformation("Web search enabled (web_search_tool mode) for {Url}", config.ApiBaseUrl);
-                    break;
-                default:
-                    _logger.LogWarning("WebSearchEnabled is on but URL {Url} does not match any supported provider, skipping", config.ApiBaseUrl);
-                    break;
+                // 与探测共用同一份形状定义，避免"探测能过、正式请求参数写错"
+                WebSearchProbe.ApplyShapeToBody(requestBody, config.WebSearchShape);
+                _logger.LogInformation("Web search enabled (selected shape {Shape}) for {Url}",
+                    config.WebSearchShape, config.ApiBaseUrl);
+            }
+            else if (config.WebSearchEndpoint == "gemini")
+            {
+                // 原生通道已在上方尝试；转换失败或请求失败时本次不检索，不拿兼容层参数硬套
+                _logger.LogInformation("Gemini 原生联网本次未生效（已回退兼容接口）url={Url}", config.ApiBaseUrl);
+            }
+            else
+            {
+                var mode = AiProviderPreset.InferWebSearchMode(config.ApiBaseUrl);
+                if (mode == "none")
+                {
+                    _logger.LogWarning(
+                        "WebSearchEnabled is on but no verified shape and URL {Url} does not match any supported provider, skipping",
+                        config.ApiBaseUrl);
+                }
+                else
+                {
+                    WebSearchProbe.ApplyShapeToBody(requestBody, mode);
+                    _logger.LogInformation("Web search enabled (inferred mode {Mode}) for {Url}", mode, config.ApiBaseUrl);
+                }
             }
         }
 
@@ -349,6 +378,164 @@ public class AiChatService : IAiChatService
             result.Model, result.PromptTokens, result.CompletionTokens);
 
         return result;
+    }
+
+    /// <summary>
+    /// 把 OpenAI messages 转成 Gemini contents。只要有一条消息不是纯文本（图片/多模态），
+    /// 或角色无法映射，就返回 false——调用方退回兼容接口，避免丢图或改变语义。
+    /// </summary>
+    private static bool TryBuildGeminiContents(
+        List<object> messages, out List<object> contents, out string? systemInstruction)
+    {
+        contents = new List<object>();
+        systemInstruction = null;
+        var systemParts = new List<string>();
+
+        var elements = JsonSerializer.SerializeToElement(messages);
+        if (elements.ValueKind != JsonValueKind.Array) return false;
+
+        foreach (var message in elements.EnumerateArray())
+        {
+            if (message.ValueKind != JsonValueKind.Object) return false;
+            var role = message.TryGetProperty("role", out var r) && r.ValueKind == JsonValueKind.String
+                ? r.GetString()
+                : null;
+            if (role is null) return false;
+            if (!message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.String)
+                return false;
+
+            var text = content.GetString() ?? string.Empty;
+            if (role == "system")
+            {
+                systemParts.Add(text);
+                continue;
+            }
+            if (role is not ("user" or "assistant")) return false;
+
+            contents.Add(new Dictionary<string, object>
+            {
+                ["role"] = role == "assistant" ? "model" : "user",
+                ["parts"] = new List<object> { new Dictionary<string, object> { ["text"] = text } }
+            });
+        }
+
+        systemInstruction = systemParts.Count == 0 ? null : string.Join("\n\n", systemParts);
+        return contents.Count > 0;
+    }
+
+    /// <summary>
+    /// Gemini 原生 :generateContent 请求（declarative google_search）。仅用于纯文本、非结构化请求。
+    /// 端点候选与探测共用 <see cref="WebSearchProbe.GeminiUrlCandidates"/>，404 换下一条。
+    /// </summary>
+    private async Task<AiChatResponse> SendGeminiNativeAsync(
+        List<object> contents, string? systemInstruction, AiConfig config, CancellationToken ct)
+    {
+        var requestBody = new Dictionary<string, object>
+        {
+            ["contents"] = contents,
+            ["generationConfig"] = new Dictionary<string, object>
+            {
+                ["temperature"] = config.Temperature,
+                ["maxOutputTokens"] = config.MaxTokens
+            },
+            ["tools"] = new List<object>
+            {
+                new Dictionary<string, object> { ["google_search"] = new Dictionary<string, object>() }
+            }
+        };
+
+        if (!string.IsNullOrWhiteSpace(systemInstruction))
+        {
+            requestBody["systemInstruction"] = new Dictionary<string, object>
+            {
+                ["parts"] = new List<object> { new Dictionary<string, object> { ["text"] = systemInstruction } }
+            };
+        }
+
+        string? lastError = null;
+        foreach (var url in WebSearchProbe.GeminiUrlCandidates(config.ApiBaseUrl, config.ModelName))
+        {
+            using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url);
+            httpRequest.Headers.Add("x-goog-api-key", config.ApiKey);
+            // Google 官方 Key 认 x-goog-api-key；中转通常认 Bearer。Key 不是 AIza 开头时两个都带，无害。
+            if (!config.ApiKey.StartsWith("AIza", StringComparison.Ordinal))
+                httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", config.ApiKey);
+            httpRequest.Content = JsonContent.Create(requestBody);
+
+            HttpResponseMessage response;
+            try
+            {
+                response = await _httpClient.SendAsync(httpRequest, ct);
+            }
+            catch (HttpRequestException ex)
+            {
+                lastError = ex.Message;
+                continue;
+            }
+
+            using (response)
+            {
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                {
+                    lastError = $"404 {url}";
+                    continue;
+                }
+
+                var raw = await response.Content.ReadAsStringAsync(ct);
+                if (!response.IsSuccessStatusCode)
+                    throw new InvalidOperationException(
+                        $"Gemini native error {(int)response.StatusCode}: {raw[..Math.Min(300, raw.Length)]}");
+
+                JsonElement json;
+                try
+                {
+                    json = JsonDocument.Parse(raw).RootElement.Clone();
+                }
+                catch (JsonException ex)
+                {
+                    throw new InvalidOperationException("Gemini native response invalid JSON", ex);
+                }
+
+                if (!json.TryGetProperty("candidates", out var candidates) ||
+                    candidates.ValueKind != JsonValueKind.Array ||
+                    candidates.GetArrayLength() == 0)
+                    throw new InvalidOperationException("Gemini native response missing candidates");
+
+                var candidate = candidates[0];
+                var finishReason = candidate.TryGetProperty("finishReason", out var fr) &&
+                                   fr.ValueKind == JsonValueKind.String
+                    ? fr.GetString()
+                    : null;
+
+                var rawContent = WebSearchProbe.ReadResponseText(json);
+                var content = CjkTextFixer.Cleanse(rawContent);
+
+                int promptTokens = 0, completionTokens = 0;
+                if (json.TryGetProperty("usageMetadata", out var usage) && usage.ValueKind == JsonValueKind.Object)
+                {
+                    if (usage.TryGetProperty("promptTokenCount", out var pt) && pt.ValueKind == JsonValueKind.Number)
+                        promptTokens = pt.GetInt32();
+                    if (usage.TryGetProperty("candidatesTokenCount", out var ctok) && ctok.ValueKind == JsonValueKind.Number)
+                        completionTokens = ctok.GetInt32();
+                }
+
+                _logger.LogDebug(
+                    "Gemini native response: Model={Model}, Tokens={Prompt}+{Completion}, finish={Finish}",
+                    config.ModelName, promptTokens, completionTokens, finishReason);
+
+                return new AiChatResponse
+                {
+                    Content = content,
+                    RawContent = rawContent,
+                    Model = config.ModelName,
+                    FinishReason = finishReason,
+                    PromptTokens = promptTokens,
+                    CompletionTokens = completionTokens
+                };
+            }
+        }
+
+        throw new InvalidOperationException($"未找到 Gemini 原生端点：{lastError}");
     }
 
     private const long MaxImageSizeBytes = 10 * 1024 * 1024; // 10MB
