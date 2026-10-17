@@ -53,6 +53,9 @@ public class GroupsController : ControllerBase
 
     public class GroupConfigUpdateDto
     {
+        /// <summary>人工维护的群名；空串或空白表示清空。</summary>
+        public string? Name { get; set; }
+
         public bool IsEnabled { get; set; }
         public int TriggerMode { get; set; }
         public bool AiProactiveEnabled { get; set; }
@@ -84,6 +87,15 @@ public class GroupsController : ControllerBase
         entity.CustomTemperature = dto.CustomTemperature;
         entity.CustomSystemPrompt = dto.CustomSystemPrompt;
         entity.MemoryInjectionEnabled = dto.MemoryInjectionEnabled;
+
+        // QQ 不向普通机器人下发群名称，这里保存的是面板里人工起的名字
+        var knownGroup = await _db.KnownGroups.FirstOrDefaultAsync(g => g.GroupOpenId == groupId, ct);
+        if (knownGroup is null)
+        {
+            knownGroup = new KnownGroupEntity { GroupOpenId = groupId };
+            _db.KnownGroups.Add(knownGroup);
+        }
+        knownGroup.Name = string.IsNullOrWhiteSpace(dto.Name) ? null : dto.Name.Trim();
 
         await _db.SaveChangesAsync(ct);
         return Ok(new { message = "群配置已保存" });

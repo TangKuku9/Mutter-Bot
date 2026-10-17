@@ -421,7 +421,9 @@ const {
 
 const pendingText = computed(() => {
   const w = status.value.pendingWindows || []
-  return w.length ? w.map((x) => `${x.groupId.slice(0, 6)}…:${x.pending}`).join('  ') : '无'
+  return w.length
+    ? w.map((x) => `${x.name || `${x.groupId.slice(0, 6)}…`}:${x.pending}`).join('  ')
+    : '无'
 })
 
 function emptyForm() {
