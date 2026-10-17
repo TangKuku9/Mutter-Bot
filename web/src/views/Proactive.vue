@@ -22,7 +22,7 @@
 
       <div class="master">
         <el-switch v-model="form.enabled" active-text="启用择机发言" size="large" @change="markDirty" />
-        <span class="hint">各群还需在「群管理」里单独勾选参与，双重开关</span>
+        <ParamHelpButton :label="helpLabel('enabled')" @click="openHelp('enabled')" />
         <el-button v-if="dirty" size="small" type="warning" plain @click="save">保存后生效</el-button>
       </div>
 
@@ -43,6 +43,7 @@
       <el-descriptions :column="4" border size="small" style="margin-top: 10px">
         <el-descriptions-item label="今日评估">{{ status.todayEvaluations ?? '-' }}</el-descriptions-item>
         <el-descriptions-item label="今日已发言">{{ status.todaySent ?? '-' }}</el-descriptions-item>
+        <el-descriptions-item label="今日带记忆">{{ status.todayMemoryInjections ?? '-' }} 次</el-descriptions-item>
         <el-descriptions-item label="参与群数">{{ status.participatingGroups ?? '-' }}</el-descriptions-item>
         <el-descriptions-item label="待评估窗口">{{ pendingText }}</el-descriptions-item>
       </el-descriptions>
@@ -66,15 +67,21 @@
     </el-card>
 
     <el-card shadow="never" style="margin-top: 16px">
-      <template #header><b>参数</b></template>
+      <template #header>
+        <div class="card-head">
+          <b>参数</b>
+          <el-button size="small" @click="openHelp('enabled')">参数说明</el-button>
+        </div>
+      </template>
       <el-form :model="form" label-width="160px" style="max-width: 760px">
         <el-divider content-position="left">时机</el-divider>
         <el-form-item label="攒批窗口（秒）">
           <el-input-number v-model="form.windowSeconds" :min="15" :max="600" :step="5" @change="markDirty" />
-          <span class="hint">同群连续闲聊攒够这么久才问一次 AI</span>
+          <ParamHelpButton :label="helpLabel('windowSeconds')" @click="openHelp('windowSeconds')" />
         </el-form-item>
         <el-form-item label="窗口最多条数">
           <el-input-number v-model="form.windowMaxMessages" :min="2" :max="50" @change="markDirty" />
+          <ParamHelpButton :label="helpLabel('windowMaxMessages')" @click="openHelp('windowMaxMessages')" />
         </el-form-item>
         <el-form-item label="发言倾向">
           <el-radio-group v-model="form.liveliness" @change="markDirty">
@@ -82,46 +89,42 @@
             <el-radio-button :value="1">正常</el-radio-button>
             <el-radio-button :value="2">主动</el-radio-button>
           </el-radio-group>
-          <span class="hint">{{ tendencyHint }}</span>
-          <div class="subline">
-            它改的是 AI 的判断标准本身，不是数值阈值。嫌它闷就切「主动」：只要有能补一句的东西就说，
-            别人答过了也可以补充他没提到的那点。
-          </div>
+          <ParamHelpButton :label="helpLabel('liveliness')" @click="openHelp('liveliness')" />
         </el-form-item>
         <el-form-item label="说与不说">
-          <span class="hint">由 AI 自己判断，没有可调的置信度阈值</span>
-          <div class="subline">群友原话要不要写进聊天历史，在「群管理 → 围观范围」按群设置，这里不控制</div>
+          <ParamHelpButton :label="helpLabel('decision')" @click="openHelp('decision')" />
         </el-form-item>
         <el-form-item label="附图张数">
           <el-input-number v-model="form.maxAttachedImages" :min="0" :max="ceilings.attachedImages" @change="markDirty" />
-          <span class="hint">一次判定最多带给 AI 看几张图，取窗口内最近的；0 = 不看图，纯文字判定</span>
-          <div class="subline">
-            表情包与动图不会附给模型（GIF 会把整次调用打成 500），所以实际附上的可能少于这个数
-          </div>
+          <ParamHelpButton :label="helpLabel('maxAttachedImages')" @click="openHelp('maxAttachedImages')" />
         </el-form-item>
 
         <el-divider content-position="left">判定规模（与「AI 设置」里的上下文/Token 无关）</el-divider>
         <el-form-item label="背景历史条数">
           <el-input-number v-model="form.historyMaxMessages" :min="0" :max="50" @change="markDirty" />
-          <span class="hint">判定时额外参考几条更早的群聊，只为认人设与话题走向</span>
+          <ParamHelpButton :label="helpLabel('historyMaxMessages')" @click="openHelp('historyMaxMessages')" />
         </el-form-item>
         <el-form-item label="判定输出上限">
           <el-input-number v-model="form.evalMaxTokens" :min="64" :max="8192" :step="64" @change="markDirty" />
-          <span class="hint">过低容易因思考截断输出，推荐设置为 5000 及以上</span>
-          <div class="subline">
-            「AI 设置」里的「上下文条数」「最大 Tokens」只作用于 @ 回复与私聊，不再影响择机发言
-          </div>
+          <ParamHelpButton :label="helpLabel('evalMaxTokens')" @click="openHelp('evalMaxTokens')" />
+        </el-form-item>
+        <el-form-item label="群记忆注入">
+          <el-switch v-model="form.memoryInjectionEnabled" @change="markDirty" />
+          <ParamHelpButton :label="helpLabel('memoryInjectionEnabled')" @click="openHelp('memoryInjectionEnabled')" />
         </el-form-item>
 
         <el-divider content-position="left">节流</el-divider>
         <el-form-item label="同群间隔（分钟）">
           <el-input-number v-model="form.cooldownMinutes" :min="1" :max="1440" @change="markDirty" />
+          <ParamHelpButton :label="helpLabel('cooldownMinutes')" @click="openHelp('cooldownMinutes')" />
         </el-form-item>
         <el-form-item label="单群每日上限">
           <el-input-number v-model="form.maxPerGroupPerDay" :min="1" :max="200" @change="markDirty" />
+          <ParamHelpButton :label="helpLabel('maxPerGroupPerDay')" @click="openHelp('maxPerGroupPerDay')" />
         </el-form-item>
         <el-form-item label="全部群每日上限">
           <el-input-number v-model="form.maxGlobalPerDay" :min="1" :max="500" @change="markDirty" />
+          <ParamHelpButton :label="helpLabel('maxGlobalPerDay')" @click="openHelp('maxGlobalPerDay')" />
         </el-form-item>
         <el-form-item label="静默时段（北京时间）">
           <el-input-number v-model="form.quietStartHour" :min="0" :max="23" controls-position="right"
@@ -129,27 +132,27 @@
           <span style="margin: 0 8px">至</span>
           <el-input-number v-model="form.quietEndHour" :min="0" :max="23" controls-position="right" style="width: 110px"
             @change="markDirty" />
-          <span class="hint">两值相等表示不静默</span>
+          <ParamHelpButton :label="helpLabel('quietHours')" @click="openHelp('quietHours')" />
         </el-form-item>
 
         <el-divider content-position="left">通道</el-divider>
         <el-form-item label="允许真主动消息">
           <el-switch v-model="form.allowActiveChannel" @change="markDirty" />
-          <span class="hint">被动槽位（收到消息后 5 分钟内）过期后，是否改发 msg_id 为空的主动消息</span>
+          <ParamHelpButton :label="helpLabel('allowActiveChannel')" @click="openHelp('allowActiveChannel')" />
         </el-form-item>
         <el-form-item label="主动：单群每分钟">
           <el-input-number v-model="form.activePerGroupPerMinute" :min="1" :max="ceilings.groupPerMinute"
             @change="markDirty" />
-          <span class="hint">官方上限 {{ ceilings.groupPerMinute }} 条/分钟</span>
+          <ParamHelpButton :label="helpLabel('activePerGroupPerMinute')" @click="openHelp('activePerGroupPerMinute')" />
         </el-form-item>
         <el-form-item label="主动：单群每日">
           <el-input-number v-model="form.activePerGroupPerDay" :min="1" :max="ceilings.groupPerDay" @change="markDirty" />
-          <span class="hint">官方上限 {{ ceilings.groupPerDay }} 条/日</span>
+          <ParamHelpButton :label="helpLabel('activePerGroupPerDay')" @click="openHelp('activePerGroupPerDay')" />
         </el-form-item>
         <el-form-item label="主动：账号每分钟">
           <el-input-number v-model="form.activePerAccountPerMinute" :min="1" :max="ceilings.accountPerMinute"
             @change="markDirty" />
-          <span class="hint">官方上限 {{ ceilings.accountPerMinute }} 条/分钟（已认证）</span>
+          <ParamHelpButton :label="helpLabel('activePerAccountPerMinute')" @click="openHelp('activePerAccountPerMinute')" />
         </el-form-item>
 
         <el-form-item>
@@ -183,6 +186,14 @@
         <el-table-column label="附图" width="60">
           <template #default="{ row }">{{ row.imageCount ? row.imageCount + ' 张' : '-' }}</template>
         </el-table-column>
+        <el-table-column label="记忆" width="90">
+          <template #default="{ row }">
+            <el-tooltip v-if="row.memoryCount" :content="`本次判定注入了 ${row.memoryCount} 条群记忆`" placement="top">
+              <span>{{ row.memoryPromptChars }} 字</span>
+            </el-tooltip>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="结论" width="120">
           <template #default="{ row }">
             <el-tag size="small" :type="outcomeType(row.outcome)">{{ outcomeLabel(row.outcome) }}</el-tag>
@@ -199,13 +210,20 @@
       <el-pagination layout="prev, pager, next, total" :total="logTotal" :page-size="pageSize"
         :current-page="page" style="margin-top: 10px" @current-change="onPage" />
     </el-card>
+
+    <ParamHelpDrawer v-model="helpVisible" :title="helpTitle" :lines="helpLines" :current="helpCurrent"
+      :index="helpIndex" :total="helpTotal" @step="stepHelp" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { HubConnectionBuilder, LogLevel } from '@microsoft/signalr'
 import api from '../api'
+import { useParamHelp } from '../paramHelp'
+import ParamHelpButton from '../components/ParamHelpButton.vue'
+import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
 
 const outcomeMap = {
   sent_passive: ['已插话（被动）', 'success'],
@@ -251,15 +269,162 @@ const quietText = computed(() => {
   return a === b ? '不静默' : `${a}:00 - ${b}:00`
 })
 
-const tendencyHint = computed(() => ({
-  0: '拿不准就不说，多数时候沉默',
-  1: '有话说就说，不强行刷存在感',
-  2: '像群里的熟人，有机会就接一句'
-}[form.value.liveliness ?? 1]))
+const HELP_ORDER = [
+  'enabled',
+  'windowSeconds', 'windowMaxMessages', 'liveliness', 'decision', 'maxAttachedImages',
+  'historyMaxMessages', 'evalMaxTokens', 'memoryInjectionEnabled',
+  'cooldownMinutes', 'maxPerGroupPerDay', 'maxGlobalPerDay', 'quietHours',
+  'allowActiveChannel', 'activePerGroupPerMinute', 'activePerGroupPerDay', 'activePerAccountPerMinute'
+]
+
+const HELP = {
+  enabled: {
+    title: '启用择机发言',
+    value: (f) => (f.enabled ? '已启用' : '已关闭'),
+    lines: [
+      '总熔断点。关掉后不再采集消息、不再调用模型、不再主动发言。',
+      '每个群还要在「群管理」里单独勾选「AI 择机发言」，两处都打开才生效。'
+    ]
+  },
+  windowSeconds: {
+    title: '攒批窗口（秒）',
+    value: (f) => `${f.windowSeconds} 秒`,
+    lines: [
+      '同一个群的消息攒满这个时长，才交给模型评估一次。',
+      '窗口里的消息按时间顺序一起送过去，不是逐条判断。',
+      '调大更省调用，但接话也变慢。'
+    ]
+  },
+  windowMaxMessages: {
+    title: '窗口最多条数',
+    value: (f) => `${f.windowMaxMessages} 条`,
+    lines: [
+      '一个窗口最多留多少条消息，超出就丢掉最早的。',
+      '攒够这个条数会提前评估，不必等窗口时间走满。'
+    ]
+  },
+  liveliness: {
+    title: '发言倾向',
+    value: (f) => ({ 0: '克制', 1: '正常', 2: '主动' }[f.liveliness ?? 1] || '正常'),
+    lines: [
+      '克制：拿不准就不说。',
+      '正常：有话说就说。',
+      '主动：能接就接，宁可多一句。',
+      '改的是判断标准本身，不是数值阈值，也不影响下面的节流与上限。'
+    ]
+  },
+  decision: {
+    title: '说与不说',
+    value: () => '由模型判断',
+    lines: [
+      '由模型自己判断要不要开口，没有可调的置信度阈值。',
+      '群友原话要不要写进聊天历史，在「群管理 → 围观范围」按群设置，这里不控制。'
+    ]
+  },
+  maxAttachedImages: {
+    title: '附图张数',
+    value: (f) => (f.maxAttachedImages > 0 ? `${f.maxAttachedImages} 张` : '不看图'),
+    lines: [
+      '一次评估最多带几张图，取窗口内最近的。',
+      '0 = 不看图，纯文字判断。',
+      '表情包和动图不会附给模型（GIF 会把整次调用打成 500），实际附上的可能少于这个数。'
+    ]
+  },
+  historyMaxMessages: {
+    title: '背景历史条数',
+    value: (f) => `${f.historyMaxMessages} 条`,
+    lines: [
+      '判定时额外参考几条更早的群聊，用来认人设、跟话题走向。',
+      '这段只作背景，不参与「有没有新话可说」的判断。'
+    ]
+  },
+  evalMaxTokens: {
+    title: '判定输出上限',
+    value: (f) => `${f.evalMaxTokens}`,
+    lines: [
+      '判定这一步的模型输出上限，与「AI 设置」里的「最大 Tokens」互不影响。',
+      '太低会因为思考被截断而白丢一次评估，建议 5000 以上。',
+      '「AI 设置」里的「上下文条数」「最大 Tokens」只作用于 @ 回复与私聊。'
+    ]
+  },
+  memoryInjectionEnabled: {
+    title: '群记忆注入',
+    value: (f) => (f.memoryInjectionEnabled ? '开启' : '关闭'),
+    lines: [
+      '打开后，把「群管理」里各群维护的摘要一并交给模型作背景参考。',
+      '关掉只是暂停注入，摘要原样保留。要连内容一起删，去「群管理」清空。',
+      '单个群可以在「群管理」里单独覆盖这一项。',
+      '留痕会记下每次判定带没带记忆、带了多少字。'
+    ]
+  },
+  cooldownMinutes: {
+    title: '同群间隔（分钟）',
+    value: (f) => `${f.cooldownMinutes} 分钟`,
+    lines: [
+      '同一个群两次主动发言之间至少隔这么久。',
+      '间隔没到就直接跳过，不占当日额度。'
+    ]
+  },
+  maxPerGroupPerDay: {
+    title: '单群每日上限',
+    value: (f) => `${f.maxPerGroupPerDay} 条`,
+    lines: ['单个群一天最多主动说几条，按北京时间跨自然日重置。']
+  },
+  maxGlobalPerDay: {
+    title: '全部群每日上限',
+    value: (f) => `${f.maxGlobalPerDay} 条`,
+    lines: ['所有群加起来一天最多主动说几条。']
+  },
+  quietHours: {
+    title: '静默时段（北京时间）',
+    value: (f) => (f.quietStartHour === f.quietEndHour ? '不静默' : `${f.quietStartHour}:00 - ${f.quietEndHour}:00`),
+    lines: [
+      '这段时间内不主动发言。跨零点按「起始 → 次日结束」算。',
+      '两个值相同表示不静默。',
+      '用北京时间，与服务器时区无关。'
+    ]
+  },
+  allowActiveChannel: {
+    title: '允许真主动消息',
+    value: (f) => (f.allowActiveChannel ? '允许' : '不允许'),
+    lines: [
+      '被动槽位指收到消息后的 5 分钟，可以先回一条带 msg_id 的消息。',
+      '打开后，槽位过期还能改发 msg_id 为空的主动消息；关掉就只能放弃这次发言。'
+    ]
+  },
+  activePerGroupPerMinute: {
+    title: '主动：单群每分钟',
+    value: (f) => `${f.activePerGroupPerMinute} 条/分钟`,
+    lines: [`平台上限 ${ceilings.value.groupPerMinute} 条/分钟，超出会被拒收，这里最多只能填到上限。`]
+  },
+  activePerGroupPerDay: {
+    title: '主动：单群每日',
+    value: (f) => `${f.activePerGroupPerDay} 条/日`,
+    lines: [
+      `平台上限 ${ceilings.value.groupPerDay} 条/日。`,
+      '与「单群每日上限」是两套限制，先到哪个算哪个。'
+    ]
+  },
+  activePerAccountPerMinute: {
+    title: '主动：账号每分钟',
+    value: (f) => `${f.activePerAccountPerMinute} 条/分钟`,
+    lines: [
+      `平台上限 ${ceilings.value.accountPerMinute} 条/分钟（已认证账号）。`,
+      '按整个账号算，不区分群。'
+    ]
+  }
+}
+
+const {
+  visible: helpVisible, index: helpIndex, total: helpTotal, title: helpTitle,
+  lines: helpLines, current: helpCurrent, label: helpLabel, open: openHelp, step: stepHelp
+} = useParamHelp(HELP, HELP_ORDER, () => form.value)
 
 const pendingText = computed(() => {
   const w = status.value.pendingWindows || []
-  return w.length ? w.map((x) => `${x.groupId.slice(0, 6)}…:${x.pending}`).join('  ') : '无'
+  return w.length
+    ? w.map((x) => `${x.name || `${x.groupId.slice(0, 6)}…`}:${x.pending}`).join('  ')
+    : '无'
 })
 
 function emptyForm() {
@@ -269,6 +434,7 @@ function emptyForm() {
     liveliness: 1, allowActiveChannel: true,
     maxAttachedImages: 3, historyMaxMessages: 8, evalMaxTokens: 512,
     activePerGroupPerMinute: 3, activePerGroupPerDay: 20, activePerAccountPerMinute: 20,
+    memoryInjectionEnabled: true,
     updatedAt: null
   }
 }
@@ -330,12 +496,44 @@ const loadAll = async () => {
   await Promise.all([loadConfig(), loadStatus(), loadLogs()])
 }
 
-onMounted(loadAll)
+// 后端每写一行决策留痕（说与不说都算）就推一次 ProactiveEvaluated，
+// 这里节流刷新：不翻页时留痕与今日统计自动跟上，翻页查看不被打断
+let conn = null
+let refreshTimer = null
+const refreshSoon = () => {
+  if (refreshTimer) return
+  refreshTimer = setTimeout(async () => {
+    refreshTimer = null
+    await loadStatus()
+    if (page.value === 1) await loadLogs()
+  }, 1500)
+}
+
+const connectHub = async () => {
+  conn = new HubConnectionBuilder()
+    .withUrl('/hub/botstatus')
+    .configureLogging(LogLevel.None)
+    .withAutomaticReconnect()
+    .build()
+  conn.on('ProactiveEvaluated', refreshSoon)
+  try { await conn.start() } catch { /* 面板离线时退回手动刷新 */ }
+}
+
+const disconnectHub = async () => {
+  if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null }
+  if (conn) { await conn.stop().catch(() => {}); conn = null }
+}
+
+onMounted(async () => {
+  await loadAll()
+  await connectHub()
+})
+
+onUnmounted(disconnectHub)
 </script>
 
 <style scoped>
 .card-head { display: flex; justify-content: space-between; align-items: center; }
 .master { display: flex; align-items: center; gap: 12px; }
 .hint { color: #909399; font-size: 12px; margin-left: 10px; }
-.subline { color: #909399; font-size: 12px; width: 100%; }
 </style>

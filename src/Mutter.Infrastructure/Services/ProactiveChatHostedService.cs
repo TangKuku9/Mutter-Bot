@@ -161,9 +161,16 @@ public class ProactiveChatHostedService : BackgroundService
             window.CollectImages(config.MaxAttachedImages), ct);
         var startedAt = DateTime.UtcNow;
 
+        // 群记忆：全局开关关了连库都不查；群级覆盖 false 表示这个群单独停用注入（摘要仍保留）
+        var memory = await LoadGroupMemoryAsync(window.GroupId, config, ct);
+        // 记的就是真正喂进去的那段：与 BuildUserPrompt 共用同一个字符串，留痕不会和实际对不上
+        var memoryText = memory?.Summary?.Trim();
+        var memoryCount = string.IsNullOrWhiteSpace(memoryText) ? 0 : 1;
+        var memoryChars = memoryCount == 0 ? 0 : memoryText!.Length;
+
         var outcome = await _structuredAi.GetStructuredOutcomeAsync<ProactiveVerdict>(
             BuildJudgePrompt(context, config.Liveliness),
-            ProactivePrompts.BuildUserPrompt(window, history, images.Count),
+            ProactivePrompts.BuildUserPrompt(window, history, images.Count, memoryText),
             images,
             context.EffectiveConfig, ct);
 
@@ -176,7 +183,9 @@ public class ProactiveChatHostedService : BackgroundService
                     $"finish_reason=length；tokens {outcome.PromptTokens}+{outcome.CompletionTokens}"),
                 _ => (ProactiveOutcomes.SkippedAiUnparsable, Truncate(outcome.RawContent, 160))
             };
-            await WriteLogAsync(window, new LogNote(outcomeCode, Detail: detail, Usage: outcome), ct);
+            await WriteLogAsync(window,
+                new LogNote(outcomeCode, Detail: detail, Usage: outcome,
+                    MemoryCount: memoryCount, MemoryPromptChars: memoryChars), ct);
             return;
         }
 
@@ -192,12 +201,16 @@ public class ProactiveChatHostedService : BackgroundService
         // （它曾把模型已经写好的那句话连同 token 一起丢掉）。
         if (line is null)
         {
-            await WriteLogAsync(window, new LogNote(ProactiveOutcomes.SkippedAiDeclined, data, Usage: outcome), ct);
+            await WriteLogAsync(window,
+                new LogNote(ProactiveOutcomes.SkippedAiDeclined, data, Usage: outcome,
+                    MemoryCount: memoryCount, MemoryPromptChars: memoryChars), ct);
             return;
         }
 
         var result = await _speaker.SpeakAsync(window, line, config, ct);
-        await WriteLogAsync(window, new LogNote(result.Outcome, data, line, result.Detail, result.MessageId, outcome), ct);
+        await WriteLogAsync(window,
+            new LogNote(result.Outcome, data, line, result.Detail, result.MessageId, outcome,
+                memoryCount, memoryChars), ct);
 
         if (result.Outcome is not (ProactiveOutcomes.SentPassive or ProactiveOutcomes.SentActive))
         {
@@ -231,13 +244,32 @@ public class ProactiveChatHostedService : BackgroundService
         return await repo.GetProactiveConfigAsync(ct);
     }
 
+    /// <summary>
+    /// 取本群的记忆摘要。开关不允许注入时返回 null —— 与"这个群没写摘要"走同一条路，
+    /// 调用方不必分叉，提示词那边本来也只认非空文本。
+    /// </summary>
+    private async Task<GroupMemory?> LoadGroupMemoryAsync(
+        string groupId, ProactiveChatConfig config, CancellationToken ct)
+    {
+        if (!config.MemoryInjectionEnabled) return null;
+
+        using var scope = _scopeFactory.CreateScope();
+        var groupConfig = await scope.ServiceProvider.GetRequiredService<IConfigRepository>()
+            .GetGroupConfigAsync(groupId, ct);
+        if (groupConfig?.MemoryInjectionEnabled == false) return null;
+
+        return await scope.ServiceProvider.GetRequiredService<IGroupMemoryRepository>().GetAsync(groupId, ct);
+    }
+
     private readonly record struct LogNote(
         string Outcome,
         ProactiveVerdict? Data = null,
         string? Line = null,
         string? Detail = null,
         string? SentMessageId = null,
-        StructuredOutcome<ProactiveVerdict>? Usage = null);
+        StructuredOutcome<ProactiveVerdict>? Usage = null,
+        int MemoryCount = 0,
+        int MemoryPromptChars = 0);
 
     private async Task WriteLogAsync(ProactiveWindow window, LogNote note, CancellationToken ct)
     {
@@ -251,6 +283,8 @@ public class ProactiveChatHostedService : BackgroundService
                 EvaluatedAt = DateTime.UtcNow,
                 MessageCount = window.Messages.Count,
                 ImageCount = window.ImageCount,
+                MemoryCount = note.MemoryCount,
+                MemoryPromptChars = note.MemoryPromptChars,
                 Outcome = note.Outcome,
                 // 留痕里的 ShouldSpeak 由"有没有 line"推导，仅供面板统计，不再是独立决策
                 ShouldSpeak = !string.IsNullOrWhiteSpace(note.Line ?? note.Data?.Line),
@@ -264,6 +298,16 @@ public class ProactiveChatHostedService : BackgroundService
                 CompletionTokens = note.Usage?.CompletionTokens ?? 0
             });
             await db.SaveChangesAsync(ct);
+
+            // 每条留痕（说与不说都算）都推给面板：择机页的今日统计与决策留痕
+            // 靠这个事件自动更新，否则管理员看到的一直是进页时的旧数字。
+            var evalNotifier = scope.ServiceProvider.GetRequiredService<INotificationService>();
+            await evalNotifier.NotifyProactiveEvaluatedAsync(new
+            {
+                GroupId = window.GroupId,
+                Outcome = note.Outcome,
+                EvaluatedAt = DateTime.UtcNow
+            });
         }
         catch (Exception ex)
         {

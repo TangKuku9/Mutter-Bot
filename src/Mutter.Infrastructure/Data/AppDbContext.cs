@@ -17,6 +17,7 @@ public class AppDbContext : DbContext
     public DbSet<CustomCharacterEntity> CustomCharacters => Set<CustomCharacterEntity>();
     public DbSet<ProactiveChatConfigEntity> ProactiveChatConfigs => Set<ProactiveChatConfigEntity>();
     public DbSet<ProactiveChatLogEntity> ProactiveChatLogs => Set<ProactiveChatLogEntity>();
+    public DbSet<GroupMemoryEntity> GroupMemories => Set<GroupMemoryEntity>();
 
     // 修仙RPG 的 5 张表（PlayerProfiles / GroupWorlds / PlayerInventories /
     // GameCooldowns / CultivationEventLogs）保留建表语句与补列迁移，但不再建实体：
@@ -90,6 +91,13 @@ public class AppDbContext : DbContext
             e.HasIndex(x => x.EvaluatedAt);
             e.HasIndex(x => new { x.GroupId, x.EvaluatedAt });
         });
+
+        modelBuilder.Entity<GroupMemoryEntity>(e =>
+        {
+            e.HasKey(x => x.GroupId);
+            e.Property(x => x.Summary).IsRequired();
+            e.HasIndex(x => x.UpdatedAt);
+        });
     }
 
     public async Task EnsureSchemaUpgradedAsync(CancellationToken ct = default)
@@ -160,6 +168,24 @@ public class AppDbContext : DbContext
         {
         }
 
+        // 已选用的联网搜索策略：探测结果“选用”后落库，运行时优先于按 URL 推断。
+        // 老库补空值，行为与升级前一致（继续按地址推断）。
+        foreach (var sql in new[]
+                 {
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchEndpoint\" TEXT NOT NULL DEFAULT ''",
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchShape\" TEXT NOT NULL DEFAULT ''",
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchVerifiedAt\" TEXT"
+                 })
+        {
+            try
+            {
+                await Database.ExecuteSqlRawAsync(sql, ct);
+            }
+            catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+            {
+            }
+        }
+
         // 自定义人设表（兼容已有数据库）
         await Database.ExecuteSqlRawAsync(
             """
@@ -172,6 +198,20 @@ public class AppDbContext : DbContext
                 "UpdatedAt" TEXT NOT NULL
             );
             """, ct);
+
+        // 群记忆：每群一条人工维护的摘要，择机发言判定时作背景参考。
+        // 幂等建表，兼容没有这张表的历史库；不回填，旧库升级后从"没有记忆"开始。
+        await Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "GroupMemories" (
+                "GroupId" TEXT NOT NULL CONSTRAINT "PK_GroupMemories" PRIMARY KEY,
+                "Summary" TEXT NOT NULL DEFAULT '',
+                "UpdatedAt" TEXT NOT NULL,
+                "Version" INTEGER NOT NULL DEFAULT 1
+            );
+            """, ct);
+        await Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS \"IX_GroupMemories_UpdatedAt\" ON \"GroupMemories\" (\"UpdatedAt\")", ct);
 
         // ===== 修仙RPG 游戏域建表（主分支不再使用，仅保留结构） =====
         // 功能已拆到 xianxia 分支。这里刻意保留建表与补列：
@@ -201,6 +241,7 @@ public class AppDbContext : DbContext
                 "IsActive" INTEGER NOT NULL DEFAULT 1
             );
             """, ct);
+
         await Database.ExecuteSqlRawAsync(
             "CREATE UNIQUE INDEX IF NOT EXISTS \"IX_PlayerProfiles_GroupId_MemberOpenId\" ON \"PlayerProfiles\" (\"GroupId\", \"MemberOpenId\")", ct);
         await Database.ExecuteSqlRawAsync(
@@ -321,6 +362,8 @@ public class AppDbContext : DbContext
                 "EvaluatedAt" TEXT NOT NULL,
                 "MessageCount" INTEGER NOT NULL DEFAULT 0,
                 "ImageCount" INTEGER NOT NULL DEFAULT 0,
+                "MemoryCount" INTEGER NOT NULL DEFAULT 0,
+                "MemoryPromptChars" INTEGER NOT NULL DEFAULT 0,
                 "Outcome" TEXT NOT NULL DEFAULT '',
                 "ShouldSpeak" INTEGER NOT NULL DEFAULT 0,
                 "Topic" TEXT,
@@ -397,6 +440,27 @@ public class AppDbContext : DbContext
         {
         }
 
+        // 群记忆注入开关。老库补成 1（开着）—— 群记忆上线时是"有摘要就注入"，
+        // 补成 0 等于给所有已填摘要的群静默关掉功能。
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatConfigs\" ADD COLUMN \"MemoryInjectionEnabled\" INTEGER NOT NULL DEFAULT 1", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 群级覆盖：NULL = 跟随全局，所以刻意不给默认值（给了 0 就变成"默认全群停用"）
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"MemoryInjectionEnabled\" INTEGER", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
         // 私聊 bot 回复的对话对象：没有它就无法把某条回复归到具体某段私聊，多个私聊对象会串味
         try
         {
@@ -422,6 +486,25 @@ public class AppDbContext : DbContext
         {
             await Database.ExecuteSqlRawAsync(
                 "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"ImageCount\" INTEGER NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        // 同理记下这次判定有没有用群记忆、用了多少字：否则"记忆到底有没有在工作"只能翻代码
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"MemoryCount\" INTEGER NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"MemoryPromptChars\" INTEGER NOT NULL DEFAULT 0", ct);
         }
         catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
         {

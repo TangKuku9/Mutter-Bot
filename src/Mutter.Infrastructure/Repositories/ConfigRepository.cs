@@ -32,7 +32,10 @@ public class ConfigRepository : IConfigRepository
             MaxTokens = entity.MaxTokens,
             MaxContextMessages = entity.MaxContextMessages,
             MaxAttachedImages = entity.MaxAttachedImages,
-            WebSearchEnabled = entity.WebSearchEnabled
+            WebSearchEnabled = entity.WebSearchEnabled,
+            WebSearchEndpoint = entity.WebSearchEndpoint,
+            WebSearchShape = entity.WebSearchShape,
+            WebSearchVerifiedAt = entity.WebSearchVerifiedAt
         };
     }
 
@@ -51,7 +54,8 @@ public class ConfigRepository : IConfigRepository
             CustomTemperature = entity.CustomTemperature,
             AiProactiveEnabled = entity.AiProactiveEnabled,
             BotMentionOpenId = entity.BotMentionOpenId,
-            ActiveCharacter = entity.ActiveCharacter
+            ActiveCharacter = entity.ActiveCharacter,
+            MemoryInjectionEnabled = entity.MemoryInjectionEnabled
         };
     }
 
@@ -71,7 +75,10 @@ public class ConfigRepository : IConfigRepository
                 MaxTokens = config.MaxTokens,
                 MaxContextMessages = config.MaxContextMessages,
                 MaxAttachedImages = config.MaxAttachedImages,
-                WebSearchEnabled = config.WebSearchEnabled
+                WebSearchEnabled = config.WebSearchEnabled,
+                WebSearchEndpoint = config.WebSearchEndpoint,
+                WebSearchShape = config.WebSearchShape,
+                WebSearchVerifiedAt = config.WebSearchVerifiedAt
             };
             _dbContext.AiConfigs.Add(entity);
         }
@@ -87,6 +94,9 @@ public class ConfigRepository : IConfigRepository
             entity.MaxContextMessages = config.MaxContextMessages;
             entity.MaxAttachedImages = config.MaxAttachedImages;
             entity.WebSearchEnabled = config.WebSearchEnabled;
+            entity.WebSearchEndpoint = config.WebSearchEndpoint;
+            entity.WebSearchShape = config.WebSearchShape;
+            entity.WebSearchVerifiedAt = config.WebSearchVerifiedAt;
         }
 
         await _dbContext.SaveChangesAsync(ct);
@@ -108,7 +118,8 @@ public class ConfigRepository : IConfigRepository
                 CustomTemperature = config.CustomTemperature,
                 AiProactiveEnabled = config.AiProactiveEnabled,
                 BotMentionOpenId = config.BotMentionOpenId,
-                ActiveCharacter = config.ActiveCharacter
+                ActiveCharacter = config.ActiveCharacter,
+                MemoryInjectionEnabled = config.MemoryInjectionEnabled
             };
             _dbContext.GroupConfigs.Add(entity);
         }
@@ -121,6 +132,7 @@ public class ConfigRepository : IConfigRepository
             entity.AiProactiveEnabled = config.AiProactiveEnabled;
             entity.BotMentionOpenId = config.BotMentionOpenId;
             entity.ActiveCharacter = config.ActiveCharacter;
+            entity.MemoryInjectionEnabled = config.MemoryInjectionEnabled;
         }
 
         await _dbContext.SaveChangesAsync(ct);
@@ -138,7 +150,8 @@ public class ConfigRepository : IConfigRepository
                 CustomTemperature = e.CustomTemperature,
                 AiProactiveEnabled = e.AiProactiveEnabled,
                 BotMentionOpenId = e.BotMentionOpenId,
-                ActiveCharacter = e.ActiveCharacter
+                ActiveCharacter = e.ActiveCharacter,
+                MemoryInjectionEnabled = e.MemoryInjectionEnabled
             })
             .ToListAsync(ct);
     }
@@ -178,6 +191,7 @@ public class ConfigRepository : IConfigRepository
             ActivePerGroupPerMinute = entity.ActivePerGroupPerMinute,
             ActivePerGroupPerDay = entity.ActivePerGroupPerDay,
             ActivePerAccountPerMinute = entity.ActivePerAccountPerMinute,
+            MemoryInjectionEnabled = entity.MemoryInjectionEnabled,
             UpdatedAt = entity.UpdatedAt
         }.Normalize();
     }
@@ -208,6 +222,7 @@ public class ConfigRepository : IConfigRepository
         entity.ActivePerGroupPerMinute = normalized.ActivePerGroupPerMinute;
         entity.ActivePerGroupPerDay = normalized.ActivePerGroupPerDay;
         entity.ActivePerAccountPerMinute = normalized.ActivePerAccountPerMinute;
+        entity.MemoryInjectionEnabled = normalized.MemoryInjectionEnabled;
         entity.UpdatedAt = DateTime.UtcNow;
 
         await _dbContext.SaveChangesAsync(ct);

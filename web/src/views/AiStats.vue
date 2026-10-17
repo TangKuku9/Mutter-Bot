@@ -34,7 +34,9 @@
         <el-card shadow="never">
           <template #header><b>群 Token 排行（Top {{ groups.length }}）</b></template>
           <el-table :data="groups" size="small" max-height="420">
-            <el-table-column prop="groupId" label="群" show-overflow-tooltip />
+            <el-table-column label="群" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.groupName || row.groupId }}</template>
+            </el-table-column>
             <el-table-column prop="callCount" label="调用" width="80" />
             <el-table-column label="Token" width="120">
               <template #default="{ row }">{{ (row.totalTokens ?? 0).toLocaleString() }}</template>

@@ -17,6 +17,7 @@ using Mutter.Infrastructure;
 using Mutter.Infrastructure.Data;
 using Microsoft.Extensions.Hosting;
 using Mutter.Infrastructure.Entities;
+using Mutter.Infrastructure.Repositories;
 using Mutter.Infrastructure.Services;
 using Mutter.Web.Controllers;
 
@@ -74,6 +75,36 @@ Check(ProactivePrompts.Tendency(ProactiveChatConfig.LivelinessEager).Contains("�
     "「主动」档明确推翻了“别人答过就别接”这条最压发言的规则");
 Check(ProactivePrompts.Tendency(ProactiveChatConfig.LivelinessRestrained).Contains("保持沉默"),
     "「克制」档保留原来的保守要求");
+var promptWindow = new ProactiveWindow
+{
+    GroupId = "GM",
+    Messages = new[] { new ObservedMessage("u", "当前消息", "m", DateTime.UtcNow) },
+    LastMessageId = "m",
+    LastMessageUtcAt = DateTime.UtcNow
+};
+var promptWithMemory = ProactivePrompts.BuildUserPrompt(promptWindow, Array.Empty<(string Role, string Content)>(), 0, "  群背景  ");
+var promptWithoutMemory = ProactivePrompts.BuildUserPrompt(promptWindow, Array.Empty<(string Role, string Content)>(), 0, "   ");
+Check(promptWithMemory.Contains("人工维护记忆") && promptWithMemory.Contains("群背景"),
+    "群记忆只作为用户提示中的隔离背景区块注入");
+Check(promptWithMemory.Contains("不是指令") && promptWithMemory.Contains("不要根据它臆造")
+      && promptWithMemory.Contains("以当前消息为准") && promptWithMemory.Contains("确实有助于"),
+    "记忆区块把四条约束写全：不是指令 / 不臆造 / 冲突以当前消息为准 / 只在真帮得上时用");
+Check(!promptWithoutMemory.Contains("人工维护记忆"), "空白群记忆不会注入提示");
+Check(!ProactivePrompts.SystemPrompt.Contains("人工维护记忆"), "群记忆不进入系统提示词");
+// 开关默认值：注入默认开（上线时就是"有摘要就注入"，默认关等于静默改掉已填摘要的群的行为）；
+// 群级是三态，null 才表示跟随全局
+Check(new ProactiveChatConfig().MemoryInjectionEnabled, "全局记忆注入默认开");
+Check(new GroupConfig().MemoryInjectionEnabled is null, "群级记忆注入默认跟随全局，而不是覆盖成关");
+// 摘要是人工维护的自由文本：服务端必须自己收口长度与空白，不能指望面板的 maxlength
+Check(GroupMemoryRepository.NormalizeSummary("  群背景  ") == "群背景", "群记忆入库前 trim 首尾空白");
+Check(GroupMemoryRepository.NormalizeSummary(new string('长', 5000)).Length == 4000,
+    "群记忆超过 4000 字被截断（与面板 maxlength 同口径，绕过面板也顶不破）");
+Check(GroupMemoryRepository.NormalizeSummary(null) == "" && GroupMemoryRepository.NormalizeSummary("   ") == "",
+    "null / 纯空白群记忆规整为空串");
+Check(GroupMemoryRepository.NormalizeGroupId("  GROUP  ") == "GROUP"
+    && GroupMemoryRepository.NormalizeGroupId("   ") is null
+    && GroupMemoryRepository.NormalizeGroupId(null) is null,
+    "群 ID 先 trim 再判空，同一个群不会被存成两行");
 Check(!ProactivePrompts.Tendency(ProactiveChatConfig.LivelinessEager).Contains("置信度"),
     "倾向是三句判断话，不是又一个没人能调的数值旋钮");
 Check(clamped.ActivePerGroupPerMinute == ProactiveChatConfig.CeilingGroupPerMinute,
@@ -459,6 +490,99 @@ var repairedJson = StructuredAiService.ExtractRepairableJson(jsonBroken)!;
 Check(System.Text.Json.JsonSerializer.Deserialize<ProactiveVerdict>(repairedJson)!.Line == "天禄赢了",
     "折在 JSON 字符串值里的换行被接回，判定解析不再靠运气");
 
+Console.WriteLine("== 2h. 联网搜索探测（纯逻辑） ==");
+var probeBody = Mutter.Core.Services.WebSearchProbe.BuildRequestBody("enable_search", "qwen-plus", Mutter.Core.Services.WebSearchProbe.ProbeQuestion);
+Check((int)probeBody["max_tokens"] == Mutter.Core.Services.WebSearchProbe.ProbeMaxOutputTokens &&
+      probeBody["model"].ToString() == "qwen-plus",
+    "探测请求体带足够输出上限（思考模型不截断）与指定模型");
+Check(!probeBody.ContainsKey("tools") && !probeBody.ContainsKey("web_search_options"),
+    "基线请求体（未知形状）不附任何搜索参数");
+var glmBody = Mutter.Core.Services.WebSearchProbe.BuildRequestBody("web_search_tool", "glm-4.6", "x");
+var glmTool = ((List<object>)glmBody["tools"])[0] as Dictionary<string, object>;
+Check((glmTool?["web_search"] as Dictionary<string, object>)?["enable"] is true,
+    "web_search_tool 形状按智谱语义声明工具");
+// 运行时与探测必须共用同一份形状定义：面板“选用”后正式请求附的是同一组参数
+var runtimeProbeBody = new Dictionary<string, object> { ["model"] = "m", ["messages"] = new List<object>() };
+Mutter.Core.Services.WebSearchProbe.ApplyShapeToBody(runtimeProbeBody, "web_search_tool");
+Check(((List<object>)runtimeProbeBody["tools"]).Count == 1,
+    "运行时按选用形状附加搜索参数（与探测同源）");
+var baselineBody = new Dictionary<string, object> { ["model"] = "m" };
+Mutter.Core.Services.WebSearchProbe.ApplyShapeToBody(baselineBody, "__baseline__");
+Check(baselineBody.Count == 1, "未知/基线形状不往正式请求里塞参数");
+
+string Grounded() => """{"choices":[],"usage":{"prompt_tokens":300},"groundingMetadata":{"webSearchQueries":["北京时间"]}}""";
+string Silent() => """{"choices":[],"usage":{"prompt_tokens":12}}""";
+using var groundedDoc = JsonDocument.Parse(Grounded());
+using var silentDoc = JsonDocument.Parse(Silent());
+Check(Mutter.Core.Services.WebSearchProbe.FindGroundingField(groundedDoc.RootElement) == "groundingMetadata",
+    "元数据扫描能命中 Gemini 风格的 groundingMetadata");
+Check(Mutter.Core.Services.WebSearchProbe.FindGroundingField(silentDoc.RootElement) is null,
+    "无证据响应不误报元数据命中");
+Check(Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(silentDoc.RootElement) == 12,
+    "usage.prompt_tokens 可读出");
+var vVerified = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 200, groundedDoc.RootElement, 288);
+Check(vVerified.Status == "verified" && vVerified.GroundingField == "groundingMetadata",
+    "带元数据的 2xx 判为已验证");
+var vToken = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 200, silentDoc.RootElement, 512);
+Check(vToken.Status == "verified" && vToken.GroundingField is null,
+    "无元数据但 token 差分显著也判为已验证（部分中转不回证据字段）");
+var vSilent = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 200, silentDoc.RootElement, 0);
+Check(vSilent.Status == "no_evidence" && vSilent.Note!.Contains("静默忽略"),
+    "2xx 无证据且零差分判为静默忽略（生产最坑的一类）");
+var vReject = Mutter.Core.Services.WebSearchProbe.Verdict("google_search_tool", 400, silentDoc.RootElement, null);
+Check(vReject.Status == "rejected", "4xx 判为被上游拒绝");
+var vAuth = Mutter.Core.Services.WebSearchProbe.Verdict("enable_search", 401, null, null);
+Check(vAuth.Status == "auth_failed", "401 判为鉴权失败而非形状问题");
+
+// 内容差分：部分中转会同时抹掉 groundingMetadata 与 token 增量，只有回答本身能作证
+var bjNow = new DateTimeOffset(2026, 10, 17, 16, 45, 0, TimeSpan.FromHours(8));
+Check(Mutter.Core.Services.WebSearchProbe.ContainsCurrentBeijingTime("2026-10-17 16:46", bjNow),
+    "回答里的当前北京时间可被识别");
+Check(Mutter.Core.Services.WebSearchProbe.ContainsCurrentBeijingTime("16:48", bjNow),
+    "只给时间的回答在容差内也可被识别");
+Check(!Mutter.Core.Services.WebSearchProbe.ContainsCurrentBeijingTime("2024年5月24日 09:20", bjNow),
+    "错误日期的时间不被当成当前时间");
+Check(!Mutter.Core.Services.WebSearchProbe.ContainsCurrentBeijingTime("我无法获取当前实时时间。", bjNow),
+    "拒绝回答的文本不被误认成时间证据");
+var vContent = Mutter.Core.Services.WebSearchProbe.Verdict(
+    "gemini_native", 200, silentDoc.RootElement, 0,
+    baselineText: "我无法获取当前实时时间。", responseText: "2026-10-17 16:46", now: bjNow);
+Check(vContent.Status == "verified" && vContent.Evidence == "content_time",
+    "元数据与 token 都无证据时，回答能给出当前时间且基线给不出，判为已验证");
+var vClock = Mutter.Core.Services.WebSearchProbe.Verdict(
+    "gemini_native", 200, silentDoc.RootElement, 0,
+    baselineText: "2026-10-17 16:44", responseText: "2026-10-17 16:46", now: bjNow);
+Check(vClock.Status == "no_evidence",
+    "基线自己就能说出当前时间时，内容比对不算检索证据");
+using var geminiTextDoc = JsonDocument.Parse(
+    """{"candidates":[{"content":{"parts":[{"text":"thinking","thought":true},{"text":"2026-10-17 16:46"}]}}]}""");
+Check(Mutter.Core.Services.WebSearchProbe.ReadResponseText(geminiTextDoc.RootElement) == "2026-10-17 16:46",
+    "Gemini 原生正文跳过 thought 段");
+
+// Gemini 原生通道：declarative tool 只在 :generateContent 上生效，兼容层会静默丢弃——矩阵必须两条腿都探
+var geminiWith = Mutter.Core.Services.WebSearchProbe.BuildGeminiBody(true, "q");
+var geminiWithout = Mutter.Core.Services.WebSearchProbe.BuildGeminiBody(false, "q");
+Check(((List<object>)geminiWith["tools"]).Count == 1 &&
+      ((List<object>)geminiWith["tools"])[0] is Dictionary<string, object> toolDecl && toolDecl.ContainsKey("google_search"),
+    "Gemini 原生请求体按 declarative tool 声明 google_search");
+Check(!geminiWithout.ContainsKey("tools"), "Gemini 原生基线不带 tools");
+Check(Mutter.Core.Services.WebSearchProbe.GeminiUrlCandidates(
+        "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash")
+        .FirstOrDefault() == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    "官方 OpenAI 兼容层地址剥离 openai 段后优先从 /v1beta 找原生端点");
+Check(Mutter.Core.Services.WebSearchProbe.GeminiUrlCandidates(
+        "https://api.example.com/v1", "m1")
+        .SequenceEqual([
+            "https://api.example.com/v1beta/models/m1:generateContent",
+            "https://api.example.com/v1/models/m1:generateContent"
+        ]),
+    "以 /v1 结尾的中转先试 /v1beta 再试 /v1（部分网关原生端点挂 v1beta）");
+using var geminiDoc = JsonDocument.Parse("""{"usageMetadata":{"promptTokenCount":250},"candidates":[]}""");
+Check(Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(geminiDoc.RootElement) == 250,
+    "Gemini 原生 usageMetadata.promptTokenCount 可读出");
+Check(Mutter.Core.Services.WebSearchProbe.Cases.Any(c => c.Endpoint == "gemini" && c.Shape == "gemini_native"),
+    "矩阵含 Gemini 原生探测用例");
+
 if (logicOnly)
 {
     Console.WriteLine("\n--logic-only：跳过依赖数据库的第 4~6 段。");
@@ -521,6 +645,13 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
         "ProactiveChatLogs 建表成功");
     Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('GroupConfigs') WHERE name='AiProactiveEnabled'") == 1,
         "GroupConfigs.AiProactiveEnabled 列补齐");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatConfigs') WHERE name='MemoryInjectionEnabled'") == 1,
+        "ProactiveChatConfigs.MemoryInjectionEnabled 列补齐（全局记忆注入开关）");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('GroupConfigs') WHERE name='MemoryInjectionEnabled'") == 1,
+        "GroupConfigs.MemoryInjectionEnabled 列补齐（群级覆盖，可空 = 跟随全局）");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatLogs') WHERE name='MemoryCount'") == 1
+          && Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatLogs') WHERE name='MemoryPromptChars'") == 1,
+        "留痕表补上记忆条数与字符数列");
     Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_index_list('ProactiveChatLogs')") == 2, "留痕表两个索引就位");
     Check(Scalar(probe, "SELECT COUNT(*) FROM ChatMessages") == MessagesBefore, $"聊天历史未被迁移改动（{MessagesBefore} 条）");
     var legacyKept = ReadNumericGroupIds(probe);
@@ -635,15 +766,18 @@ using (var scope = sp.CreateScope())
     await pdb0.Database.ExecuteSqlRawAsync("DELETE FROM ProactiveChatConfigs");
     var initial = await repo.GetProactiveConfigAsync();
     Check(!initial.Enabled, "库中无配置行时默认关闭");
+    Check(initial.MemoryInjectionEnabled, "库中无配置行时记忆注入默认也是开（与上线时的行为一致）");
 
     await repo.SaveProactiveConfigAsync(new ProactiveChatConfig
     {
         Enabled = true, WindowSeconds = 3, ActivePerGroupPerMinute = 500, AllowActiveChannel = false,
-        MaxAttachedImages = 7, HistoryMaxMessages = 15, EvalMaxTokens = 1024
+        MaxAttachedImages = 7, HistoryMaxMessages = 15, EvalMaxTokens = 1024,
+        MemoryInjectionEnabled = false
     });
     var saved = await repo.GetProactiveConfigAsync();
     Check(saved.WindowSeconds == 15 && saved.ActivePerGroupPerMinute == 20, "保存时同样钳制到合法区间");
     Check(!saved.AllowActiveChannel, "只允许被动槽的开关能存住（过期即沉默）");
+    Check(!saved.MemoryInjectionEnabled, "全局记忆注入开关能关掉并读回（逐列映射没漏字段）");
     // 逐列手工映射最容易漏字段：写进去读不回来，面板就会"保存了但没生效"
     Check(saved.MaxAttachedImages == 7 && saved.HistoryMaxMessages == 15 && saved.EvalMaxTokens == 1024,
         $"择机自己的三个规模参数写读一致（附图 {saved.MaxAttachedImages} / 背景 {saved.HistoryMaxMessages} / 输出 {saved.EvalMaxTokens}）");
@@ -660,6 +794,17 @@ using (var scope = sp.CreateScope())
     Check(back!.AiProactiveEnabled, "群级参与位写读一致");
     oneGroup.AiProactiveEnabled = false;
     await repo.SaveGroupConfigAsync(oneGroup);
+
+    // 群级记忆注入是三态：false=本群单独停用、null=跟随全局。存成 false 和存成 null 必须能区分，
+    // 否则"跟随全局"这条语义会在往返里丢掉，全局一开就把单独停用的群也带上。
+    oneGroup.MemoryInjectionEnabled = false;
+    await repo.SaveGroupConfigAsync(oneGroup);
+    Check((await repo.GetGroupConfigAsync(oneGroup.GroupId))?.MemoryInjectionEnabled == false,
+        "群级记忆注入能单独关掉并读回");
+    oneGroup.MemoryInjectionEnabled = null;
+    await repo.SaveGroupConfigAsync(oneGroup);
+    Check((await repo.GetGroupConfigAsync(oneGroup.GroupId))?.MemoryInjectionEnabled is null,
+        "群级覆盖设回 null 表示跟随全局（不会被存成 false）");
 
     // 熔断复位：留痕表与配置回到关闭态
     await repo.SaveProactiveConfigAsync(new ProactiveChatConfig { Enabled = false });
@@ -882,10 +1027,13 @@ using (var scope = sp.CreateScope())
     var pdb = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     var repo = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
     var gateway = new NoopGateway();
-    var controller = new ProactiveController(pdb, repo, sp.GetRequiredService<IActiveMessageService>(), observe, gateway);
+    var memoryRepo = sp.GetRequiredService<IGroupMemoryRepository>();
+    var controller = new ProactiveController(pdb, repo, sp.GetRequiredService<IActiveMessageService>(), observe, gateway, memoryRepo);
 
     // Ok(...) 走 Result 而非 Value，两个口都得兜一下
     static object Payload<T>(ActionResult<T> r) => r.Value ?? ((OkObjectResult)r.Result!).Value!;
+    // 群记忆三个口返回的是裸 IActionResult，没有泛型 Result 可兜
+    static object OkPayload(IActionResult r) => ((OkObjectResult)r).Value!;
 
     await pdb.Database.ExecuteSqlRawAsync("DELETE FROM ProactiveChatLogs");
 
@@ -919,8 +1067,54 @@ using (var scope = sp.CreateScope())
     Check(zero.Contains("\"maxAttachedImages\":0") && zero.Contains("\"historyMaxMessages\":0"),
         "附图 0 与背景 0 都存得住（0 是合法选择，不能被当成未填而回退默认值）");
 
+    // 全局记忆注入开关必须穿过面板契约：前端关得掉，回读也拿得到生效值
+    var memOffJson = JsonSerializer.Serialize(Payload(await controller.UpdateConfig(
+        new ProactiveController.ProactiveConfigDto { Enabled = true, MemoryInjectionEnabled = false }, default)), wire);
+    Check(memOffJson.Contains("\"memoryInjectionEnabled\":false"), "全局记忆注入开关能关掉并经面板回读");
+    var memOnJson = JsonSerializer.Serialize(Payload(await controller.UpdateConfig(
+        new ProactiveController.ProactiveConfigDto { Enabled = true }, default)), wire);
+    Check(memOnJson.Contains("\"memoryInjectionEnabled\":true"), "不传该字段时沿用默认开（老前端不会把记忆关掉）");
+
+    // 群记忆面板契约：空壳、trim 落库、版本自增、截断、跨群隔离、清空
+    await pdb.Database.ExecuteSqlRawAsync("DELETE FROM GroupMemories");
+    const string memA = "TESTGROUP-MEMORY-A";
+    const string memB = "TESTGROUP-MEMORY-B";
+
+    var memMissing = JsonSerializer.Serialize(OkPayload(await controller.GetGroupMemory(memA, default)), wire);
+    Check(memMissing.Contains("\"summary\":\"\"") && memMissing.Contains("\"version\":0"),
+        "GET 没存过摘要的群回空壳而不是 404（面板打开编辑框不会整个失败）");
+
+    var memSaved = JsonSerializer.Serialize(OkPayload(await controller.PutGroupMemory(memA,
+        new ProactiveController.GroupMemoryDto { Summary = "  本群背景  " }, default)), wire);
+    Check(memSaved.Contains("\"summary\":\"本群背景\"") && memSaved.Contains("\"version\":1"),
+        "PUT 回读 trim 后的摘要，首次版本号为 1");
+    Check((await memoryRepo.GetAsync(memA))?.Summary == "本群背景", "摘要确实落库，不是只在响应里回显");
+
+    var memIsolated = JsonSerializer.Serialize(OkPayload(await controller.GetGroupMemory(memB, default)), wire);
+    Check(memIsolated.Contains("\"summary\":\"\""), "换一个群 ID 读不到别群的摘要（接口层不跨群泄露）");
+
+    var memLong = JsonSerializer.Serialize(OkPayload(await controller.PutGroupMemory(memA,
+        new ProactiveController.GroupMemoryDto { Summary = new string('长', 5000) }, default)), wire);
+    Check(memLong.Contains("\"version\":2") && (await memoryRepo.GetAsync(memA))?.Summary.Length == 4000,
+        "覆盖保存版本号自增，超长摘要按 4000 字截断后真的写进库");
+
+    var memBlank = JsonSerializer.Serialize(OkPayload(await controller.PutGroupMemory(memA,
+        new ProactiveController.GroupMemoryDto { Summary = "   " }, default)), wire);
+    Check(memBlank.Contains("\"summary\":\"\"") && memBlank.Contains("\"version\":0")
+          && await memoryRepo.GetAsync(memA) is null,
+        "PUT 空白摘要等于清空，不留一行像模像样的空记忆");
+
+    await controller.PutGroupMemory(memB, new ProactiveController.GroupMemoryDto { Summary = "别群背景" }, default);
+    var memCleared = JsonSerializer.Serialize(OkPayload(await controller.DeleteGroupMemory(memB, default)), wire);
+    Check(memCleared.Contains("群记忆已清空") && await memoryRepo.GetAsync(memB) is null, "DELETE 清空指定群的摘要");
+    Check(await controller.GetGroupMemory("   ", default) is BadRequestObjectResult,
+        "空白群 ID 返回 400，而不是写出一行无主摘要");
+    Check(await controller.PutGroupMemory(memB, new ProactiveController.GroupMemoryDto { Summary = null }, default)
+          is OkObjectResult,
+        "PUT 缺 summary 字段走清空路径而不是 500");
+
     pdb.ProactiveChatLogs.AddRange(
-        new ProactiveChatLogEntity { GroupId = "G1", EvaluatedAt = DateTime.UtcNow, Outcome = ProactiveOutcomes.SentPassive, MessageCount = 4, ImageCount = 2, Line = "今晚吃拉面" },
+        new ProactiveChatLogEntity { GroupId = "G1", EvaluatedAt = DateTime.UtcNow, Outcome = ProactiveOutcomes.SentPassive, MessageCount = 4, ImageCount = 2, MemoryCount = 1, MemoryPromptChars = 137, Line = "今晚吃拉面" },
         new ProactiveChatLogEntity { GroupId = "G1", EvaluatedAt = DateTime.UtcNow, Outcome = ProactiveOutcomes.SkippedAiDeclined, MessageCount = 3 });
     await pdb.SaveChangesAsync();
 
@@ -933,6 +1127,10 @@ using (var scope = sp.CreateScope())
     Check(sentJson.Contains("今晚吃拉面"), "已插话记录带出原话");
     Check(allJson.Contains("\"imageCount\":2") && allJson.Contains("\"imageCount\":0"),
         "留痕把这次到底看了几张图带给面板");
+    Check(allJson.Contains("\"memoryCount\":1") && allJson.Contains("\"memoryPromptChars\":137"),
+        "留痕把这次判定有没有用群记忆、用了多少字带给面板");
+    Check(allJson.Contains("\"memoryCount\":0"),
+        "没带记忆的那次如实记 0，不会跟着上一条串味");
 
     var routeGroup = (await repo.GetAllGroupConfigsAsync()).First();
     routeGroup.IsEnabled = true;
@@ -965,6 +1163,9 @@ using (var scope = sp.CreateScope())
         $"状态里的参与群数与群配置一致（{expectedParticipating}）");
     Check(stJson.Contains("\"todaySent\":1") && stJson.Contains("\"todayEvaluations\":2"),
         "今日按结论统计取的是北京日界内的留痕");
+    Check(stJson.Contains("\"todayMemoryInjections\":1"),
+        "状态里给出今日带记忆的判定次数（否则记忆有没有在工作只能翻代码）");
+    Check(stJson.Contains("\"memoryInjectionEnabled\":true"), "状态一并回读全局记忆注入开关");
     Check(stJson.Contains("\"quotas\":[") && stJson.Contains("\"minuteQuota\":") && stJson.Contains("\"usedToday\":"),
         "每群主动消息余量随状态返回（数值取自当前配置，不断死具体数字）");
     Check(stJson.Contains("\"pendingWindows\":[]"), "窗口取空后状态不再报待评估");
@@ -1056,6 +1257,7 @@ file sealed class NoopNotification : INotificationService
     public Task NotifyConnectionStatusAsync(bool isConnected, string info) => Task.CompletedTask;
     public Task NotifyAiResponseStartedAsync(string? groupId, string senderName) => Task.CompletedTask;
     public Task NotifyAiResponseCompletedAsync(object responseDto) => Task.CompletedTask;
+    public Task NotifyProactiveEvaluatedAsync(object evaluationDto) => Task.CompletedTask;
 }
 
 file sealed class ScriptedAiChatService : IAiChatService

@@ -6,4 +6,5 @@ public interface INotificationService
     Task NotifyConnectionStatusAsync(bool isConnected, string info);
     Task NotifyAiResponseStartedAsync(string? groupId, string senderName);
     Task NotifyAiResponseCompletedAsync(object responseDto);
+    Task NotifyProactiveEvaluatedAsync(object evaluationDto);
 }

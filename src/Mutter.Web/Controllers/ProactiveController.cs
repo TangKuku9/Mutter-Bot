@@ -23,19 +23,71 @@ public class ProactiveController : ControllerBase
     private readonly IActiveMessageService _activeMessage;
     private readonly ProactiveObserveService _observe;
     private readonly IQqGatewayConnection _gateway;
+    private readonly IGroupMemoryRepository _memoryRepo;
 
     public ProactiveController(
         AppDbContext db,
         IConfigRepository configRepo,
         IActiveMessageService activeMessage,
         ProactiveObserveService observe,
-        IQqGatewayConnection gateway)
+        IQqGatewayConnection gateway,
+        IGroupMemoryRepository memoryRepo)
     {
         _db = db;
         _configRepo = configRepo;
         _activeMessage = activeMessage;
         _observe = observe;
         _gateway = gateway;
+        _memoryRepo = memoryRepo;
+    }
+
+    private static string? NormalizeGroupId(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    /// <summary>没存过摘要时的空壳：面板拿到它照样能渲染，不必处理 404。</summary>
+    private static Mutter.Core.Models.GroupMemory EmptyMemory(string groupId) => new()
+    {
+        GroupId = groupId, Summary = string.Empty, UpdatedAt = DateTime.MinValue, Version = 0
+    };
+
+    public sealed class GroupMemoryDto
+    {
+        public string? Summary { get; set; }
+    }
+
+    [HttpGet("groups/{groupId}/memory")]
+    public async Task<IActionResult> GetGroupMemory(string groupId, CancellationToken ct)
+    {
+        var id = NormalizeGroupId(groupId);
+        if (id is null) return BadRequest(new { error = "缺少群 ID" });
+        var memory = await _memoryRepo.GetAsync(id, ct);
+        return Ok(memory ?? EmptyMemory(id));
+    }
+
+    [HttpPut("groups/{groupId}/memory")]
+    public async Task<IActionResult> PutGroupMemory(string groupId, [FromBody] GroupMemoryDto dto, CancellationToken ct)
+    {
+        var id = NormalizeGroupId(groupId);
+        if (id is null) return BadRequest(new { error = "缺少群 ID" });
+
+        // 空摘要等于清空：面板把内容删干净就该回到"这群没有记忆"，
+        // 而不是留一行 Summary 为空、但 UpdatedAt/Version 看着像模像样的空记忆。
+        if (string.IsNullOrWhiteSpace(dto.Summary))
+        {
+            await _memoryRepo.DeleteAsync(id, ct);
+            return Ok(EmptyMemory(id));
+        }
+
+        var memory = await _memoryRepo.SaveAsync(id, dto.Summary, ct);
+        return Ok(memory);
+    }
+
+    [HttpDelete("groups/{groupId}/memory")]
+    public async Task<IActionResult> DeleteGroupMemory(string groupId, CancellationToken ct)
+    {
+        var id = NormalizeGroupId(groupId);
+        if (id is null) return BadRequest(new { error = "缺少群 ID" });
+        await _memoryRepo.DeleteAsync(id, ct);
+        return Ok(new { message = "群记忆已清空", GroupId = id });
     }
 
     public class ProactiveConfigDto
@@ -65,6 +117,9 @@ public class ProactiveController : ControllerBase
 
         /// <summary>附图张数上限，供面板对齐输入框。</summary>
         public int CeilingAttachedImages { get; set; } = ProactiveChatConfig.CeilingAttachedImages;
+
+        /// <summary>是否把群记忆注入择机判定（群级可覆盖）。</summary>
+        public bool MemoryInjectionEnabled { get; set; } = true;
     }
 
     /// <summary>当前配置（含官方上限，供表单约束）。</summary>
@@ -96,7 +151,8 @@ public class ProactiveController : ControllerBase
             AllowActiveChannel = dto.AllowActiveChannel,
             ActivePerGroupPerMinute = dto.ActivePerGroupPerMinute,
             ActivePerGroupPerDay = dto.ActivePerGroupPerDay,
-            ActivePerAccountPerMinute = dto.ActivePerAccountPerMinute
+            ActivePerAccountPerMinute = dto.ActivePerAccountPerMinute,
+            MemoryInjectionEnabled = dto.MemoryInjectionEnabled
         };
 
         await _configRepo.SaveProactiveConfigAsync(config, ct);
@@ -138,6 +194,8 @@ public class ProactiveController : ControllerBase
             l.Outcome,
             l.ShouldSpeak,
             l.ImageCount,
+            l.MemoryCount,
+            l.MemoryPromptChars,
             l.Topic,
             l.Line,
             l.Reason,
@@ -168,6 +226,11 @@ public class ProactiveController : ControllerBase
             .Where(g => g.AiProactiveEnabled && g.IsEnabled)
             .Select(g => g.GroupId)
             .ToListAsync(ct);
+
+        // 今天有多少次判定真的带了群记忆。留痕里已经有每次的记录，这里给一个一眼能看的数，
+        // 否则"记忆到底有没有在工作"只能去翻日志或读代码。
+        var memoryInjectionsToday = await _db.ProactiveChatLogs.AsNoTracking()
+            .CountAsync(l => l.EvaluatedAt >= todayUtcStart && l.MemoryCount > 0, ct);
 
         var groupNames = await _db.KnownGroups.AsNoTracking()
             .ToDictionaryAsync(g => g.GroupOpenId, g => g.Name, ct);
@@ -207,13 +270,20 @@ public class ProactiveController : ControllerBase
             DeliveryHint = hint,
             config.Enabled,
             config.AllowActiveChannel,
+            config.MemoryInjectionEnabled,
+            TodayMemoryInjections = memoryInjectionsToday,
             ParticipatingGroups = participating.Count,
             TodayByOutcome = sinceRows,
             TodaySent = sinceRows.Where(r => SentOutcomes.Contains(r.Outcome)).Sum(r => r.Count),
             TodayEvaluations = sinceRows.Sum(r => r.Count),
             Quotas = quotas,
             PendingWindows = _observe.PendingWindows()
-                .Select(p => new { GroupId = p.GroupId, p.Pending })
+                .Select(p => new
+                {
+                    GroupId = p.GroupId,
+                    Name = groupNames.TryGetValue(p.GroupId, out var pendingName) ? pendingName : null,
+                    p.Pending
+                })
         });
     }
 
@@ -235,6 +305,7 @@ public class ProactiveController : ControllerBase
         ActivePerGroupPerMinute = c.ActivePerGroupPerMinute,
         ActivePerGroupPerDay = c.ActivePerGroupPerDay,
         ActivePerAccountPerMinute = c.ActivePerAccountPerMinute,
+        MemoryInjectionEnabled = c.MemoryInjectionEnabled,
         UpdatedAt = c.UpdatedAt
     };
 }

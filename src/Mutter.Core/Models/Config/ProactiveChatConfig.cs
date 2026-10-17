@@ -85,6 +85,13 @@ public class ProactiveChatConfig
     /// <summary>真主动消息：账号维度每分钟上限（不超官方 60）。</summary>
     public int ActivePerAccountPerMinute { get; set; } = 20;
 
+    /// <summary>
+    /// 是否把群记忆注入择机判定提示词。
+    /// 默认开：群记忆已经上线，改成默认关等于静默改变现有群的行为。
+    /// 关掉只暂停注入，摘要在库里原样保留（要连内容一起删就用面板的「清空」）。
+    /// </summary>
+    public bool MemoryInjectionEnabled { get; set; } = true;
+
     public DateTime UpdatedAt { get; set; }
 
     /// <summary>
