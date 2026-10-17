@@ -1164,6 +1164,7 @@ file sealed class NoopNotification : INotificationService
     public Task NotifyConnectionStatusAsync(bool isConnected, string info) => Task.CompletedTask;
     public Task NotifyAiResponseStartedAsync(string? groupId, string senderName) => Task.CompletedTask;
     public Task NotifyAiResponseCompletedAsync(object responseDto) => Task.CompletedTask;
+    public Task NotifyProactiveEvaluatedAsync(object evaluationDto) => Task.CompletedTask;
 }
 
 file sealed class ScriptedAiChatService : IAiChatService

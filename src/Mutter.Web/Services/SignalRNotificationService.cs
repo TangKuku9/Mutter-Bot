@@ -32,4 +32,9 @@ public class SignalRNotificationService : INotificationService
     {
         await _hubContext.Clients.All.SendAsync("AiResponseCompleted", responseDto);
     }
+
+    public async Task NotifyProactiveEvaluatedAsync(object evaluationDto)
+    {
+        await _hubContext.Clients.All.SendAsync("ProactiveEvaluated", evaluationDto);
+    }
 }
