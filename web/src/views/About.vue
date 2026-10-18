@@ -50,10 +50,58 @@
           </el-descriptions>
 
           <div class="quick-start">
-            <div class="quick-title">快速上手</div>
-            <div v-for="(step, index) in quickStart" :key="step" class="quick-step">
-              <span class="quick-index">{{ index + 1 }}</span>
-              <span>{{ step }}</span>
+            <div class="quick-steps">
+              <div class="quick-title">快速上手</div>
+              <div v-for="(step, index) in quickStart" :key="step" class="quick-step">
+                <span class="quick-index">{{ index + 1 }}</span>
+                <span>{{ step }}</span>
+              </div>
+            </div>
+            <div class="update-check">
+              <template v-if="updateState.type === 'install'">
+                <el-tooltip
+                  :content="`v${update.stagedVersion || update.latestVersion} 已下载，点击确认安装并重启`"
+                  placement="top"
+                >
+                  <el-link type="success" class="update-action" @click="requestInstall">
+                    {{ updateState.text }}
+                    <el-icon><Download /></el-icon>
+                  </el-link>
+                </el-tooltip>
+                <span v-if="update.applyError" class="update-feedback error">更新失败：{{ update.applyError }}</span>
+              </template>
+              <el-tooltip
+                v-else-if="updateState.type === 'update'"
+                :content="`将下载 v${update.latestVersion}，下载完成后可选择是否安装`"
+                placement="top"
+              >
+                <el-link type="success" class="update-action" @click="downloadUpdate">
+                  {{ updateState.text }}
+                  <el-icon><Download /></el-icon>
+                </el-link>
+              </el-tooltip>
+              <div v-else-if="updateState.type === 'downloading'" class="update-progress">
+                <el-progress :percentage="update.progress" :stroke-width="6" :show-text="false" />
+                <span class="update-feedback downloading">{{ updateState.text }}</span>
+              </div>
+              <el-tooltip
+                v-else-if="updateState.type === 'manual'"
+                :content="update.selfUpdateReason || '当前环境请前往 GitHub 手动更新'"
+                placement="top"
+              >
+                <el-link type="warning" class="update-action" @click="openLatestRelease">
+                  {{ updateState.text }}
+                  <el-icon><ArrowRight /></el-icon>
+                </el-link>
+              </el-tooltip>
+              <span v-else class="update-feedback" :class="updateState.type">{{ updateState.text }}</span>
+              <el-button
+                :loading="update.checking"
+                :disabled="update.downloading || update.installing || update.restarting"
+                @click="checkUpdate"
+              >
+                检查更新
+              </el-button>
             </div>
           </div>
         </el-card>
@@ -165,8 +213,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
-import { ChatDotRound, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { ElMessageBox } from 'element-plus'
+import { ArrowRight, ChatDotRound, Download, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
 import { appVersion as version } from '../version'
 import { panelSettings, colorPresets, resetPanelSettings } from '../panelSettings'
 import api from '../api'
@@ -219,11 +268,225 @@ const loadStatus = async () => {
 
 const openLink = (url) => window.open(url, '_blank', 'noopener,noreferrer')
 
+const update = ref({
+  checking: true,
+  downloading: false,
+  installing: false,
+  restarting: false,
+  staged: false,
+  stagedVersion: '',
+  progress: 0,
+  progressPhase: '',
+  currentVersion: '',
+  latestVersion: '',
+  hasUpdate: false,
+  canSelfUpdate: false,
+  selfUpdateReason: '',
+  releaseUrl: '',
+  error: '',
+  applyError: ''
+})
+let updateTimer = null
+let progressTimer = null
+
+const updateState = computed(() => {
+  if (update.value.restarting) return { type: 'restarting', text: '更新完成，服务正在重启…' }
+  if (update.value.installing) return { type: 'installing', text: '正在安装，服务即将重启…' }
+  if (update.value.downloading) {
+    const text = update.value.progressPhase === 'extracting'
+      ? '正在解压更新包…'
+      : update.value.progressPhase === 'verifying'
+        ? '正在校验更新包…'
+        : `正在下载更新… ${update.value.progress}%`
+    return { type: 'downloading', text }
+  }
+  if (update.value.checking) return { type: 'checking', text: '正在检查…' }
+  if (update.value.staged) return { type: 'install', text: '立即安装' }
+  if (update.value.applyError) return { type: 'error', text: `更新失败：${update.value.applyError}` }
+  if (update.value.error) return { type: 'error', text: `检查失败：${update.value.error}` }
+  if (update.value.hasUpdate) {
+    return update.value.canSelfUpdate
+      ? { type: 'update', text: '立即更新' }
+      : { type: 'manual', text: '手动更新' }
+  }
+  return { type: 'latest', text: '已是最新' }
+})
+
+const checkUpdate = async () => {
+  if (update.value.downloading || update.value.installing || update.value.restarting) return
+  update.value = { ...update.value, checking: true, error: '', applyError: '' }
+  const startedAt = Date.now()
+  let patch
+  try {
+    const { data } = await api.get('/update', { timeout: 15000, skipErrorMessage: true })
+    patch = {
+      currentVersion: data.currentVersion || '',
+      latestVersion: data.latestVersion || '',
+      hasUpdate: Boolean(data.hasUpdate),
+      canSelfUpdate: Boolean(data.canSelfUpdate),
+      selfUpdateReason: data.selfUpdateReason || '',
+      staged: Boolean(data.staged),
+      stagedVersion: data.stagedVersion || '',
+      releaseUrl: data.releaseUrl || `${repoUrl}/releases/latest`,
+      error: data.error || ''
+    }
+  } catch (err) {
+    patch = {
+      error: err?.response?.data?.error || '无法检查更新，请稍后重试'
+    }
+  }
+  // 后端有 10 分钟缓存，检查常常瞬间返回；保留最短可见时长，让“正在检查…”能被看到。
+  const remaining = 1000 - (Date.now() - startedAt)
+  if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining))
+  update.value = { ...update.value, checking: false, ...patch }
+}
+
+const openLatestRelease = () => {
+  openLink(update.value.releaseUrl || `${repoUrl}/releases/latest`)
+}
+
+const waitForRestart = async () => {
+  for (let i = 0; i < 90; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    try {
+      const { data } = await api.get('/auth/status', { timeout: 3000, skipErrorMessage: true })
+      // 会话在内存中，重启后必然失效；仍为已登录说明旧进程还没退出，继续等。
+      if (data?.authenticated) continue
+      location.href = `/login.html?return=${encodeURIComponent('/#/about')}`
+      return
+    } catch {
+      // 服务正在重启，继续等待
+    }
+  }
+  update.value = { ...update.value, restarting: false, applyError: '服务重启超时，请手动刷新页面' }
+}
+
+const installUpdate = async () => {
+  if (update.value.installing || update.value.restarting) return
+  update.value = { ...update.value, installing: true, applyError: '' }
+  try {
+    const { data } = await api.post('/update/install', null, {
+      timeout: 60000,
+      skipErrorMessage: true
+    })
+    update.value = {
+      ...update.value,
+      installing: false,
+      restarting: true,
+      staged: false,
+      latestVersion: data.version || update.value.latestVersion
+    }
+    waitForRestart()
+  } catch (err) {
+    update.value = {
+      ...update.value,
+      installing: false,
+      applyError: err?.response?.data?.error || '请稍后重试'
+    }
+  }
+}
+
+const requestInstall = async () => {
+  if (update.value.downloading || update.value.installing || update.value.restarting) return
+  if (!update.value.staged) {
+    await downloadUpdate()
+    return
+  }
+  const version = update.value.stagedVersion || update.value.latestVersion
+  try {
+    await ElMessageBox.confirm(
+      `Mutter v${version} 已下载并通过校验，是否立即安装并重启服务？重启期间面板会短暂不可用，完成后需要重新登录。`,
+      '更新已就绪',
+      {
+        confirmButtonText: '立即安装并重启',
+        cancelButtonText: '稍后',
+        type: 'warning'
+      }
+    )
+  } catch {
+    // 用户选择稍后，保留“立即安装”入口
+    return
+  }
+  await installUpdate()
+}
+
+const stopProgressPolling = () => {
+  if (progressTimer) {
+    clearInterval(progressTimer)
+    progressTimer = null
+  }
+}
+
+const startProgressPolling = () => {
+  stopProgressPolling()
+  progressTimer = setInterval(async () => {
+    if (!update.value.downloading) return
+    try {
+      const { data } = await api.get('/update/progress', { timeout: 3000, skipErrorMessage: true })
+      if (!update.value.downloading) return
+      update.value = {
+        ...update.value,
+        progress: Number(data?.percent) || 0,
+        progressPhase: data?.phase || ''
+      }
+    } catch {
+      // 进度查询失败不打断下载
+    }
+  }, 400)
+}
+
+const downloadUpdate = async () => {
+  if (update.value.downloading || update.value.installing || update.value.restarting) return
+  if (update.value.staged) {
+    await requestInstall()
+    return
+  }
+  if (!update.value.hasUpdate) return
+  update.value = {
+    ...update.value,
+    downloading: true,
+    progress: 0,
+    progressPhase: 'downloading',
+    error: '',
+    applyError: ''
+  }
+  startProgressPolling()
+  try {
+    const { data } = await api.post('/update/stage', null, {
+      timeout: 600000,
+      skipErrorMessage: true
+    })
+    stopProgressPolling()
+    update.value = {
+      ...update.value,
+      downloading: false,
+      progress: 100,
+      progressPhase: 'done',
+      staged: true,
+      stagedVersion: data.version || update.value.latestVersion
+    }
+    await requestInstall()
+  } catch (err) {
+    stopProgressPolling()
+    update.value = {
+      ...update.value,
+      downloading: false,
+      applyError: err?.response?.data?.error || '请稍后重试'
+    }
+  }
+}
+
 onMounted(() => {
   loadStatus()
+  checkUpdate()
   timer = setInterval(loadStatus, 10000)
+  updateTimer = setInterval(checkUpdate, 30 * 60 * 1000)
 })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => {
+  clearInterval(timer)
+  clearInterval(updateTimer)
+  stopProgressPolling()
+})
 </script>
 
 <style scoped>
@@ -254,7 +517,12 @@ html.dark .hero-card {
 .card-head { display: flex; justify-content: space-between; align-items: center; }
 .fill { height: 100%; }
 .muted { color: var(--el-text-color-secondary); }
-.quick-start { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--el-border-color-lighter); }
+.quick-start {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end;
+  gap: 16px 24px; margin-top: 18px; padding-top: 14px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+.quick-steps { flex: 1 1 320px; min-width: 0; }
 .quick-title { margin-bottom: 10px; font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); }
 .quick-step { display: flex; gap: 10px; margin-bottom: 8px; font-size: 13px; line-height: 1.6; color: var(--el-text-color-regular); }
 .quick-step:last-child { margin-bottom: 0; }
@@ -262,6 +530,18 @@ html.dark .hero-card {
   flex: 0 0 20px; height: 20px; border-radius: 50%; line-height: 20px; text-align: center;
   font-size: 12px; color: var(--el-color-primary); background: var(--el-color-primary-light-9);
 }
+.update-check {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  flex: 0 0 auto; margin-left: auto;
+}
+.update-feedback { font-size: 12px; line-height: 1.5; max-width: 280px; text-align: right; }
+.update-feedback.checking, .update-feedback.latest { color: var(--el-text-color-secondary); }
+.update-feedback.downloading, .update-feedback.installing, .update-feedback.restarting { color: var(--el-color-primary); }
+.update-feedback.error { color: var(--el-color-danger); }
+.update-action { font-size: 13px; font-weight: 600; }
+.update-action .el-icon { margin-left: 2px; }
+.update-progress { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; width: 200px; }
+.update-progress .el-progress { width: 100%; }
 .setting-row {
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
   padding: 12px 0; border-bottom: 1px dashed var(--el-border-color-lighter);

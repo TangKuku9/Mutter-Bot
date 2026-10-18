@@ -28,6 +28,7 @@ public sealed class HostedServiceManager
     private WebApplication? _webApp;
     private CancellationTokenSource? _webCts;
     private LiveLogBus? _liveLogBus;
+    private UpdateApplier? _updateApplier;
 
     /// <summary>实时日志总线，供 TUI 订阅显示</summary>
     public LiveLogBus? LiveLogBus => _liveLogBus;
@@ -79,6 +80,7 @@ public sealed class HostedServiceManager
         builder.Services.AddSingleton<PanelLoginGuard>();
 
         _webApp = builder.Build();
+        _updateApplier = _webApp.Services.GetService<UpdateApplier>();
         _webApp.UseMiddleware<ApiAuthMiddleware>();
         _webApp.UseCors();
         _webApp.UseDefaultFiles();
@@ -189,5 +191,11 @@ public sealed class HostedServiceManager
             await _webApp.DisposeAsync();
 
         Console.WriteLine("[Host] All services stopped");
+    }
+
+    /// <summary>在 Web 宿主停止后、进程退出前调用；仅 Linux 会实际替换文件。</summary>
+    public void ApplyPendingUpdateAfterShutdown()
+    {
+        _updateApplier?.ApplyPendingAfterShutdown(AppContext.BaseDirectory);
     }
 }
