@@ -26,6 +26,11 @@ public static class WebServiceExtensions
         // 注册 SignalR 通知服务
         services.AddSingleton<INotificationService, SignalRNotificationService>();
 
+        // 自更新：检查最新正式版、下载校验并替换程序文件
+        services.AddHttpClient();
+        services.AddSingleton<UpdateService>();
+        services.AddSingleton<UpdateApplier>();
+
         return services;
     }
 

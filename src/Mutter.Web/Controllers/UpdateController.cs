@@ -1,10 +1,7 @@
-using System.Net;
-using System.Net.Http.Json;
-using System.Reflection;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
+using Mutter.Core.Services;
 using Mutter.Web.Models;
+using Mutter.Web.Services;
 
 namespace Mutter.Web.Controllers;
 
@@ -12,140 +9,75 @@ namespace Mutter.Web.Controllers;
 [Route("api/[controller]")]
 public class UpdateController : ControllerBase
 {
-    private const string LatestReleaseApi = "https://api.github.com/repos/TangKuku9/Mutter-Bot/releases/latest";
-    private const string LatestReleasePage = "https://github.com/TangKuku9/Mutter-Bot/releases/latest";
-    private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(10);
-    private static readonly SemaphoreSlim FetchLock = new(1, 1);
-    private static CachedUpdate? _cache;
+    private readonly UpdateService _updateService;
+    private readonly UpdateApplier _applier;
+    private readonly ILogger<UpdateController> _logger;
 
-    private readonly IHttpClientFactory _httpClientFactory;
-
-    public UpdateController(IHttpClientFactory httpClientFactory)
+    public UpdateController(
+        UpdateService updateService,
+        UpdateApplier applier,
+        ILogger<UpdateController> logger)
     {
-        _httpClientFactory = httpClientFactory;
+        _updateService = updateService;
+        _applier = applier;
+        _logger = logger;
     }
 
-    /// <summary>
-    /// GitHub 的 /releases/latest 只返回已发布、非预发布的正式版，对应 main 的稳定发布基线。
-    /// 结果缓存 10 分钟，避免面板自动检查触发未认证 API 的限流。
-    /// </summary>
     [HttpGet]
     public async Task<ActionResult<UpdateInfoDto>> GetStatus(CancellationToken ct)
     {
-        var cached = _cache;
-        if (cached is not null && DateTime.UtcNow - cached.FetchedAt < CacheDuration)
-            return Ok(cached.Info);
+        var check = await _updateService.GetStatusAsync(ct);
+        return Ok(check.Info);
+    }
 
-        await FetchLock.WaitAsync(ct);
+    /// <summary>下载、校验并暂存最新正式版，随后请求宿主重启；Windows 由 helper 完成替换。</summary>
+    [HttpPost("apply")]
+    public async Task<ActionResult<UpdateApplyResultDto>> Apply()
+    {
+        if (!_applier.TryBegin())
+            return Conflict(new { error = "已有更新正在进行" });
+
+        var restarting = false;
         try
         {
-            cached = _cache;
-            if (cached is not null && DateTime.UtcNow - cached.FetchedAt < CacheDuration)
-                return Ok(cached.Info);
+            var check = await _updateService.GetStatusAsync(CancellationToken.None);
+            if (check.Info.Error is not null)
+                return BadRequest(new { error = check.Info.Error });
+            if (!check.Info.HasUpdate)
+                return BadRequest(new { error = "当前已是最新版本" });
+            if (!check.Info.CanSelfUpdate || check.Plan is null)
+                return BadRequest(new { error = check.Info.SelfUpdateReason ?? "当前环境不支持一键更新" });
 
-            var info = await FetchLatestAsync(ct);
-            if (info.Error is null)
-                _cache = new CachedUpdate(info, DateTime.UtcNow);
+            var appDir = AppContext.BaseDirectory;
+            var staged = await _applier.StageAsync(check.Plan, appDir, CancellationToken.None);
+            if (OperatingSystem.IsWindows())
+                _applier.PrepareWindowsHelper(check.Plan, appDir, staged);
 
-            return Ok(info);
+            restarting = true;
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(1500);
+                AppLifecycle.RequestRestart();
+            });
+
+            return Ok(new UpdateApplyResultDto
+            {
+                Version = check.Plan.Version,
+                Restarting = true
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "应用更新失败");
+            return StatusCode(
+                StatusCodes.Status500InternalServerError,
+                new { error = ex.Message });
         }
         finally
         {
-            FetchLock.Release();
+            // 成功暂存后保持忙碌直到进程退出，避免重启窗口内重复触发第二次更新。
+            if (!restarting)
+                _applier.End();
         }
-    }
-
-    private async Task<UpdateInfoDto> FetchLatestAsync(CancellationToken ct)
-    {
-        var currentVersion = Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown";
-        var info = new UpdateInfoDto
-        {
-            CurrentVersion = currentVersion,
-            ReleaseUrl = LatestReleasePage,
-            CheckedAt = DateTimeOffset.UtcNow
-        };
-
-        try
-        {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(5));
-
-            var client = _httpClientFactory.CreateClient();
-            using var request = new HttpRequestMessage(HttpMethod.Get, LatestReleaseApi);
-            request.Headers.UserAgent.ParseAdd($"Mutter-Bot/{currentVersion}");
-            request.Headers.Accept.ParseAdd("application/vnd.github+json");
-            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
-
-            using var response = await client.SendAsync(request, timeout.Token);
-            if (!response.IsSuccessStatusCode)
-            {
-                info.Error = response.StatusCode switch
-                {
-                    HttpStatusCode.Forbidden => "GitHub API 限流，请稍后再试",
-                    HttpStatusCode.NotFound => "未找到正式 Release",
-                    _ => $"GitHub API 返回 {(int)response.StatusCode}"
-                };
-                return info;
-            }
-
-            var release = await response.Content.ReadFromJsonAsync<GitHubRelease>(timeout.Token);
-            if (release is null || string.IsNullOrWhiteSpace(release.TagName))
-            {
-                info.Error = "GitHub 返回的版本信息不完整";
-                return info;
-            }
-
-            info.LatestVersion = release.TagName.Trim().TrimStart('v', 'V');
-            info.ReleaseUrl = string.IsNullOrWhiteSpace(release.HtmlUrl) ? LatestReleasePage : release.HtmlUrl;
-
-            var latest = ParseVersion(info.LatestVersion);
-            var running = ParseVersion(currentVersion);
-            if (latest is null || running is null)
-            {
-                info.Error = $"无法解析版本号：{info.LatestVersion}";
-                return info;
-            }
-
-            info.HasUpdate = latest > running;
-            info.CheckedAt = DateTimeOffset.UtcNow;
-            return info;
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            info.Error = "连接 GitHub 超时";
-            return info;
-        }
-        catch (HttpRequestException)
-        {
-            info.Error = "无法连接 GitHub";
-            return info;
-        }
-        catch (JsonException)
-        {
-            info.Error = "GitHub 响应格式异常";
-            return info;
-        }
-        catch (NotSupportedException)
-        {
-            info.Error = "GitHub 响应格式异常";
-            return info;
-        }
-    }
-
-    private static Version? ParseVersion(string value)
-    {
-        var core = value.Trim().TrimStart('v', 'V').Split('-', '+')[0];
-        return Version.TryParse(core, out var parsed) ? parsed : null;
-    }
-
-    private sealed record CachedUpdate(UpdateInfoDto Info, DateTime FetchedAt);
-
-    private sealed class GitHubRelease
-    {
-        [JsonPropertyName("tag_name")]
-        public string TagName { get; set; } = string.Empty;
-
-        [JsonPropertyName("html_url")]
-        public string HtmlUrl { get; set; } = string.Empty;
     }
 }

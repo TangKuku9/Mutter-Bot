@@ -27,4 +27,11 @@
     <Content Include="..\Mutter.Web\appsettings.Development.json" Link="appsettings.Development.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\Mutter.Web\appsettings.Development.json')" />
   </ItemGroup>
 
+  <!-- 发布标记：仅 publish 产物包含，面板据此拒绝在开发构建目录执行一键更新。 -->
+  <Target Name="WritePublishMarker" AfterTargets="Publish">
+    <WriteLinesToFile File="$(PublishDir)install.json"
+                      Lines="{&quot;published&quot;:true,&quot;version&quot;:&quot;$(Version)&quot;}"
+                      Overwrite="true" />
+  </Target>
+
 </Project>

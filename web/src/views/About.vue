@@ -58,17 +58,34 @@
               </div>
             </div>
             <div class="update-check">
-              <el-link
+              <el-tooltip
                 v-if="updateState.type === 'update'"
-                type="success"
-                class="update-action"
-                @click="openLatestRelease"
+                :content="`将安装 v${update.latestVersion}，服务会自动重启`"
+                placement="top"
               >
-                {{ updateState.text }}
-                <el-icon><ArrowRight /></el-icon>
-              </el-link>
+                <el-link type="success" class="update-action" @click="applyUpdate">
+                  {{ updateState.text }}
+                  <el-icon><Download /></el-icon>
+                </el-link>
+              </el-tooltip>
+              <el-tooltip
+                v-else-if="updateState.type === 'manual'"
+                :content="update.selfUpdateReason || '当前环境请前往 GitHub 手动更新'"
+                placement="top"
+              >
+                <el-link type="warning" class="update-action" @click="openLatestRelease">
+                  {{ updateState.text }}
+                  <el-icon><ArrowRight /></el-icon>
+                </el-link>
+              </el-tooltip>
               <span v-else class="update-feedback" :class="updateState.type">{{ updateState.text }}</span>
-              <el-button :loading="update.checking" @click="checkUpdate">检查更新</el-button>
+              <el-button
+                :loading="update.checking"
+                :disabled="update.applying || update.restarting"
+                @click="checkUpdate"
+              >
+                检查更新
+              </el-button>
             </div>
           </div>
         </el-card>
@@ -181,7 +198,7 @@
 
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue'
-import { ArrowRight, ChatDotRound, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
+import { ArrowRight, ChatDotRound, Download, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
 import { appVersion as version } from '../version'
 import { panelSettings, colorPresets, resetPanelSettings } from '../panelSettings'
 import api from '../api'
@@ -236,30 +253,46 @@ const openLink = (url) => window.open(url, '_blank', 'noopener,noreferrer')
 
 const update = ref({
   checking: true,
+  applying: false,
+  restarting: false,
   currentVersion: '',
   latestVersion: '',
   hasUpdate: false,
+  canSelfUpdate: false,
+  selfUpdateReason: '',
   releaseUrl: '',
-  error: ''
+  error: '',
+  applyError: ''
 })
 let updateTimer = null
 
 const updateState = computed(() => {
+  if (update.value.restarting) return { type: 'restarting', text: '更新完成，服务正在重启…' }
+  if (update.value.applying) return { type: 'applying', text: '正在下载并安装更新…' }
   if (update.value.checking) return { type: 'checking', text: '正在检查…' }
+  if (update.value.applyError) return { type: 'error', text: `更新失败：${update.value.applyError}` }
   if (update.value.error) return { type: 'error', text: `检查失败：${update.value.error}` }
-  if (update.value.hasUpdate) return { type: 'update', text: '立即更新' }
+  if (update.value.hasUpdate) {
+    return update.value.canSelfUpdate
+      ? { type: 'update', text: '立即更新' }
+      : { type: 'manual', text: '手动更新' }
+  }
   return { type: 'latest', text: '已是最新' }
 })
 
 const checkUpdate = async () => {
-  update.value = { ...update.value, checking: true, error: '' }
+  if (update.value.applying || update.value.restarting) return
+  update.value = { ...update.value, checking: true, error: '', applyError: '' }
   try {
     const { data } = await api.get('/update', { timeout: 15000, skipErrorMessage: true })
     update.value = {
+      ...update.value,
       checking: false,
       currentVersion: data.currentVersion || '',
       latestVersion: data.latestVersion || '',
       hasUpdate: Boolean(data.hasUpdate),
+      canSelfUpdate: Boolean(data.canSelfUpdate),
+      selfUpdateReason: data.selfUpdateReason || '',
       releaseUrl: data.releaseUrl || `${repoUrl}/releases/latest`,
       error: data.error || ''
     }
@@ -274,6 +307,46 @@ const checkUpdate = async () => {
 
 const openLatestRelease = () => {
   openLink(update.value.releaseUrl || `${repoUrl}/releases/latest`)
+}
+
+const waitForRestart = async () => {
+  for (let i = 0; i < 90; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    try {
+      const { data } = await api.get('/auth/status', { timeout: 3000, skipErrorMessage: true })
+      // 会话在内存中，重启后必然失效；仍为已登录说明旧进程还没退出，继续等。
+      if (data?.authenticated) continue
+      location.href = `/login.html?return=${encodeURIComponent('/#/about')}`
+      return
+    } catch {
+      // 服务正在重启，继续等待
+    }
+  }
+  update.value = { ...update.value, restarting: false, applyError: '服务重启超时，请手动刷新页面' }
+}
+
+const applyUpdate = async () => {
+  if (update.value.applying || update.value.restarting || !update.value.hasUpdate) return
+  update.value = { ...update.value, applying: true, error: '', applyError: '' }
+  try {
+    const { data } = await api.post('/update/apply', null, {
+      timeout: 600000,
+      skipErrorMessage: true
+    })
+    update.value = {
+      ...update.value,
+      applying: false,
+      restarting: true,
+      latestVersion: data.version || update.value.latestVersion
+    }
+    waitForRestart()
+  } catch (err) {
+    update.value = {
+      ...update.value,
+      applying: false,
+      applyError: err?.response?.data?.error || '请稍后重试'
+    }
+  }
 }
 
 onMounted(() => {
@@ -333,9 +406,10 @@ html.dark .hero-card {
   display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
   flex: 0 0 auto; margin-left: auto;
 }
-.update-feedback { font-size: 12px; line-height: 1.5; }
+.update-feedback { font-size: 12px; line-height: 1.5; max-width: 280px; text-align: right; }
 .update-feedback.checking, .update-feedback.latest { color: var(--el-text-color-secondary); }
-.update-feedback.error { max-width: 280px; color: var(--el-color-danger); text-align: right; }
+.update-feedback.applying, .update-feedback.restarting { color: var(--el-color-primary); }
+.update-feedback.error { color: var(--el-color-danger); }
 .update-action { font-size: 13px; font-weight: 600; }
 .update-action .el-icon { margin-left: 2px; }
 .setting-row {
