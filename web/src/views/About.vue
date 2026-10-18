@@ -13,6 +13,15 @@
           </div>
         </div>
         <div class="hero-actions">
+          <el-tooltip :content="updateTooltip" placement="bottom">
+            <el-button
+              :type="update.hasUpdate ? 'success' : ''"
+              :loading="update.checking"
+              @click="handleUpdateClick"
+            >
+              {{ updateLabel }}
+            </el-button>
+          </el-tooltip>
           <el-button type="primary" @click="openLink(repoUrl)">GitHub 仓库</el-button>
           <el-button @click="openLink(readmeUrl)">使用文档</el-button>
         </div>
@@ -165,7 +174,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { ChatDotRound, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
 import { appVersion as version } from '../version'
 import { panelSettings, colorPresets, resetPanelSettings } from '../panelSettings'
@@ -219,11 +228,70 @@ const loadStatus = async () => {
 
 const openLink = (url) => window.open(url, '_blank', 'noopener,noreferrer')
 
+const update = ref({
+  checking: true,
+  currentVersion: '',
+  latestVersion: '',
+  hasUpdate: false,
+  releaseUrl: '',
+  error: ''
+})
+let updateTimer = null
+
+const updateLabel = computed(() => {
+  if (update.value.checking) return '检查中…'
+  if (update.value.error) return '重试检查'
+  return update.value.hasUpdate ? '获取更新' : '已是最新'
+})
+
+const updateTooltip = computed(() => {
+  if (update.value.checking) return '正在检查最新正式版'
+  if (update.value.error) return `${update.value.error}，点击重试`
+  if (update.value.hasUpdate) return `发现新版本 v${update.value.latestVersion}，点击前往下载`
+  const current = update.value.currentVersion || version
+  return `当前服务 v${current}，已是最新正式版 v${update.value.latestVersion || version}，点击重新检查`
+})
+
+const checkUpdate = async () => {
+  update.value = { ...update.value, checking: true, error: '' }
+  try {
+    const { data } = await api.get('/update', { timeout: 15000, skipErrorMessage: true })
+    update.value = {
+      checking: false,
+      currentVersion: data.currentVersion || '',
+      latestVersion: data.latestVersion || '',
+      hasUpdate: Boolean(data.hasUpdate),
+      releaseUrl: data.releaseUrl || `${repoUrl}/releases/latest`,
+      error: data.error || ''
+    }
+  } catch (err) {
+    update.value = {
+      ...update.value,
+      checking: false,
+      error: err?.response?.data?.error || '无法检查更新，请稍后重试'
+    }
+  }
+}
+
+const handleUpdateClick = () => {
+  if (update.value.checking) return
+  if (update.value.hasUpdate && update.value.releaseUrl) {
+    openLink(update.value.releaseUrl)
+    return
+  }
+  checkUpdate()
+}
+
 onMounted(() => {
   loadStatus()
+  checkUpdate()
   timer = setInterval(loadStatus, 10000)
+  updateTimer = setInterval(checkUpdate, 30 * 60 * 1000)
 })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => {
+  clearInterval(timer)
+  clearInterval(updateTimer)
+})
 </script>
 
 <style scoped>
