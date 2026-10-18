@@ -42,6 +42,7 @@
               </el-tag>
             </el-descriptions-item>
             <el-descriptions-item label="运行时长">{{ status.uptime || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="服务版本">{{ status.version || '-' }}</el-descriptions-item>
             <el-descriptions-item label="Bot QQ">{{ status.botQQ || '-' }}</el-descriptions-item>
             <el-descriptions-item label="昵称">{{ status.botNickname || '-' }}</el-descriptions-item>
             <el-descriptions-item label="面板端口">{{ status.webPanelPort || '-' }}</el-descriptions-item>
@@ -166,7 +167,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { ChatDotRound, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
-import { version } from '../../package.json'
+import { appVersion as version } from '../version'
 import { panelSettings, colorPresets, resetPanelSettings } from '../panelSettings'
 import api from '../api'
 

@@ -1,0 +1,190 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_VERSION: '9.0.x'
+  NODE_VERSION: '20'
+
+jobs:
+  panel:
+    name: 构建面板前端
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # tag、程序集与 package.json 三处版本必须一致，否则包内版本与 Release 标签口径不符。
+      - name: 校验版本口径
+        run: |
+          version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
+          web_version=$(node -p "require('./web/package.json').version")
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag_version Directory.Build.props=$version web/package.json=$web_version"
+          test "$version" = "$web_version"
+          test "$version" = "$tag_version"
+
+      - name: 安装与构建
+        working-directory: web
+        run: npm ci && npm run build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: panel-wwwroot
+          path: src/Mutter.Web/wwwroot
+          retention-days: 1
+
+  publish:
+    name: 打包 ${{ matrix.rid }}
+    needs: panel
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            archive: zip
+          - os: ubuntu-latest
+            rid: linux-x64
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: panel-wwwroot
+          path: src/Mutter.Web/wwwroot
+
+      - name: 发布 self-contained
+        shell: bash
+        run: dotnet publish src/Mutter.ConsoleHost -c Release -r ${{ matrix.rid }} --self-contained true -o out/self-contained
+
+      - name: 发布 framework-dependent
+        shell: bash
+        run: dotnet publish src/Mutter.ConsoleHost -c Release -r ${{ matrix.rid }} --self-contained false -o out/framework-dependent
+
+      - name: 打包
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
+          mkdir -p stage
+          for kind in self-contained framework-dependent; do
+            pkg="mutter-bot-v${version}-${{ matrix.rid }}-${kind}"
+            mkdir -p "stage/${pkg}"
+            cp -a "out/${kind}/." "stage/${pkg}/"
+            cp LICENSE README.md "stage/${pkg}/"
+            rm -f "stage/${pkg}/appsettings.Development.json" "stage/${pkg}/appsettings.example.json"
+            if [ "${{ matrix.rid }}" = "linux-x64" ]; then
+              cp deploy/install.sh deploy/mutter-bot.service "stage/${pkg}/"
+              chmod +x "stage/${pkg}/mutter-bot" "stage/${pkg}/install.sh"
+            fi
+
+            # 发布包只允许携带占位符配置；真实凭据即使被误提交也不能进包。
+            if ! grep -q '"YOUR_APP_ID"' "stage/${pkg}/appsettings.json" \
+               || ! grep -q '"YOUR_CLIENT_SECRET"' "stage/${pkg}/appsettings.json"; then
+              echo "拒绝打包：appsettings.json 不是占位符配置"
+              exit 1
+            fi
+            if find "stage/${pkg}" \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) | grep -q .; then
+              echo "拒绝打包：包内存在数据库文件"
+              exit 1
+            fi
+
+            if [ "${{ matrix.archive }}" = "zip" ]; then
+              # Compress-Archive 会写出反斜杠条目；优先用 7-Zip 生成标准 zip。
+              if command -v 7z >/dev/null 2>&1; then
+                (cd stage && 7z a -tzip -mx=5 "../${pkg}.zip" "${pkg}" >/dev/null)
+              elif [ -x "/c/Program Files/7-Zip/7z.exe" ]; then
+                (cd stage && "/c/Program Files/7-Zip/7z.exe" a -tzip -mx=5 "../${pkg}.zip" "${pkg}" >/dev/null)
+              else
+                powershell -NoProfile -Command "Compress-Archive -Path 'stage/${pkg}' -DestinationPath '${pkg}.zip'"
+              fi
+            else
+              tar -C stage -czf "${pkg}.tar.gz" "${pkg}"
+            fi
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.rid }}
+          path: mutter-bot-v*
+          retention-days: 3
+
+  release:
+    name: 创建草稿 Release
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: releases
+          merge-multiple: true
+
+      - name: 生成校验和
+        run: |
+          cd releases
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: 创建草稿 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
+          tag="$GITHUB_REF_NAME"
+          notes_file=".github/release-notes/${tag}.md"
+
+          {
+            cat <<EOF
+          ## 下载
+
+          | 平台 | 推荐包（无需 .NET） | 已装 .NET 运行时 |
+          | --- | --- | --- |
+          | Windows x64 | \`mutter-bot-v${version}-win-x64-self-contained.zip\` | \`mutter-bot-v${version}-win-x64-framework-dependent.zip\` |
+          | Linux x64 | \`mutter-bot-v${version}-linux-x64-self-contained.tar.gz\` | \`mutter-bot-v${version}-linux-x64-framework-dependent.tar.gz\` |
+
+          - **self-contained**：内置 .NET 9 运行时，解压即用。
+          - **framework-dependent**：需预装 ASP.NET Core 9 Runtime。
+          - Windows 解压后编辑同目录 \`appsettings.json\`，运行 \`mutter-bot.exe\`（默认 TUI）或 \`mutter-bot.exe --headless\`。
+          - Linux 解压后进入目录执行 \`sudo ./install.sh .\`；首次安装后编辑 \`/opt/mutter-bot/appsettings.json\`，再 \`sudo systemctl restart mutter-bot\`。
+          - 自包含包不包含 ICU，精简 Linux 发行版需安装 \`libicu\`。
+          - 安装包校验：\`sha256sum -c SHA256SUMS.txt\`。
+
+          EOF
+            if [ -f "$notes_file" ]; then
+              cat "$notes_file"
+            else
+              gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" -f tag_name="$tag" --jq .body
+            fi
+          } > release-notes.md
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" releases/* --clobber
+            gh release edit "$tag" --title "Mutter ${tag}" --notes-file release-notes.md --draft
+          else
+            gh release create "$tag" --draft --title "Mutter ${tag}" --notes-file release-notes.md releases/*
+          fi

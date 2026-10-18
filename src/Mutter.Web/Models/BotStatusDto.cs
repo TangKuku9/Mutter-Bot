@@ -2,6 +2,7 @@ namespace Mutter.Web.Models;
 
 public class BotStatusDto
 {
+    public string Version { get; set; } = string.Empty;
     public bool IsConnected { get; set; }
     public string BotQQ { get; set; } = string.Empty;
     public string BotNickname { get; set; } = string.Empty;

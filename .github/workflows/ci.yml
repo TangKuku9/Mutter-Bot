@@ -49,6 +49,14 @@ jobs:
         working-directory: web
         run: npm ci
 
+      # 版本号唯一来源是 Directory.Build.props；package.json 必须同步，否则发版口径会漂移。
+      - name: 版本一致性
+        run: |
+          dotnet_version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
+          web_version=$(node -p "require('./web/package.json').version")
+          echo ".NET=$dotnet_version web=$web_version"
+          test "$dotnet_version" = "$web_version"
+
       # 构建产物 wwwroot 不入库，这里只验证 web/ 源码能构建通过。
       - name: Build
         working-directory: web
