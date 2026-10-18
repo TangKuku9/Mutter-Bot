@@ -22,6 +22,7 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 - [核心特性](#核心特性)
 - [技术栈与架构](#技术栈与架构)
 - [目录结构](#目录结构)
+- [下载即用版本 (Releases)](#下载即用版本-releases)
 - [快速起步 (Quick Start)](#快速起步-quick-start)
   - [1. 准备环境与凭据](#1-准备环境与凭据)
   - [2. 配置说明](#2-配置说明)
@@ -125,6 +126,25 @@ Mutter-Bot/
 
 ---
 
+## 下载即用版本 (Releases)
+
+不想从源码构建，可直接从 [GitHub Releases](https://github.com/TangKuku9/Mutter-Bot/releases) 下载对应平台的压缩包：
+
+| 平台 | 推荐包（无需 .NET） | 已装 .NET 运行时 |
+| --- | --- | --- |
+| Windows x64 | `mutter-bot-vX.Y.Z-win-x64-self-contained.zip` | `mutter-bot-vX.Y.Z-win-x64-framework-dependent.zip` |
+| Linux x64 | `mutter-bot-vX.Y.Z-linux-x64-self-contained.tar.gz` | `mutter-bot-vX.Y.Z-linux-x64-framework-dependent.tar.gz` |
+
+- **self-contained**：内置 .NET 9 运行时，解压即用；**framework-dependent**：体积更小，需预装 [ASP.NET Core 9 Runtime](https://dotnet.microsoft.com/download/dotnet/9.0)。
+- **Windows**：解压后编辑同目录的 `appsettings.json`（填入 `Mutter:AppId`、`Mutter:ClientSecret` 与面板口令），运行 `mutter-bot.exe` 进入 TUI；后台运行用 `mutter-bot.exe --headless`。
+- **Linux**：解压后进入目录执行 `sudo ./install.sh .`（压缩包已内置 `install.sh` 与 systemd 模板），首次安装后编辑 `/opt/mutter-bot/appsettings.json` 并执行 `sudo systemctl restart mutter-bot`。
+- Linux 自包含包仍依赖系统 ICU，精简发行版请先安装 `libicu`。
+- 校验下载：`sha256sum -c SHA256SUMS.txt`（Windows 可用 `Get-FileHash` 对照文件中的 SHA256）。
+
+> 版本号唯一来源是仓库根目录 [`Directory.Build.props`](Directory.Build.props) 的 `<Version>`。程序集、前端构建与 `/api/status` 都从这里取值；发布标签必须与之一致（例如 `2.0.0` 对应 `v2.0.0`），CI 会校验版本一致性。
+
+---
+
 ## 快速起步 (Quick Start)
 
 ### 1. 准备环境与凭据
@@ -218,7 +238,7 @@ npm run dev
 
 ## 生产部署 (Linux & systemd)
 
-项目提供了专为 Linux 设计的一键部署工具与服务模板：
+如果不想在本地编译，可直接使用 [Releases](#下载即用版本-releases) 中的 Linux 压缩包。以下为从源码发布的流程，项目提供了专为 Linux 设计的一键部署工具与服务模板：
 
 ```bash
 # 1. 本地编译前端并发布 Linux 产物
