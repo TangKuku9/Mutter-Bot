@@ -27,6 +27,8 @@ public sealed class UpdateApplier
     private readonly ILogger<UpdateApplier> _logger;
     private readonly object _stagedSync = new();
     private StagedUpdate? _staged;
+    private readonly object _progressSync = new();
+    private UpdateProgressDto _progress = new() { Phase = "idle" };
     private int _busy;
 
     public UpdateApplier(IHttpClientFactory httpClientFactory, ILogger<UpdateApplier> logger)
@@ -45,6 +47,30 @@ public sealed class UpdateApplier
             return _staged;
     }
 
+    public UpdateProgressDto GetProgress()
+    {
+        lock (_progressSync)
+            return _progress;
+    }
+
+    private void ReportProgress(bool active, long downloadedBytes, long totalBytes, string phase)
+    {
+        var percent = totalBytes > 0
+            ? (int)Math.Min(100L, downloadedBytes * 100L / totalBytes)
+            : 0;
+        lock (_progressSync)
+        {
+            _progress = new UpdateProgressDto
+            {
+                Active = active,
+                Percent = percent,
+                DownloadedBytes = downloadedBytes,
+                TotalBytes = totalBytes,
+                Phase = phase
+            };
+        }
+    }
+
     /// <summary>下载、校验并暂存更新包；此时不写安装标记，取消安装后不会在退出时被应用。</summary>
     public async Task<StagedUpdate> StageAsync(SelfUpdatePlan plan, string appDir, CancellationToken ct)
     {
@@ -57,6 +83,8 @@ public sealed class UpdateApplier
         var stagingDir = Path.Combine(workRoot, PendingDirName);
         var downloadDir = Path.Combine(workRoot, "download");
         var extractDir = Path.Combine(workRoot, "extract");
+        var totalBytes = plan.AssetSize;
+        ReportProgress(true, 0, totalBytes, "downloading");
 
         try
         {
@@ -71,10 +99,23 @@ public sealed class UpdateApplier
             var expectedHash = ParseChecksum(checksumText, plan.AssetName);
 
             var archivePath = Path.Combine(downloadDir, plan.AssetName);
-            var actualHash = await DownloadAndHashAsync(client, plan.AssetUrl, archivePath, ct);
+            var actualHash = await DownloadAndHashAsync(
+                client,
+                plan.AssetUrl,
+                archivePath,
+                (downloaded, total) =>
+                {
+                    if (total > 0)
+                        totalBytes = total;
+                    ReportProgress(true, downloaded, totalBytes, "downloading");
+                },
+                ct);
+
+            ReportProgress(true, totalBytes, totalBytes, "verifying");
             if (!string.Equals(expectedHash, actualHash, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("更新包 SHA256 校验失败，已取消更新");
 
+            ReportProgress(true, totalBytes, totalBytes, "extracting");
             ExtractArchive(archivePath, extractDir);
             var packageRoot = FindPackageRoot(extractDir);
             MoveDirectoryContents(packageRoot, stagingDir);
@@ -90,11 +131,13 @@ public sealed class UpdateApplier
             lock (_stagedSync)
                 _staged = staged;
 
+            ReportProgress(false, totalBytes, totalBytes, "done");
             _logger.LogInformation("更新包已暂存：{Asset} -> {Staging}", plan.AssetName, stagingDir);
             return staged;
         }
         catch
         {
+            ReportProgress(false, 0, totalBytes, "error");
             TryDelete(workRoot);
             throw;
         }
@@ -290,20 +333,26 @@ public sealed class UpdateApplier
         HttpClient client,
         string url,
         string destination,
+        Action<long, long> onProgress,
         CancellationToken ct)
     {
         using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
+        var totalBytes = response.Content.Headers.ContentLength ?? 0;
         await using var input = await response.Content.ReadAsStreamAsync(ct);
         await using var output = File.Create(destination);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var buffer = new byte[81920];
+        long downloadedBytes = 0;
         int read;
+        onProgress(0, totalBytes);
         while ((read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), ct)) > 0)
         {
             hash.AppendData(buffer, 0, read);
             await output.WriteAsync(buffer.AsMemory(0, read), ct);
+            downloadedBytes += read;
+            onProgress(downloadedBytes, totalBytes);
         }
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }

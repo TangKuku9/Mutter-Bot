@@ -36,6 +36,9 @@ public class UpdateController : ControllerBase
         return Ok(check.Info);
     }
 
+    [HttpGet("progress")]
+    public ActionResult<UpdateProgressDto> GetProgress() => Ok(_applier.GetProgress());
+
     /// <summary>下载、校验并暂存最新正式版；不写安装标记，等待用户确认后才安装。</summary>
     [HttpPost("stage")]
     public async Task<ActionResult<UpdateStageResultDto>> Stage()

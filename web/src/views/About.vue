@@ -80,6 +80,10 @@
                   <el-icon><Download /></el-icon>
                 </el-link>
               </el-tooltip>
+              <div v-else-if="updateState.type === 'downloading'" class="update-progress">
+                <el-progress :percentage="update.progress" :stroke-width="6" :show-text="false" />
+                <span class="update-feedback downloading">{{ updateState.text }}</span>
+              </div>
               <el-tooltip
                 v-else-if="updateState.type === 'manual'"
                 :content="update.selfUpdateReason || '当前环境请前往 GitHub 手动更新'"
@@ -271,6 +275,8 @@ const update = ref({
   restarting: false,
   staged: false,
   stagedVersion: '',
+  progress: 0,
+  progressPhase: '',
   currentVersion: '',
   latestVersion: '',
   hasUpdate: false,
@@ -281,11 +287,19 @@ const update = ref({
   applyError: ''
 })
 let updateTimer = null
+let progressTimer = null
 
 const updateState = computed(() => {
   if (update.value.restarting) return { type: 'restarting', text: '更新完成，服务正在重启…' }
   if (update.value.installing) return { type: 'installing', text: '正在安装，服务即将重启…' }
-  if (update.value.downloading) return { type: 'downloading', text: '正在下载更新…' }
+  if (update.value.downloading) {
+    const text = update.value.progressPhase === 'extracting'
+      ? '正在解压更新包…'
+      : update.value.progressPhase === 'verifying'
+        ? '正在校验更新包…'
+        : `正在下载更新… ${update.value.progress}%`
+    return { type: 'downloading', text }
+  }
   if (update.value.checking) return { type: 'checking', text: '正在检查…' }
   if (update.value.staged) return { type: 'install', text: '立即安装' }
   if (update.value.applyError) return { type: 'error', text: `更新失败：${update.value.applyError}` }
@@ -396,6 +410,31 @@ const requestInstall = async () => {
   await installUpdate()
 }
 
+const stopProgressPolling = () => {
+  if (progressTimer) {
+    clearInterval(progressTimer)
+    progressTimer = null
+  }
+}
+
+const startProgressPolling = () => {
+  stopProgressPolling()
+  progressTimer = setInterval(async () => {
+    if (!update.value.downloading) return
+    try {
+      const { data } = await api.get('/update/progress', { timeout: 3000, skipErrorMessage: true })
+      if (!update.value.downloading) return
+      update.value = {
+        ...update.value,
+        progress: Number(data?.percent) || 0,
+        progressPhase: data?.phase || ''
+      }
+    } catch {
+      // 进度查询失败不打断下载
+    }
+  }, 400)
+}
+
 const downloadUpdate = async () => {
   if (update.value.downloading || update.value.installing || update.value.restarting) return
   if (update.value.staged) {
@@ -403,20 +442,32 @@ const downloadUpdate = async () => {
     return
   }
   if (!update.value.hasUpdate) return
-  update.value = { ...update.value, downloading: true, error: '', applyError: '' }
+  update.value = {
+    ...update.value,
+    downloading: true,
+    progress: 0,
+    progressPhase: 'downloading',
+    error: '',
+    applyError: ''
+  }
+  startProgressPolling()
   try {
     const { data } = await api.post('/update/stage', null, {
       timeout: 600000,
       skipErrorMessage: true
     })
+    stopProgressPolling()
     update.value = {
       ...update.value,
       downloading: false,
+      progress: 100,
+      progressPhase: 'done',
       staged: true,
       stagedVersion: data.version || update.value.latestVersion
     }
     await requestInstall()
   } catch (err) {
+    stopProgressPolling()
     update.value = {
       ...update.value,
       downloading: false,
@@ -434,6 +485,7 @@ onMounted(() => {
 onUnmounted(() => {
   clearInterval(timer)
   clearInterval(updateTimer)
+  stopProgressPolling()
 })
 </script>
 
@@ -488,6 +540,8 @@ html.dark .hero-card {
 .update-feedback.error { color: var(--el-color-danger); }
 .update-action { font-size: 13px; font-weight: 600; }
 .update-action .el-icon { margin-left: 2px; }
+.update-progress { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; width: 200px; }
+.update-progress .el-progress { width: 100%; }
 .setting-row {
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
   padding: 12px 0; border-bottom: 1px dashed var(--el-border-color-lighter);
