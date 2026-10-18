@@ -13,15 +13,6 @@
           </div>
         </div>
         <div class="hero-actions">
-          <el-tooltip :content="updateTooltip" placement="bottom">
-            <el-button
-              :type="update.hasUpdate ? 'success' : ''"
-              :loading="update.checking"
-              @click="handleUpdateClick"
-            >
-              {{ updateLabel }}
-            </el-button>
-          </el-tooltip>
           <el-button type="primary" @click="openLink(repoUrl)">GitHub 仓库</el-button>
           <el-button @click="openLink(readmeUrl)">使用文档</el-button>
         </div>
@@ -59,10 +50,25 @@
           </el-descriptions>
 
           <div class="quick-start">
-            <div class="quick-title">快速上手</div>
-            <div v-for="(step, index) in quickStart" :key="step" class="quick-step">
-              <span class="quick-index">{{ index + 1 }}</span>
-              <span>{{ step }}</span>
+            <div class="quick-steps">
+              <div class="quick-title">快速上手</div>
+              <div v-for="(step, index) in quickStart" :key="step" class="quick-step">
+                <span class="quick-index">{{ index + 1 }}</span>
+                <span>{{ step }}</span>
+              </div>
+            </div>
+            <div class="update-check">
+              <el-link
+                v-if="updateState.type === 'update'"
+                type="success"
+                class="update-action"
+                @click="openLatestRelease"
+              >
+                {{ updateState.text }}
+                <el-icon><ArrowRight /></el-icon>
+              </el-link>
+              <span v-else class="update-feedback" :class="updateState.type">{{ updateState.text }}</span>
+              <el-button :loading="update.checking" @click="checkUpdate">检查更新</el-button>
             </div>
           </div>
         </el-card>
@@ -175,7 +181,7 @@
 
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue'
-import { ChatDotRound, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
+import { ArrowRight, ChatDotRound, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
 import { appVersion as version } from '../version'
 import { panelSettings, colorPresets, resetPanelSettings } from '../panelSettings'
 import api from '../api'
@@ -238,18 +244,11 @@ const update = ref({
 })
 let updateTimer = null
 
-const updateLabel = computed(() => {
-  if (update.value.checking) return '检查中…'
-  if (update.value.error) return '重试检查'
-  return update.value.hasUpdate ? '获取更新' : '已是最新'
-})
-
-const updateTooltip = computed(() => {
-  if (update.value.checking) return '正在检查最新正式版'
-  if (update.value.error) return `${update.value.error}，点击重试`
-  if (update.value.hasUpdate) return `发现新版本 v${update.value.latestVersion}，点击前往下载`
-  const current = update.value.currentVersion || version
-  return `当前服务 v${current}，已是最新正式版 v${update.value.latestVersion || version}，点击重新检查`
+const updateState = computed(() => {
+  if (update.value.checking) return { type: 'checking', text: '正在检查…' }
+  if (update.value.error) return { type: 'error', text: `检查失败：${update.value.error}` }
+  if (update.value.hasUpdate) return { type: 'update', text: '立即更新' }
+  return { type: 'latest', text: '已是最新' }
 })
 
 const checkUpdate = async () => {
@@ -273,13 +272,8 @@ const checkUpdate = async () => {
   }
 }
 
-const handleUpdateClick = () => {
-  if (update.value.checking) return
-  if (update.value.hasUpdate && update.value.releaseUrl) {
-    openLink(update.value.releaseUrl)
-    return
-  }
-  checkUpdate()
+const openLatestRelease = () => {
+  openLink(update.value.releaseUrl || `${repoUrl}/releases/latest`)
 }
 
 onMounted(() => {
@@ -322,7 +316,12 @@ html.dark .hero-card {
 .card-head { display: flex; justify-content: space-between; align-items: center; }
 .fill { height: 100%; }
 .muted { color: var(--el-text-color-secondary); }
-.quick-start { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--el-border-color-lighter); }
+.quick-start {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end;
+  gap: 16px 24px; margin-top: 18px; padding-top: 14px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+.quick-steps { flex: 1 1 320px; min-width: 0; }
 .quick-title { margin-bottom: 10px; font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); }
 .quick-step { display: flex; gap: 10px; margin-bottom: 8px; font-size: 13px; line-height: 1.6; color: var(--el-text-color-regular); }
 .quick-step:last-child { margin-bottom: 0; }
@@ -330,6 +329,15 @@ html.dark .hero-card {
   flex: 0 0 20px; height: 20px; border-radius: 50%; line-height: 20px; text-align: center;
   font-size: 12px; color: var(--el-color-primary); background: var(--el-color-primary-light-9);
 }
+.update-check {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  flex: 0 0 auto; margin-left: auto;
+}
+.update-feedback { font-size: 12px; line-height: 1.5; }
+.update-feedback.checking, .update-feedback.latest { color: var(--el-text-color-secondary); }
+.update-feedback.error { max-width: 280px; color: var(--el-color-danger); text-align: right; }
+.update-action { font-size: 13px; font-weight: 600; }
+.update-action .el-icon { margin-left: 2px; }
 .setting-row {
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
   padding: 12px 0; border-bottom: 1px dashed var(--el-border-color-lighter);
