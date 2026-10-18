@@ -301,11 +301,11 @@ const updateState = computed(() => {
 const checkUpdate = async () => {
   if (update.value.downloading || update.value.installing || update.value.restarting) return
   update.value = { ...update.value, checking: true, error: '', applyError: '' }
+  const startedAt = Date.now()
+  let patch
   try {
     const { data } = await api.get('/update', { timeout: 15000, skipErrorMessage: true })
-    update.value = {
-      ...update.value,
-      checking: false,
+    patch = {
       currentVersion: data.currentVersion || '',
       latestVersion: data.latestVersion || '',
       hasUpdate: Boolean(data.hasUpdate),
@@ -317,12 +317,14 @@ const checkUpdate = async () => {
       error: data.error || ''
     }
   } catch (err) {
-    update.value = {
-      ...update.value,
-      checking: false,
+    patch = {
       error: err?.response?.data?.error || '无法检查更新，请稍后重试'
     }
   }
+  // 后端有 10 分钟缓存，检查常常瞬间返回；保留最短可见时长，让“正在检查…”能被看到。
+  const remaining = 1000 - (Date.now() - startedAt)
+  if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining))
+  update.value = { ...update.value, checking: false, ...patch }
 }
 
 const openLatestRelease = () => {
