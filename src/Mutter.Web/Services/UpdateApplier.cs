@@ -25,6 +25,8 @@ public sealed class UpdateApplier
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<UpdateApplier> _logger;
+    private readonly object _stagedSync = new();
+    private StagedUpdate? _staged;
     private int _busy;
 
     public UpdateApplier(IHttpClientFactory httpClientFactory, ILogger<UpdateApplier> logger)
@@ -37,12 +39,20 @@ public sealed class UpdateApplier
 
     public void End() => Interlocked.Exchange(ref _busy, 0);
 
+    public StagedUpdate? GetStaged()
+    {
+        lock (_stagedSync)
+            return _staged;
+    }
+
+    /// <summary>下载、校验并暂存更新包；此时不写安装标记，取消安装后不会在退出时被应用。</summary>
     public async Task<StagedUpdate> StageAsync(SelfUpdatePlan plan, string appDir, CancellationToken ct)
     {
         ValidateAssetUrl(plan.AssetUrl);
         ValidateAssetUrl(plan.ChecksumUrl);
 
-        var updateDir = Path.Combine(appDir, UpdateDirName);
+        DiscardStaged(appDir);
+
         var workRoot = Path.Combine(Path.GetTempPath(), "mutter-bot-update-" + Guid.NewGuid().ToString("N"));
         var stagingDir = Path.Combine(workRoot, PendingDirName);
         var downloadDir = Path.Combine(workRoot, "download");
@@ -50,8 +60,6 @@ public sealed class UpdateApplier
 
         try
         {
-            TryDelete(updateDir);
-            Directory.CreateDirectory(updateDir);
             Directory.CreateDirectory(stagingDir);
             Directory.CreateDirectory(downloadDir);
             Directory.CreateDirectory(extractDir);
@@ -75,33 +83,57 @@ public sealed class UpdateApplier
             if (!File.Exists(Path.Combine(stagingDir, exeName)))
                 throw new InvalidOperationException("更新包缺少可执行文件，已取消更新");
 
-            var marker = new PendingUpdate
-            {
-                Version = plan.Version,
-                AssetName = plan.AssetName,
-                StagingDirectory = stagingDir,
-                CreatedAt = DateTimeOffset.UtcNow
-            };
-            await File.WriteAllTextAsync(
-                Path.Combine(updateDir, MarkerFileName),
-                JsonSerializer.Serialize(marker, MarkerJsonOptions),
-                Encoding.UTF8,
-                ct);
-
             TryDelete(downloadDir);
             TryDelete(extractDir);
+
+            var staged = new StagedUpdate(stagingDir, plan.Version, plan.AssetName);
+            lock (_stagedSync)
+                _staged = staged;
+
             _logger.LogInformation("更新包已暂存：{Asset} -> {Staging}", plan.AssetName, stagingDir);
-            return new StagedUpdate(stagingDir, plan.Version, plan.AssetName);
+            return staged;
         }
         catch
         {
             TryDelete(workRoot);
-            TryDelete(updateDir);
             throw;
         }
     }
 
-    public void PrepareWindowsHelper(SelfUpdatePlan plan, string appDir, StagedUpdate staged)
+    /// <summary>用户确认安装后写入待更新标记；Linux 在服务停止后据此替换文件。</summary>
+    public void ConfirmStaged(string appDir, StagedUpdate staged)
+    {
+        var updateDir = Path.Combine(appDir, UpdateDirName);
+        Directory.CreateDirectory(updateDir);
+
+        var marker = new PendingUpdate
+        {
+            Version = staged.Version,
+            AssetName = staged.AssetName,
+            StagingDirectory = staged.StagingDirectory,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+        File.WriteAllText(
+            Path.Combine(updateDir, MarkerFileName),
+            JsonSerializer.Serialize(marker, MarkerJsonOptions),
+            Encoding.UTF8);
+    }
+
+    private void DiscardStaged(string appDir)
+    {
+        StagedUpdate? previous;
+        lock (_stagedSync)
+        {
+            previous = _staged;
+            _staged = null;
+        }
+
+        if (previous is not null)
+            TryDeleteWorkRoot(previous.StagingDirectory);
+        TryDelete(Path.Combine(appDir, UpdateDirName));
+    }
+
+    public void PrepareWindowsHelper(string appDir, StagedUpdate staged)
     {
         if (!OperatingSystem.IsWindows())
             throw new InvalidOperationException("仅 Windows 需要更新助手");
@@ -125,7 +157,7 @@ public sealed class UpdateApplier
             Hidden = restartArgs.Any(a => a is "--headless" or "-h"),
             LogPath = Path.Combine(logDir, "update.log"),
             CurrentVersion = GetCurrentVersion(),
-            Version = plan.Version
+            Version = staged.Version
         };
 
         var scriptPath = Path.Combine(helperDir, "apply.ps1");

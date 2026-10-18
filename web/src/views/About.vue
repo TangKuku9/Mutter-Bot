@@ -58,12 +58,24 @@
               </div>
             </div>
             <div class="update-check">
+              <template v-if="updateState.type === 'install'">
+                <el-tooltip
+                  :content="`v${update.stagedVersion || update.latestVersion} 已下载，点击确认安装并重启`"
+                  placement="top"
+                >
+                  <el-link type="success" class="update-action" @click="requestInstall">
+                    {{ updateState.text }}
+                    <el-icon><Download /></el-icon>
+                  </el-link>
+                </el-tooltip>
+                <span v-if="update.applyError" class="update-feedback error">更新失败：{{ update.applyError }}</span>
+              </template>
               <el-tooltip
-                v-if="updateState.type === 'update'"
-                :content="`将安装 v${update.latestVersion}，服务会自动重启`"
+                v-else-if="updateState.type === 'update'"
+                :content="`将下载 v${update.latestVersion}，下载完成后可选择是否安装`"
                 placement="top"
               >
-                <el-link type="success" class="update-action" @click="applyUpdate">
+                <el-link type="success" class="update-action" @click="downloadUpdate">
                   {{ updateState.text }}
                   <el-icon><Download /></el-icon>
                 </el-link>
@@ -81,7 +93,7 @@
               <span v-else class="update-feedback" :class="updateState.type">{{ updateState.text }}</span>
               <el-button
                 :loading="update.checking"
-                :disabled="update.applying || update.restarting"
+                :disabled="update.downloading || update.installing || update.restarting"
                 @click="checkUpdate"
               >
                 检查更新
@@ -198,6 +210,7 @@
 
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { ArrowRight, ChatDotRound, Download, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
 import { appVersion as version } from '../version'
 import { panelSettings, colorPresets, resetPanelSettings } from '../panelSettings'
@@ -253,8 +266,11 @@ const openLink = (url) => window.open(url, '_blank', 'noopener,noreferrer')
 
 const update = ref({
   checking: true,
-  applying: false,
+  downloading: false,
+  installing: false,
   restarting: false,
+  staged: false,
+  stagedVersion: '',
   currentVersion: '',
   latestVersion: '',
   hasUpdate: false,
@@ -268,8 +284,10 @@ let updateTimer = null
 
 const updateState = computed(() => {
   if (update.value.restarting) return { type: 'restarting', text: '更新完成，服务正在重启…' }
-  if (update.value.applying) return { type: 'applying', text: '正在下载并安装更新…' }
+  if (update.value.installing) return { type: 'installing', text: '正在安装，服务即将重启…' }
+  if (update.value.downloading) return { type: 'downloading', text: '正在下载更新…' }
   if (update.value.checking) return { type: 'checking', text: '正在检查…' }
+  if (update.value.staged) return { type: 'install', text: '立即安装' }
   if (update.value.applyError) return { type: 'error', text: `更新失败：${update.value.applyError}` }
   if (update.value.error) return { type: 'error', text: `检查失败：${update.value.error}` }
   if (update.value.hasUpdate) {
@@ -281,7 +299,7 @@ const updateState = computed(() => {
 })
 
 const checkUpdate = async () => {
-  if (update.value.applying || update.value.restarting) return
+  if (update.value.downloading || update.value.installing || update.value.restarting) return
   update.value = { ...update.value, checking: true, error: '', applyError: '' }
   try {
     const { data } = await api.get('/update', { timeout: 15000, skipErrorMessage: true })
@@ -293,6 +311,8 @@ const checkUpdate = async () => {
       hasUpdate: Boolean(data.hasUpdate),
       canSelfUpdate: Boolean(data.canSelfUpdate),
       selfUpdateReason: data.selfUpdateReason || '',
+      staged: Boolean(data.staged),
+      stagedVersion: data.stagedVersion || '',
       releaseUrl: data.releaseUrl || `${repoUrl}/releases/latest`,
       error: data.error || ''
     }
@@ -325,25 +345,79 @@ const waitForRestart = async () => {
   update.value = { ...update.value, restarting: false, applyError: '服务重启超时，请手动刷新页面' }
 }
 
-const applyUpdate = async () => {
-  if (update.value.applying || update.value.restarting || !update.value.hasUpdate) return
-  update.value = { ...update.value, applying: true, error: '', applyError: '' }
+const installUpdate = async () => {
+  if (update.value.installing || update.value.restarting) return
+  update.value = { ...update.value, installing: true, applyError: '' }
   try {
-    const { data } = await api.post('/update/apply', null, {
-      timeout: 600000,
+    const { data } = await api.post('/update/install', null, {
+      timeout: 60000,
       skipErrorMessage: true
     })
     update.value = {
       ...update.value,
-      applying: false,
+      installing: false,
       restarting: true,
+      staged: false,
       latestVersion: data.version || update.value.latestVersion
     }
     waitForRestart()
   } catch (err) {
     update.value = {
       ...update.value,
-      applying: false,
+      installing: false,
+      applyError: err?.response?.data?.error || '请稍后重试'
+    }
+  }
+}
+
+const requestInstall = async () => {
+  if (update.value.downloading || update.value.installing || update.value.restarting) return
+  if (!update.value.staged) {
+    await downloadUpdate()
+    return
+  }
+  const version = update.value.stagedVersion || update.value.latestVersion
+  try {
+    await ElMessageBox.confirm(
+      `Mutter v${version} 已下载并通过校验，是否立即安装并重启服务？重启期间面板会短暂不可用，完成后需要重新登录。`,
+      '更新已就绪',
+      {
+        confirmButtonText: '立即安装并重启',
+        cancelButtonText: '稍后',
+        type: 'warning'
+      }
+    )
+  } catch {
+    // 用户选择稍后，保留“立即安装”入口
+    return
+  }
+  await installUpdate()
+}
+
+const downloadUpdate = async () => {
+  if (update.value.downloading || update.value.installing || update.value.restarting) return
+  if (update.value.staged) {
+    await requestInstall()
+    return
+  }
+  if (!update.value.hasUpdate) return
+  update.value = { ...update.value, downloading: true, error: '', applyError: '' }
+  try {
+    const { data } = await api.post('/update/stage', null, {
+      timeout: 600000,
+      skipErrorMessage: true
+    })
+    update.value = {
+      ...update.value,
+      downloading: false,
+      staged: true,
+      stagedVersion: data.version || update.value.latestVersion
+    }
+    await requestInstall()
+  } catch (err) {
+    update.value = {
+      ...update.value,
+      downloading: false,
       applyError: err?.response?.data?.error || '请稍后重试'
     }
   }
@@ -408,7 +482,7 @@ html.dark .hero-card {
 }
 .update-feedback { font-size: 12px; line-height: 1.5; max-width: 280px; text-align: right; }
 .update-feedback.checking, .update-feedback.latest { color: var(--el-text-color-secondary); }
-.update-feedback.applying, .update-feedback.restarting { color: var(--el-color-primary); }
+.update-feedback.downloading, .update-feedback.installing, .update-feedback.restarting { color: var(--el-color-primary); }
 .update-feedback.error { color: var(--el-color-danger); }
 .update-action { font-size: 13px; font-weight: 600; }
 .update-action .el-icon { margin-left: 2px; }

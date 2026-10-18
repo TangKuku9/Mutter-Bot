@@ -13,4 +13,8 @@ public class UpdateInfoDto
     public string? SelfUpdateReason { get; set; }
     public string? AssetName { get; set; }
     public long AssetSize { get; set; }
+
+    /// <summary>是否已有下载完成、等待用户确认安装的更新包。</summary>
+    public bool Staged { get; set; }
+    public string? StagedVersion { get; set; }
 }
