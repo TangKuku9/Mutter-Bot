@@ -319,7 +319,15 @@ npm run build
 
 每个向本仓库发起的 PR 及推送均会自动执行 GitHub Actions [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：
 1. **构建与自检 (.NET)**：在 Linux 环境下验证 `dotnet restore` + `dotnet build`（含警告即错误）+ `ProactiveCheck --logic-only`。
-2. **面板前端构建**：在 Node 20 环境下执行 `npm ci && npm run build`。
+2. **面板前端构建**：在 Node 20 环境下执行 `npm ci && npm run build`，并校验 `.NET` 与前端版本号一致。
+3. **Release**：推送 `v*` 标签时执行 [`.github/workflows/release.yml`](.github/workflows/release.yml)，流程见 7.6。
+
+### 7.6 版本号与 Release（维护者）
+
+- **版本号唯一来源**：仓库根目录 `Directory.Build.props` 的 `<Version>`。`web/package.json` 的 `version` 必须同步，CI 会校验两者一致；不要在代码中另写版本常量。
+- **发布标签**：在 `main` 的发布提交上打 `vX.Y.Z` 标签并推送。标签必须与 `<Version>` 完全对应（`v2.0.0` ↔ `2.0.0`），发布流水线会先校验再打包。
+- **产物**：工作流在 Windows 与 Linux runner 上分别构建 `win-x64`、`linux-x64` 的 self-contained 与 framework-dependent 包，附带 `SHA256SUMS.txt`，并创建 **draft** Release。
+- **发布前检查**：在 GitHub Release 页面确认四个压缩包、校验和与发布说明无误后，再手动点击 Publish release。
 
 ---
 

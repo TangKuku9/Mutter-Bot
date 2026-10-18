@@ -10,8 +10,10 @@ api.interceptors.response.use(
     if (err.response?.status === 401 && !location.pathname.includes('login')) {
       location.href = `/login.html?return=${encodeURIComponent(location.pathname + location.hash)}`
     }
-    const msg = err.response?.data?.error || err.message || '请求失败'
-    ElMessage.error(msg)
+    if (!err.config?.skipErrorMessage) {
+      const msg = err.response?.data?.error || err.message || '请求失败'
+      ElMessage.error(msg)
+    }
     return Promise.reject(err)
   }
 )

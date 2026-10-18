@@ -1,6 +1,7 @@
 using System.Globalization;
 using Mutter.ConsoleHost.Services;
 using Mutter.ConsoleHost.Tui;
+using Mutter.Core.Services;
 
 namespace Mutter.ConsoleHost;
 
@@ -39,6 +40,16 @@ public static class Program
 
         var headless = Array.Exists(args, a => a is "--headless" or "-h");
 
+        // 自更新完成后由面板触发重启；先订阅再启动 Web 宿主，避免请求早于订阅到达。
+        // TUI 模式下还需结束界面主循环，headless 模式只等关闭信号。
+        MainTuiApp? tuiApp = null;
+        var shutdownTcs = new TaskCompletionSource();
+        AppLifecycle.RestartRequested += () =>
+        {
+            shutdownTcs.TrySetResult();
+            tuiApp?.RequestShutdown();
+        };
+
         var serviceManager = new HostedServiceManager();
         await serviceManager.StartAllAsync();
 
@@ -46,22 +57,35 @@ public static class Program
         {
             // 无 TUI 模式：等待关闭信号
             Console.WriteLine("Mutter running in headless mode. Press Ctrl+C to stop.");
-            var tcs = new TaskCompletionSource();
             Console.CancelKeyPress += (_, e) =>
             {
                 e.Cancel = true;
-                tcs.TrySetResult();
+                shutdownTcs.TrySetResult();
             };
-            AppDomain.CurrentDomain.ProcessExit += (_, _) => tcs.TrySetResult();
-            await tcs.Task;
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => shutdownTcs.TrySetResult();
+            await shutdownTcs.Task;
         }
         else
         {
             // TUI 模式
-            var tuiApp = new MainTuiApp(serviceManager);
+            tuiApp = new MainTuiApp(serviceManager);
             tuiApp.Run();
         }
 
         await serviceManager.StopAllAsync();
+
+        // Linux 没有独立 helper：服务停止后在本进程退出前替换文件，systemd 会拉起新版本。
+        // Windows 由面板已启动的 PowerShell helper 等待本进程退出后替换并重启。
+        if (OperatingSystem.IsLinux())
+        {
+            try
+            {
+                serviceManager.ApplyPendingUpdateAfterShutdown();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Update] 应用暂存更新失败: {ex.Message}");
+            }
+        }
     }
 }

@@ -22,6 +22,8 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 - [核心特性](#核心特性)
 - [技术栈与架构](#技术栈与架构)
 - [目录结构](#目录结构)
+- [下载即用版本 (Releases)](#下载即用版本-releases)
+  - [面板内一键更新](#面板内一键更新)
 - [快速起步 (Quick Start)](#快速起步-quick-start)
   - [1. 准备环境与凭据](#1-准备环境与凭据)
   - [2. 配置说明](#2-配置说明)
@@ -125,6 +127,43 @@ Mutter-Bot/
 
 ---
 
+## 下载即用版本 (Releases)
+
+不想从源码构建，可直接从 [GitHub Releases](https://github.com/TangKuku9/Mutter-Bot/releases) 下载对应平台的压缩包：
+
+| 平台 | 推荐包（无需 .NET） | 已装 .NET 运行时 |
+| --- | --- | --- |
+| Windows x64 | `mutter-bot-vX.Y.Z-win-x64-self-contained.zip` | `mutter-bot-vX.Y.Z-win-x64-framework-dependent.zip` |
+| Linux x64 | `mutter-bot-vX.Y.Z-linux-x64-self-contained.tar.gz` | `mutter-bot-vX.Y.Z-linux-x64-framework-dependent.tar.gz` |
+
+- **self-contained**：内置 .NET 9 运行时，解压即用；**framework-dependent**：体积更小，需预装 [ASP.NET Core 9 Runtime](https://dotnet.microsoft.com/download/dotnet/9.0)。
+- **Windows**：解压后编辑同目录的 `appsettings.json`（填入 `Mutter:AppId`、`Mutter:ClientSecret` 与面板口令），运行 `mutter-bot.exe` 进入 TUI；后台运行用 `mutter-bot.exe --headless`。
+- **Linux**：解压后进入目录执行 `sudo ./install.sh .`（压缩包已内置 `install.sh` 与 systemd 模板），首次安装后编辑 `/opt/mutter-bot/appsettings.json` 并执行 `sudo systemctl restart mutter-bot`。
+- Linux 自包含包仍依赖系统 ICU，精简发行版请先安装 `libicu`。
+- 校验下载：`sha256sum -c SHA256SUMS.txt`（Windows 可用 `Get-FileHash` 对照文件中的 SHA256）。
+
+> 版本号唯一来源是仓库根目录 [`Directory.Build.props`](Directory.Build.props) 的 `<Version>`。程序集、前端构建与 `/api/status` 都从这里取值；发布标签必须与之一致（例如 `2.0.0` 对应 `v2.0.0`），CI 会校验版本一致性。
+
+### 面板内一键更新
+
+从正式 Releases 解压安装并满足下列条件时，「关于」页会显示 **检查更新 → 立即更新**。点击后先下载并校验最新正式版，完成后弹窗询问是否安装；确认后才会替换文件并重启。选择稍后则保留 **立即安装** 入口，下次点击仍会先弹窗确认。
+
+| 环境 | 一键更新 | 说明 |
+| --- | --- | --- |
+| Windows x64（TUI 或 `--headless`） | 支持 | 更新助手等待主进程退出后替换文件并重新拉起 |
+| Linux x64（systemd 服务） | 支持 | 服务停止后替换文件，由 systemd 拉起新版本 |
+| Linux 非 systemd、开发运行、非 x64 | 不支持 | 显示「手动更新」，跳转 GitHub Releases |
+
+- 仅 **publish 产物**（压缩包解压后的安装目录）支持一键更新；从源码直接运行不会执行替换。包内的 `install.json` 是安装标记，请勿删除。
+- 下载完成后不会自动安装；只有确认安装时才写入待更新标记并触发重启。下载期间面板会显示实时进度条。
+- 更新包必须能在 `SHA256SUMS.txt` 中找到校验值，校验失败会终止更新。
+- `appsettings*.json`、`mutter-bot.db*`、`logs/` 不会被覆盖或删除。
+- 旧版本程序文件备份在安装目录的 `.backup/vX.Y.Z-<时间戳>/`，仅保留最近一份。
+- 更新完成后服务自动重启，面板会话失效，需要重新登录。
+- 手动回滚：停止程序，将 `.backup/vX.Y.Z-<时间戳>/` 内的文件复制回安装目录覆盖同名文件（**不要删除** `appsettings*.json` 与数据库），再重新启动。
+
+---
+
 ## 快速起步 (Quick Start)
 
 ### 1. 准备环境与凭据
@@ -218,7 +257,7 @@ npm run dev
 
 ## 生产部署 (Linux & systemd)
 
-项目提供了专为 Linux 设计的一键部署工具与服务模板：
+如果不想在本地编译，可直接使用 [Releases](#下载即用版本-releases) 中的 Linux 压缩包。以下为从源码发布的流程，项目提供了专为 Linux 设计的一键部署工具与服务模板：
 
 ```bash
 # 1. 本地编译前端并发布 Linux 产物

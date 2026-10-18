@@ -1,3 +1,4 @@
+using System.Reflection;
 using Microsoft.AspNetCore.Mvc;
 using Mutter.Core.Interfaces;
 using Mutter.Web.Models;
@@ -25,6 +26,7 @@ public class StatusController : ControllerBase
 
         return Task.FromResult<ActionResult<BotStatusDto>>(Ok(new BotStatusDto
         {
+            Version = Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown",
             IsConnected = _connection.IsConnected,
             BotQQ = _apiService.BotId,
             BotNickname = _apiService.BotName,

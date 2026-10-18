@@ -115,6 +115,19 @@ public sealed class MainTuiApp
             _serviceManager.LiveLogBus.LogEmitted -= OnLogEmitted;
     }
 
+    /// <summary>面板触发自更新重启时，从后台线程安全地结束 TUI 主循环。</summary>
+    public void RequestShutdown()
+    {
+        try
+        {
+            Application.MainLoop?.Invoke(() => Application.RequestStop());
+        }
+        catch
+        {
+            // TUI 已退出或尚未初始化
+        }
+    }
+
     private void OnLogEmitted(LogEntry entry)
     {
         _logQueue.Enqueue(entry);
