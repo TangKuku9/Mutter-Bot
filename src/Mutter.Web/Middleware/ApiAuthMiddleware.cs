@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Mutter.Web.Services;
@@ -28,12 +30,13 @@ public class ApiAuthMiddleware
     {
         var path = context.Request.Path.Value?.ToLower() ?? "";
 
-        // 公开路径：登录页、登录/登出/状态接口、站点图标
+        // 公开路径：登录页、登录/登出/状态接口、改密接口（无会话的初始密码首改）、站点图标
         var isPublicPath =
             path == "/login.html" ||
             path == "/api/auth/login" ||
             path == "/api/auth/logout" ||
             path == "/api/auth/status" ||
+            path == "/api/auth/change-password" ||
             path == "/vite.svg" ||
             path == "/favicon.ico";
 
@@ -52,8 +55,10 @@ public class ApiAuthMiddleware
         var bearerToken = _config["ApiAuth:Token"];
         if (!string.IsNullOrEmpty(bearerToken))
         {
-            var authHeader = context.Request.Headers.Authorization.FirstOrDefault();
-            bearerValid = authHeader == $"Bearer {bearerToken}";
+            var authHeader = context.Request.Headers.Authorization.FirstOrDefault() ?? string.Empty;
+            bearerValid = CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(authHeader),
+                Encoding.UTF8.GetBytes($"Bearer {bearerToken}"));
         }
 
         if (sessionValid || bearerValid)

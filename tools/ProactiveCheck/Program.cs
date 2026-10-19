@@ -583,6 +583,24 @@ Check(Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(geminiDoc.RootElement
 Check(Mutter.Core.Services.WebSearchProbe.Cases.Any(c => c.Endpoint == "gemini" && c.Shape == "gemini_native"),
     "矩阵含 Gemini 原生探测用例");
 
+Console.WriteLine("== 3g. 面板口令哈希（PBKDF2 迭代升级与旧格式兼容） ==");
+var panelHash = PanelPasswordHasher.Hash("s3cret-pass");
+Check(panelHash.Split('$').Length == 4 && panelHash.Split('$')[1] == "600000",
+    "新格式哈希带迭代数字段（60 万次）");
+Check(PanelPasswordHasher.Verify(panelHash, "s3cret-pass"), "新格式哈希校验通过");
+Check(!PanelPasswordHasher.Verify(panelHash, "wrong-pass"), "错误口令校验失败");
+Check(!PanelPasswordHasher.Verify("sha256$not-base64!$zz", "s3cret-pass"), "畸形存储值判为校验失败而非抛异常");
+Check(PanelPasswordHasher.NeedsRehash(panelHash) is false, "新格式不需要重哈希");
+// 旧格式（无迭代数段，10 万次）：升级前部署的存量哈希必须继续可校验
+var legacySalt = Convert.FromBase64String("AAAAAAAAAAAAAAAAAAAAAA==");
+using var legacyPbkdf2 = new System.Security.Cryptography.Rfc2898DeriveBytes(
+    "s3cret-pass", legacySalt, 100_000, System.Security.Cryptography.HashAlgorithmName.SHA256);
+var legacyHash = $"sha256${Convert.ToBase64String(legacySalt)}$" +
+    Convert.ToHexString(legacyPbkdf2.GetBytes(32)).ToLowerInvariant();
+Check(PanelPasswordHasher.Verify(legacyHash, "s3cret-pass"), "旧格式哈希（无迭代数段）仍可校验通过");
+Check(!PanelPasswordHasher.Verify(legacyHash, "wrong-pass"), "旧格式哈希校验错误口令失败");
+Check(PanelPasswordHasher.NeedsRehash(legacyHash), "旧格式哈希标记为需要重哈希");
+
 if (logicOnly)
 {
     Console.WriteLine("\n--logic-only：跳过依赖数据库的第 4~6 段。");
