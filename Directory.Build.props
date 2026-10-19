@@ -12,7 +12,7 @@
       版本号唯一来源：程序集、前端构建（vite.config.mjs）与 Release 工作流都读取这里。
       发版时修改此处，并同步 web/package.json；CI 会校验两者一致。
     -->
-    <Version>2.0.2</Version>
+    <Version>2.0.3</Version>
 
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 

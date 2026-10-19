@@ -83,6 +83,26 @@
               <div v-else-if="updateState.type === 'downloading'" class="update-progress">
                 <el-progress :percentage="update.progress" :stroke-width="6" :show-text="false" />
                 <span class="update-feedback downloading">{{ updateState.text }}</span>
+                <span v-if="downloadBytesText" class="update-feedback muted">{{ downloadBytesText }}</span>
+                <span v-if="update.progressError" class="update-feedback error">{{ update.progressError }}</span>
+              </div>
+              <div v-else-if="updateState.type === 'resume'" class="update-progress">
+                <el-progress :percentage="update.progress" :stroke-width="6" :show-text="false" />
+                <el-tooltip content="已下载的部分会保留，从断点继续" placement="top">
+                  <el-link type="success" class="update-action" @click="downloadUpdate">
+                    {{ updateState.text }}
+                    <el-icon><Download /></el-icon>
+                  </el-link>
+                </el-tooltip>
+                <span v-if="downloadBytesText" class="update-feedback muted">已下载 {{ downloadBytesText }}</span>
+                <span v-if="update.progressError" class="update-feedback error">{{ update.progressError }}</span>
+              </div>
+              <div v-else-if="updateState.type === 'retry'" class="update-progress">
+                <el-link type="success" class="update-action" @click="downloadUpdate">
+                  {{ updateState.text }}
+                  <el-icon><Download /></el-icon>
+                </el-link>
+                <span v-if="update.progressError" class="update-feedback error">{{ update.progressError }}</span>
               </div>
               <el-tooltip
                 v-else-if="updateState.type === 'manual'"
@@ -277,6 +297,10 @@ const update = ref({
   stagedVersion: '',
   progress: 0,
   progressPhase: '',
+  downloadedBytes: 0,
+  totalBytes: 0,
+  resumable: false,
+  progressError: '',
   currentVersion: '',
   latestVersion: '',
   hasUpdate: false,
@@ -288,20 +312,38 @@ const update = ref({
 })
 let updateTimer = null
 let progressTimer = null
+let progressTickBusy = false
+
+const formatBytes = (bytes) => {
+  const value = Math.max(0, Number(bytes) || 0)
+  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`
+  return `${value} B`
+}
+
+const downloadBytesText = computed(() => {
+  const downloaded = update.value.downloadedBytes
+  const total = update.value.totalBytes
+  if (!downloaded && !total) return ''
+  return total > 0 ? `${formatBytes(downloaded)} / ${formatBytes(total)}` : formatBytes(downloaded)
+})
 
 const updateState = computed(() => {
   if (update.value.restarting) return { type: 'restarting', text: '更新完成，服务正在重启…' }
   if (update.value.installing) return { type: 'installing', text: '正在安装，服务即将重启…' }
   if (update.value.downloading) {
-    const text = update.value.progressPhase === 'extracting'
-      ? '正在解压更新包…'
-      : update.value.progressPhase === 'verifying'
-        ? '正在校验更新包…'
-        : `正在下载更新… ${update.value.progress}%`
+    let text
+    if (update.value.progressPhase === 'extracting') text = '正在解压更新包…'
+    else if (update.value.progressPhase === 'verifying') text = '正在校验更新包…'
+    else if (update.value.progressPhase === 'retrying') text = `网络中断，正在重试下载… ${update.value.progress}%`
+    else text = `正在下载更新… ${update.value.progress}%`
     return { type: 'downloading', text }
   }
   if (update.value.checking) return { type: 'checking', text: '正在检查…' }
   if (update.value.staged) return { type: 'install', text: '立即安装' }
+  if (update.value.resumable) return { type: 'resume', text: '继续下载' }
+  if (update.value.progressError) return { type: 'retry', text: '重新下载' }
   if (update.value.applyError) return { type: 'error', text: `更新失败：${update.value.applyError}` }
   if (update.value.error) return { type: 'error', text: `检查失败：${update.value.error}` }
   if (update.value.hasUpdate) {
@@ -312,13 +354,113 @@ const updateState = computed(() => {
   return { type: 'latest', text: '已是最新' }
 })
 
+const applyProgress = (data) => {
+  const phase = String(data?.phase || 'idle')
+  const active = Boolean(data?.active)
+  const percent = Math.max(0, Math.min(100, Math.round(Number(data?.percent) || 0)))
+  const downloadedBytes = Math.max(0, Number(data?.downloadedBytes) || 0)
+  const totalBytes = Math.max(0, Number(data?.totalBytes) || 0)
+
+  if (active && ['downloading', 'retrying', 'verifying', 'extracting'].includes(phase)) {
+    update.value = {
+      ...update.value,
+      checking: false,
+      downloading: true,
+      installing: false,
+      staged: false,
+      progress: percent,
+      progressPhase: phase,
+      downloadedBytes,
+      totalBytes,
+      resumable: false,
+      progressError: ''
+    }
+    startProgressPolling()
+    return 'active'
+  }
+
+  if (phase === 'done' || data?.staged) {
+    const completed = update.value.downloading
+    stopProgressPolling()
+    update.value = {
+      ...update.value,
+      checking: false,
+      downloading: false,
+      staged: true,
+      stagedVersion: data?.version || update.value.stagedVersion,
+      progress: 100,
+      progressPhase: 'done',
+      downloadedBytes: totalBytes || downloadedBytes,
+      totalBytes,
+      resumable: false,
+      progressError: ''
+    }
+    return completed ? 'completed' : 'staged'
+  }
+
+  if (phase === 'paused' || (phase === 'error' && data?.resumable)) {
+    stopProgressPolling()
+    update.value = {
+      ...update.value,
+      checking: false,
+      downloading: false,
+      staged: false,
+      progress: percent,
+      progressPhase: phase,
+      downloadedBytes,
+      totalBytes,
+      resumable: Boolean(data?.resumable),
+      progressError: data?.error || ''
+    }
+    return 'paused'
+  }
+
+  if (phase === 'error') {
+    stopProgressPolling()
+    update.value = {
+      ...update.value,
+      checking: false,
+      downloading: false,
+      staged: false,
+      progress: percent,
+      progressPhase: 'error',
+      downloadedBytes,
+      totalBytes,
+      resumable: false,
+      progressError: data?.error || '下载失败，请重试'
+    }
+    return 'error'
+  }
+
+  if (update.value.downloading) {
+    stopProgressPolling()
+    update.value = { ...update.value, downloading: false, progressPhase: 'idle' }
+  }
+  return 'idle'
+}
+
+const fetchProgress = async () => {
+  const { data } = await api.get('/update/progress', { timeout: 5000, skipErrorMessage: true })
+  return data
+}
+
+const hydrateProgress = async () => {
+  try {
+    return applyProgress(await fetchProgress())
+  } catch {
+    return 'unknown'
+  }
+}
+
 const checkUpdate = async () => {
   if (update.value.downloading || update.value.installing || update.value.restarting) return
   update.value = { ...update.value, checking: true, error: '', applyError: '' }
   const startedAt = Date.now()
   let patch
+  let checked = false
   try {
     const { data } = await api.get('/update', { timeout: 15000, skipErrorMessage: true })
+    checked = true
     patch = {
       currentVersion: data.currentVersion || '',
       latestVersion: data.latestVersion || '',
@@ -338,7 +480,18 @@ const checkUpdate = async () => {
   // 后端有 10 分钟缓存，检查常常瞬间返回；保留最短可见时长，让“正在检查…”能被看到。
   const remaining = 1000 - (Date.now() - startedAt)
   if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining))
+
+  if (checked && !patch.hasUpdate && !patch.staged) {
+    patch.resumable = false
+    patch.progressError = ''
+    patch.progressPhase = ''
+    patch.progress = 0
+    patch.downloadedBytes = 0
+    patch.totalBytes = 0
+  }
   update.value = { ...update.value, checking: false, ...patch }
+  // 检查结果不能覆盖仍在进行中的下载：以服务端持久状态为准恢复进度。
+  await hydrateProgress()
 }
 
 const openLatestRelease = () => {
@@ -417,20 +570,29 @@ const stopProgressPolling = () => {
   }
 }
 
+let progressFailures = 0
+
 const startProgressPolling = () => {
-  stopProgressPolling()
+  if (progressTimer) return
+  progressFailures = 0
   progressTimer = setInterval(async () => {
-    if (!update.value.downloading) return
+    if (progressTickBusy) return
+    progressTickBusy = true
     try {
-      const { data } = await api.get('/update/progress', { timeout: 3000, skipErrorMessage: true })
-      if (!update.value.downloading) return
-      update.value = {
-        ...update.value,
-        progress: Number(data?.percent) || 0,
-        progressPhase: data?.phase || ''
-      }
+      const data = await fetchProgress()
+      progressFailures = 0
+      const result = applyProgress(data)
+      if (result === 'completed') await requestInstall()
     } catch {
-      // 进度查询失败不打断下载
+      progressFailures += 1
+      if (progressFailures >= 5 && update.value.downloading && !update.value.progressError) {
+        update.value = {
+          ...update.value,
+          progressError: '暂时无法获取下载进度，连接恢复后会自动继续'
+        }
+      }
+    } finally {
+      progressTickBusy = false
     }
   }, 400)
 }
@@ -441,43 +603,66 @@ const downloadUpdate = async () => {
     await requestInstall()
     return
   }
-  if (!update.value.hasUpdate) return
+  if (!update.value.hasUpdate && !update.value.resumable && !update.value.progressError) return
   update.value = {
     ...update.value,
     downloading: true,
-    progress: 0,
+    progress: update.value.resumable ? update.value.progress : 0,
     progressPhase: 'downloading',
+    resumable: false,
+    progressError: '',
     error: '',
     applyError: ''
   }
   startProgressPolling()
   try {
+    // 后端只负责启动后台任务并立即返回；下载进度由轮询独立获取，不再绑定这个请求。
     const { data } = await api.post('/update/stage', null, {
-      timeout: 600000,
+      timeout: 30000,
       skipErrorMessage: true
     })
-    stopProgressPolling()
-    update.value = {
-      ...update.value,
-      downloading: false,
-      progress: 100,
-      progressPhase: 'done',
-      staged: true,
-      stagedVersion: data.version || update.value.latestVersion
+    if (data?.staged) {
+      stopProgressPolling()
+      update.value = {
+        ...update.value,
+        downloading: false,
+        progress: 100,
+        progressPhase: 'done',
+        staged: true,
+        stagedVersion: data.version || update.value.latestVersion
+      }
+      await requestInstall()
     }
-    await requestInstall()
   } catch (err) {
+    // 请求超时或网络错误时，后台任务可能已经启动；先核对服务端状态再决定是否报错。
+    let progress = null
+    try {
+      progress = await fetchProgress()
+    } catch {
+      // 服务不可达时按启动失败处理
+    }
+    if (progress?.active) {
+      applyProgress(progress)
+      return
+    }
+
     stopProgressPolling()
     update.value = {
       ...update.value,
       downloading: false,
-      applyError: err?.response?.data?.error || '请稍后重试'
+      resumable: Boolean(progress?.resumable),
+      progressPhase: progress?.phase || 'error',
+      progressError:
+        err?.response?.data?.error ||
+        progress?.error ||
+        '启动下载失败，请稍后重试'
     }
   }
 }
 
 onMounted(() => {
   loadStatus()
+  hydrateProgress()
   checkUpdate()
   timer = setInterval(loadStatus, 10000)
   updateTimer = setInterval(checkUpdate, 30 * 60 * 1000)
