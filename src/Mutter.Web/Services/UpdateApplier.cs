@@ -1,10 +1,14 @@
 using System.Diagnostics;
 using System.Formats.Tar;
+using System.Globalization;
 using System.IO.Compression;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Hosting;
 using Mutter.Web.Models;
 
 namespace Mutter.Web.Services;
@@ -12,11 +16,25 @@ namespace Mutter.Web.Services;
 public sealed class UpdateApplier
 {
     private const string UpdateDirName = ".update";
-    private const string PendingDirName = "pending";
+    private const string DownloadDirName = "download";
+    private const string StagingDirName = "staging";
+    private const string StagingNewDirName = "staging-new";
+    private const string ExtractDirName = "extract";
+    private const string StateFileName = "state.json";
     private const string MarkerFileName = "pending.json";
     private const string BackupDirName = ".backup";
+    private const string DownloadClientName = "update-download";
+    private const int MaxDownloadAttempts = 5;
     private static readonly TimeSpan MaxPendingAge = TimeSpan.FromHours(1);
+    private static readonly TimeSpan HeaderTimeout = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan ReadIdleTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan StatePersistInterval = TimeSpan.FromSeconds(2);
     private static readonly JsonSerializerOptions MarkerJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    };
+    private static readonly JsonSerializerOptions StateJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true
@@ -24,122 +42,651 @@ public sealed class UpdateApplier
     private static readonly JsonSerializerOptions HelperJsonOptions = new() { WriteIndented = true };
 
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<UpdateApplier> _logger;
-    private readonly object _stagedSync = new();
+    private readonly string _appDir;
+    private readonly object _sync = new();
     private StagedUpdate? _staged;
-    private readonly object _progressSync = new();
+    private PersistedUpdateState _state = new();
     private UpdateProgressDto _progress = new() { Phase = "idle" };
-    private int _busy;
+    private bool _loaded;
+    private Task? _stageTask;
+    private CancellationTokenSource? _stageCts;
+    private int _installBusy;
+    private DateTimeOffset _lastPersistAt = DateTimeOffset.MinValue;
 
-    public UpdateApplier(IHttpClientFactory httpClientFactory, ILogger<UpdateApplier> logger)
+    public UpdateApplier(
+        IHttpClientFactory httpClientFactory,
+        IHostApplicationLifetime lifetime,
+        ILogger<UpdateApplier> logger)
     {
         _httpClientFactory = httpClientFactory;
+        _lifetime = lifetime;
         _logger = logger;
+        _appDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
     }
 
-    public bool TryBegin() => Interlocked.CompareExchange(ref _busy, 1, 0) == 0;
+    private string UpdateDir => Path.Combine(_appDir, UpdateDirName);
+    private string StatePath => Path.Combine(UpdateDir, StateFileName);
+    private string DownloadDir => Path.Combine(UpdateDir, DownloadDirName);
+    private string StagingDir => Path.Combine(UpdateDir, StagingDirName);
+    private string StagingNewDir => Path.Combine(UpdateDir, StagingNewDirName);
+    private string ExtractDir => Path.Combine(UpdateDir, ExtractDirName);
 
-    public void End() => Interlocked.Exchange(ref _busy, 0);
+    public bool TryBeginInstall()
+    {
+        lock (_sync)
+        {
+            EnsureLoadedLocked();
+            if (_stageTask is { IsCompleted: false })
+                return false;
+            return Interlocked.CompareExchange(ref _installBusy, 1, 0) == 0;
+        }
+    }
+
+    public void EndInstall() => Interlocked.Exchange(ref _installBusy, 0);
 
     public StagedUpdate? GetStaged()
     {
-        lock (_stagedSync)
+        lock (_sync)
+        {
+            EnsureLoadedLocked();
             return _staged;
+        }
     }
 
     public UpdateProgressDto GetProgress()
     {
-        lock (_progressSync)
+        lock (_sync)
+        {
+            EnsureLoadedLocked();
             return _progress;
+        }
     }
 
-    private void ReportProgress(bool active, long downloadedBytes, long totalBytes, string phase)
+    /// <summary>
+    /// 启动后台下载并立即返回。下载状态写入安装目录的 .update 下，页面刷新或服务重启都不会丢；
+    /// 已在进行中时重复调用直接返回当前状态，不报冲突。
+    /// </summary>
+    public StageStartResult StartStage(SelfUpdatePlan plan)
     {
-        var percent = totalBytes > 0
-            ? (int)Math.Min(100L, downloadedBytes * 100L / totalBytes)
-            : 0;
-        lock (_progressSync)
+        lock (_sync)
         {
-            _progress = new UpdateProgressDto
+            EnsureLoadedLocked();
+            if (Volatile.Read(ref _installBusy) != 0)
+                return StageStartResult.Rejected("正在安装更新，请稍候");
+
+            if (_stageTask is { IsCompleted: false })
+                return new StageStartResult(false, null, _progress);
+
+            if (_staged is not null &&
+                string.Equals(_staged.Version, plan.Version, StringComparison.Ordinal))
             {
-                Active = active,
-                Percent = percent,
-                DownloadedBytes = downloadedBytes,
-                TotalBytes = totalBytes,
-                Phase = phase
+                return new StageStartResult(true, _staged, _progress);
+            }
+
+            PrepareForPlanLocked(plan);
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.ApplicationStopping);
+            _stageCts = cts;
+            var token = cts.Token;
+            _stageTask = Task.Run(() => RunStageAsync(plan, token), CancellationToken.None);
+            return new StageStartResult(false, null, _progress);
+        }
+    }
+
+    private void PrepareForPlanLocked(SelfUpdatePlan plan)
+    {
+        var sameAsset = string.Equals(_state.Version, plan.Version, StringComparison.Ordinal) &&
+                        string.Equals(_state.AssetName, plan.AssetName, StringComparison.Ordinal);
+
+        if (!sameAsset)
+        {
+            ClearWorkspaceLocked();
+            _state = new PersistedUpdateState
+            {
+                Version = plan.Version,
+                AssetName = plan.AssetName,
+                AssetUrl = plan.AssetUrl,
+                ChecksumUrl = plan.ChecksumUrl,
+                AssetSize = plan.AssetSize
             };
         }
+        else
+        {
+            _state.AssetUrl = plan.AssetUrl;
+            _state.ChecksumUrl = plan.ChecksumUrl;
+            if (plan.AssetSize > 0)
+                _state.AssetSize = plan.AssetSize;
+        }
+
+        if (_staged is null)
+        {
+            TryDelete(StagingDir);
+            TryDelete(StagingNewDir);
+        }
+
+        var archivePath = GetArchivePath(plan.AssetName);
+        var length = GetFileLength(archivePath);
+        if (length > 0 && _state.AssetSize > 0 && length > _state.AssetSize)
+        {
+            TryDelete(archivePath);
+            length = 0;
+            _state.ETag = null;
+            _state.LastModified = null;
+        }
+
+        _state.DownloadedBytes = length;
+        _state.Phase = "downloading";
+        _state.Error = null;
+        _state.StagingDirectory = null;
+        _state.UpdatedAt = DateTimeOffset.UtcNow;
+        _lastPersistAt = DateTimeOffset.MinValue;
+        UpdateProgressLocked(active: true, "downloading", null, persistNow: true);
+    }
+
+    private void EnsureLoadedLocked()
+    {
+        if (_loaded)
+            return;
+        _loaded = true;
+
+        if (File.Exists(StatePath))
+        {
+            try
+            {
+                _state = JsonSerializer.Deserialize<PersistedUpdateState>(
+                    File.ReadAllText(StatePath),
+                    StateJsonOptions) ?? new PersistedUpdateState();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "读取更新状态失败，按空闲状态处理");
+                _state = new PersistedUpdateState();
+            }
+        }
+
+        // 已经运行在这个版本上，说明残留的下载/暂存目录来自手动升级或未完成的旧流程，直接清掉。
+        if (SameVersion(_state.Version, GetCurrentVersion()))
+        {
+            ClearWorkspaceLocked();
+            _state = new PersistedUpdateState();
+            UpdateProgressLocked(active: false, "idle", null, persistNow: false);
+            return;
+        }
+
+        var stagingValid = StagingIsValid() && !string.IsNullOrWhiteSpace(_state.Version);
+        if (stagingValid)
+        {
+            _staged = new StagedUpdate(StagingDir, _state.Version!, _state.AssetName ?? string.Empty);
+            _state.Phase = "done";
+            _state.StagingDirectory = StagingDir;
+            UpdateProgressLocked(active: false, "done", null, persistNow: true);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(_state.StagingDirectory))
+        {
+            TryDelete(StagingDir);
+            TryDelete(StagingNewDir);
+            _state.StagingDirectory = null;
+        }
+
+        var partial = GetPartialLengthLocked();
+        if (partial > _state.DownloadedBytes)
+            _state.DownloadedBytes = partial;
+
+        switch (_state.Phase)
+        {
+            case "downloading":
+            case "retrying":
+            case "verifying":
+            case "extracting":
+                // 进程在任务中途退出：保留断点，回到页面时显示可继续的状态。
+                if (partial > 0)
+                {
+                    _state.Phase = "paused";
+                    _state.Error = null;
+                    UpdateProgressLocked(active: false, "paused", null, persistNow: true);
+                }
+                else
+                {
+                    _state.Phase = "error";
+                    _state.Error = "上次下载未完成，请重新下载";
+                    UpdateProgressLocked(active: false, "error", _state.Error, persistNow: true);
+                }
+                break;
+
+            case "paused":
+                if (partial > 0)
+                {
+                    UpdateProgressLocked(active: false, "paused", null, persistNow: false);
+                }
+                else
+                {
+                    _state.Phase = "idle";
+                    UpdateProgressLocked(active: false, "idle", null, persistNow: true);
+                }
+                break;
+
+            case "error":
+                UpdateProgressLocked(active: false, "error", _state.Error, persistNow: false);
+                break;
+
+            default:
+                _state.Phase = "idle";
+                UpdateProgressLocked(active: false, "idle", null, persistNow: false);
+                break;
+        }
+    }
+
+    private void ClearWorkspaceLocked()
+    {
+        _staged = null;
+        TryDelete(UpdateDir);
     }
 
     /// <summary>下载、校验并暂存更新包；此时不写安装标记，取消安装后不会在退出时被应用。</summary>
-    public async Task<StagedUpdate> StageAsync(SelfUpdatePlan plan, string appDir, CancellationToken ct)
+    private async Task RunStageAsync(SelfUpdatePlan plan, CancellationToken ct)
     {
-        ValidateAssetUrl(plan.AssetUrl);
-        ValidateAssetUrl(plan.ChecksumUrl);
-
-        DiscardStaged(appDir);
-
-        var workRoot = Path.Combine(Path.GetTempPath(), "mutter-bot-update-" + Guid.NewGuid().ToString("N"));
-        var stagingDir = Path.Combine(workRoot, PendingDirName);
-        var downloadDir = Path.Combine(workRoot, "download");
-        var extractDir = Path.Combine(workRoot, "extract");
-        var totalBytes = plan.AssetSize;
-        ReportProgress(true, 0, totalBytes, "downloading");
-
         try
         {
-            Directory.CreateDirectory(stagingDir);
-            Directory.CreateDirectory(downloadDir);
-            Directory.CreateDirectory(extractDir);
+            ValidateAssetUrl(plan.AssetUrl);
+            ValidateAssetUrl(plan.ChecksumUrl);
+            Directory.CreateDirectory(DownloadDir);
 
-            var client = _httpClientFactory.CreateClient();
-            client.Timeout = TimeSpan.FromMinutes(10);
+            var expectedHash = await ResolveChecksumAsync(plan, ct);
+            await DownloadWithRetriesAsync(plan, ct);
 
-            var checksumText = await client.GetStringAsync(plan.ChecksumUrl, ct);
-            var expectedHash = ParseChecksum(checksumText, plan.AssetName);
+            var archivePath = GetArchivePath(plan.AssetName);
+            lock (_sync)
+                UpdateProgressLocked(active: true, "verifying", null, persistNow: true);
 
-            var archivePath = Path.Combine(downloadDir, plan.AssetName);
-            var actualHash = await DownloadAndHashAsync(
-                client,
-                plan.AssetUrl,
-                archivePath,
-                (downloaded, total) =>
-                {
-                    if (total > 0)
-                        totalBytes = total;
-                    ReportProgress(true, downloaded, totalBytes, "downloading");
-                },
-                ct);
-
-            ReportProgress(true, totalBytes, totalBytes, "verifying");
+            var actualHash = await ComputeSha256Async(archivePath, ct);
             if (!string.Equals(expectedHash, actualHash, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("更新包 SHA256 校验失败，已取消更新");
+            {
+                TryDelete(archivePath);
+                lock (_sync)
+                {
+                    _state.DownloadedBytes = 0;
+                    _state.ETag = null;
+                    _state.LastModified = null;
+                    _state.ExpectedHash = null;
+                }
+                throw new InvalidOperationException("更新包 SHA256 校验失败，已删除损坏文件，请重新下载");
+            }
 
-            ReportProgress(true, totalBytes, totalBytes, "extracting");
-            ExtractArchive(archivePath, extractDir);
-            var packageRoot = FindPackageRoot(extractDir);
-            MoveDirectoryContents(packageRoot, stagingDir);
+            lock (_sync)
+                UpdateProgressLocked(active: true, "extracting", null, persistNow: true);
+
+            TryDelete(StagingNewDir);
+            TryDelete(ExtractDir);
+            Directory.CreateDirectory(ExtractDir);
+            ExtractArchive(archivePath, ExtractDir);
+            var packageRoot = FindPackageRoot(ExtractDir);
+            Directory.CreateDirectory(StagingNewDir);
+            MoveDirectoryContents(packageRoot, StagingNewDir);
 
             var exeName = OperatingSystem.IsWindows() ? "mutter-bot.exe" : "mutter-bot";
-            if (!File.Exists(Path.Combine(stagingDir, exeName)))
+            if (!File.Exists(Path.Combine(StagingNewDir, exeName)))
                 throw new InvalidOperationException("更新包缺少可执行文件，已取消更新");
 
-            TryDelete(downloadDir);
-            TryDelete(extractDir);
+            TryDelete(StagingDir);
+            Directory.Move(StagingNewDir, StagingDir);
+            TryDelete(DownloadDir);
+            TryDelete(ExtractDir);
 
-            var staged = new StagedUpdate(stagingDir, plan.Version, plan.AssetName);
-            lock (_stagedSync)
-                _staged = staged;
+            lock (_sync)
+            {
+                _staged = new StagedUpdate(StagingDir, plan.Version, plan.AssetName);
+                _state.DownloadedBytes = Math.Max(_state.DownloadedBytes, _state.AssetSize);
+                _state.StagingDirectory = StagingDir;
+                _state.Error = null;
+                UpdateProgressLocked(active: false, "done", null, persistNow: true);
+            }
 
-            ReportProgress(false, totalBytes, totalBytes, "done");
-            _logger.LogInformation("更新包已暂存：{Asset} -> {Staging}", plan.AssetName, stagingDir);
-            return staged;
+            _logger.LogInformation("更新包已暂存：{Asset} -> {Staging}", plan.AssetName, StagingDir);
         }
-        catch
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            ReportProgress(false, 0, totalBytes, "error");
-            TryDelete(workRoot);
-            throw;
+            lock (_sync)
+            {
+                var partial = GetPartialLengthLocked();
+                _state.DownloadedBytes = Math.Max(_state.DownloadedBytes, partial);
+                if (partial > 0)
+                {
+                    UpdateProgressLocked(active: false, "paused", null, persistNow: true);
+                }
+                else
+                {
+                    _state.Phase = "idle";
+                    UpdateProgressLocked(active: false, "idle", null, persistNow: true);
+                }
+            }
+            _logger.LogInformation("更新下载已随服务停止而暂停，可稍后继续");
+        }
+        catch (Exception ex)
+        {
+            lock (_sync)
+            {
+                var partial = GetPartialLengthLocked();
+                _state.DownloadedBytes = Math.Max(_state.DownloadedBytes, partial);
+                UpdateProgressLocked(active: false, "error", ex.Message, persistNow: true);
+            }
+            _logger.LogError(ex, "下载更新包失败");
+        }
+        finally
+        {
+            lock (_sync)
+            {
+                _stageCts?.Dispose();
+                _stageCts = null;
+                _stageTask = null;
+            }
+        }
+    }
+
+    private async Task<string> ResolveChecksumAsync(SelfUpdatePlan plan, CancellationToken ct)
+    {
+        lock (_sync)
+        {
+            if (!string.IsNullOrWhiteSpace(_state.ExpectedHash))
+                return _state.ExpectedHash;
+        }
+
+        Exception? lastError = null;
+        string? checksumText = null;
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(60));
+                var client = _httpClientFactory.CreateClient(DownloadClientName);
+                checksumText = await client.GetStringAsync(plan.ChecksumUrl, timeout.Token);
+                break;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
+            {
+                lastError = ex;
+                if (attempt < 3)
+                    await Task.Delay(TimeSpan.FromSeconds(2 * attempt), ct);
+            }
+        }
+
+        if (checksumText is null)
+            throw new InvalidOperationException($"获取更新包校验值失败：{lastError?.Message}");
+
+        // SHA256SUMS.txt 缺少条目是确定性失败，不参与重试。
+        var expectedHash = ParseChecksum(checksumText, plan.AssetName);
+        lock (_sync)
+        {
+            _state.ExpectedHash = expectedHash;
+            PersistStateLocked();
+        }
+        return expectedHash;
+    }
+
+    private async Task DownloadWithRetriesAsync(SelfUpdatePlan plan, CancellationToken ct)
+    {
+        Exception? lastError = null;
+        var attempt = 1;
+        var bestProgressBytes = GetFileLength(GetArchivePath(plan.AssetName));
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                _state.DownloadedBytes = Math.Max(_state.DownloadedBytes, GetPartialLengthLocked());
+                UpdateProgressLocked(active: true, "downloading", null, persistNow: true);
+            }
+
+            try
+            {
+                await DownloadAttemptAsync(plan, ct);
+                return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or TimeoutException)
+            {
+                lastError = ex;
+                var currentBytes = GetFileLength(GetArchivePath(plan.AssetName));
+
+                // 只要整体下载确有推进，就重置重试预算：慢链路可能反复断线，但每次都能继续向前。
+                if (currentBytes > bestProgressBytes + 256 * 1024)
+                {
+                    bestProgressBytes = currentBytes;
+                    attempt = 1;
+                }
+
+                _logger.LogWarning(ex, "更新包下载中断（第 {Attempt}/{Max} 次）", attempt, MaxDownloadAttempts);
+                if (attempt >= MaxDownloadAttempts)
+                    break;
+                attempt++;
+
+                lock (_sync)
+                {
+                    _state.DownloadedBytes = Math.Max(_state.DownloadedBytes, currentBytes);
+                    UpdateProgressLocked(active: true, "retrying", null, persistNow: true);
+                }
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(20, 2 * attempt)), ct);
+            }
+        }
+
+        throw new IOException($"下载更新包失败：{lastError?.Message ?? "网络连接中断"}", lastError);
+    }
+
+    private async Task DownloadAttemptAsync(SelfUpdatePlan plan, CancellationToken ct)
+    {
+        var archivePath = GetArchivePath(plan.AssetName);
+        var existingBytes = GetFileLength(archivePath);
+        var resumeOffset = existingBytes;
+        if (existingBytes > 0 && plan.AssetSize > 0 && existingBytes > plan.AssetSize)
+        {
+            TryDelete(archivePath);
+            existingBytes = 0;
+            resumeOffset = 0;
+            lock (_sync)
+            {
+                _state.ETag = null;
+                _state.LastModified = null;
+            }
+        }
+
+        if (existingBytes > 0 && plan.AssetSize > 0 && existingBytes == plan.AssetSize)
+        {
+            lock (_sync)
+            {
+                _state.AssetSize = plan.AssetSize;
+                _state.DownloadedBytes = existingBytes;
+                UpdateProgressLocked(active: true, "downloading", null, persistNow: true);
+            }
+            return;
+        }
+
+        string? eTag;
+        string? lastModified;
+        lock (_sync)
+        {
+            eTag = _state.ETag;
+            lastModified = _state.LastModified;
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, plan.AssetUrl);
+        if (existingBytes > 0)
+        {
+            request.Headers.Range = new RangeHeaderValue(existingBytes, null);
+            if (!string.IsNullOrWhiteSpace(eTag) &&
+                EntityTagHeaderValue.TryParse(eTag, out var entityTag))
+            {
+                request.Headers.IfRange = new RangeConditionHeaderValue(entityTag);
+            }
+            else if (DateTimeOffset.TryParse(
+                         lastModified,
+                         CultureInfo.InvariantCulture,
+                         DateTimeStyles.AssumeUniversal,
+                         out var lastModifiedAt))
+            {
+                request.Headers.IfRange = new RangeConditionHeaderValue(lastModifiedAt);
+            }
+        }
+
+        var client = _httpClientFactory.CreateClient(DownloadClientName);
+        using var headerTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        headerTimeout.CancelAfter(HeaderTimeout);
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                headerTimeout.Token);
+            // 响应头已到达，后续只受逐次读取的停滞超时约束，不能让这个定时器影响长时间下载。
+            headerTimeout.CancelAfter(Timeout.InfiniteTimeSpan);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException($"连接下载服务器超过 {HeaderTimeout.TotalSeconds:0} 秒无响应");
+        }
+
+        using (response)
+        {
+            long totalBytes;
+            var append = false;
+
+            if (response.StatusCode == HttpStatusCode.PartialContent && existingBytes > 0)
+            {
+                var contentRange = response.Content.Headers.ContentRange;
+                if (contentRange?.From != existingBytes)
+                {
+                    // 本地断点与服务端不一致且无法靠 If-Range 纠正，删掉重来，避免重试循环死锁在同一个偏移上。
+                    TryDelete(archivePath);
+                    lock (_sync)
+                    {
+                        _state.ETag = null;
+                        _state.LastModified = null;
+                        _state.DownloadedBytes = 0;
+                    }
+                    throw new HttpRequestException("断点续传响应的起始位置与本地文件不一致，将重新下载");
+                }
+
+                if (contentRange.Length is long serverLength &&
+                    plan.AssetSize > 0 &&
+                    serverLength != plan.AssetSize)
+                {
+                    TryDelete(archivePath);
+                    lock (_sync)
+                    {
+                        _state.ETag = null;
+                        _state.LastModified = null;
+                        _state.DownloadedBytes = 0;
+                    }
+                    throw new HttpRequestException("更新包已在服务器上变化，将重新下载");
+                }
+
+                totalBytes = contentRange.Length ?? plan.AssetSize;
+                append = true;
+                _logger.LogInformation(
+                    "断点续传：从 {Downloaded}/{Total} 字节继续下载 {Asset}",
+                    existingBytes,
+                    totalBytes,
+                    plan.AssetName);
+
+                lock (_sync)
+                {
+                    if (response.Headers.ETag is not null)
+                        _state.ETag = response.Headers.ETag.ToString();
+                    if (response.Content.Headers.LastModified is { } lastModifiedAt)
+                        _state.LastModified = lastModifiedAt.ToString("R");
+                }
+            }
+            else if (response.StatusCode == HttpStatusCode.PartialContent)
+            {
+                throw new IOException("服务器返回了未请求的部分内容");
+            }
+            else if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+            {
+                TryDelete(archivePath);
+                lock (_sync)
+                {
+                    _state.ETag = null;
+                    _state.LastModified = null;
+                    _state.DownloadedBytes = 0;
+                }
+                throw new HttpRequestException("断点续传请求被拒绝，将重新下载");
+            }
+            else
+            {
+                response.EnsureSuccessStatusCode();
+                // 服务器忽略了 Range 或资源已变化：截断旧文件，从头下载。
+                if (resumeOffset > 0)
+                {
+                    _logger.LogInformation(
+                        "服务器未接受断点续传（HTTP {Status}），从头下载 {Asset}",
+                        (int)response.StatusCode,
+                        plan.AssetName);
+                }
+                existingBytes = 0;
+                totalBytes = response.Content.Headers.ContentLength ?? plan.AssetSize;
+                lock (_sync)
+                {
+                    _state.ETag = response.Headers.ETag?.ToString();
+                    _state.LastModified = response.Content.Headers.LastModified?.ToString("R");
+                }
+            }
+
+            if (totalBytes <= 0)
+                totalBytes = plan.AssetSize;
+
+            lock (_sync)
+            {
+                if (totalBytes > 0)
+                    _state.AssetSize = totalBytes;
+                _state.DownloadedBytes = existingBytes;
+                UpdateProgressLocked(active: true, "downloading", null, persistNow: true);
+            }
+
+            await using var input = await response.Content.ReadAsStreamAsync(ct);
+            await using var output = new FileStream(
+                archivePath,
+                append ? FileMode.Append : FileMode.Create,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+            var buffer = new byte[32 * 1024];
+            var downloadedBytes = existingBytes;
+            while (true)
+            {
+                var read = await ReadWithIdleTimeoutAsync(input, buffer, ct);
+                if (read <= 0)
+                    break;
+
+                await output.WriteAsync(buffer.AsMemory(0, read), ct);
+                downloadedBytes += read;
+
+                lock (_sync)
+                {
+                    if (_state.AssetSize > 0 && downloadedBytes > _state.AssetSize)
+                        throw new IOException("下载数据超过预期长度");
+                    _state.DownloadedBytes = downloadedBytes;
+                    var persist = DateTimeOffset.UtcNow - _lastPersistAt >= StatePersistInterval;
+                    UpdateProgressLocked(active: true, _state.Phase, null, persist);
+                }
+            }
+
+            await output.FlushAsync(ct);
+            if (totalBytes > 0 && downloadedBytes < totalBytes)
+                throw new IOException($"连接提前结束（{downloadedBytes}/{totalBytes} 字节）");
         }
     }
 
@@ -160,20 +707,6 @@ public sealed class UpdateApplier
             Path.Combine(updateDir, MarkerFileName),
             JsonSerializer.Serialize(marker, MarkerJsonOptions),
             Encoding.UTF8);
-    }
-
-    private void DiscardStaged(string appDir)
-    {
-        StagedUpdate? previous;
-        lock (_stagedSync)
-        {
-            previous = _staged;
-            _staged = null;
-        }
-
-        if (previous is not null)
-            TryDeleteWorkRoot(previous.StagingDirectory);
-        TryDelete(Path.Combine(appDir, UpdateDirName));
     }
 
     public void PrepareWindowsHelper(string appDir, StagedUpdate staged)
@@ -329,32 +862,116 @@ public sealed class UpdateApplier
         }
     }
 
-    private static async Task<string> DownloadAndHashAsync(
-        HttpClient client,
-        string url,
-        string destination,
-        Action<long, long> onProgress,
+    private void UpdateProgressLocked(bool active, string phase, string? error, bool persistNow)
+    {
+        var totalBytes = _state.AssetSize;
+        var downloadedBytes = _state.DownloadedBytes;
+        var percent = totalBytes > 0
+            ? (int)Math.Min(100L, downloadedBytes * 100L / totalBytes)
+            : 0;
+
+        var resumable = active
+            ? downloadedBytes > 0
+            : phase is "paused" or "error" && GetPartialLengthLocked() > 0;
+
+        _state.Phase = phase;
+        _state.Error = error;
+        _state.UpdatedAt = DateTimeOffset.UtcNow;
+        _progress = new UpdateProgressDto
+        {
+            Active = active,
+            Percent = percent,
+            DownloadedBytes = downloadedBytes,
+            TotalBytes = totalBytes,
+            Phase = phase,
+            Version = _state.Version,
+            AssetName = _state.AssetName,
+            Error = error,
+            Resumable = resumable,
+            Staged = _staged is not null,
+            UpdatedAt = _state.UpdatedAt
+        };
+
+        if (persistNow && !string.IsNullOrWhiteSpace(_state.Version))
+        {
+            PersistStateLocked();
+            _lastPersistAt = _state.UpdatedAt;
+        }
+    }
+
+    private void PersistStateLocked()
+    {
+        try
+        {
+            Directory.CreateDirectory(UpdateDir);
+            var tempPath = StatePath + ".tmp";
+            File.WriteAllText(
+                tempPath,
+                JsonSerializer.Serialize(_state, StateJsonOptions),
+                new UTF8Encoding(false));
+            File.Move(tempPath, StatePath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "写入更新状态失败");
+        }
+    }
+
+    private bool StagingIsValid()
+    {
+        var exeName = OperatingSystem.IsWindows() ? "mutter-bot.exe" : "mutter-bot";
+        return Directory.Exists(StagingDir) && File.Exists(Path.Combine(StagingDir, exeName));
+    }
+
+    private string GetArchivePath(string assetName) => Path.Combine(DownloadDir, assetName);
+
+    private long GetPartialLengthLocked()
+    {
+        if (string.IsNullOrWhiteSpace(_state.AssetName))
+            return 0;
+        return GetFileLength(GetArchivePath(_state.AssetName));
+    }
+
+    private static long GetFileLength(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? new FileInfo(path).Length : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static async ValueTask<int> ReadWithIdleTimeoutAsync(
+        Stream input,
+        Memory<byte> buffer,
         CancellationToken ct)
     {
-        using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-        response.EnsureSuccessStatusCode();
-
-        var totalBytes = response.Content.Headers.ContentLength ?? 0;
-        await using var input = await response.Content.ReadAsStreamAsync(ct);
-        await using var output = File.Create(destination);
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[81920];
-        long downloadedBytes = 0;
-        int read;
-        onProgress(0, totalBytes);
-        while ((read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), ct)) > 0)
+        using var idleTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        idleTimeout.CancelAfter(ReadIdleTimeout);
+        try
         {
-            hash.AppendData(buffer, 0, read);
-            await output.WriteAsync(buffer.AsMemory(0, read), ct);
-            downloadedBytes += read;
-            onProgress(downloadedBytes, totalBytes);
+            return await input.ReadAsync(buffer, idleTimeout.Token);
         }
-        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException($"下载连接超过 {ReadIdleTimeout.TotalSeconds:0} 秒未收到数据");
+        }
+    }
+
+    private static async Task<string> ComputeSha256Async(string path, CancellationToken ct)
+    {
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 128 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var hash = await SHA256.HashDataAsync(stream, ct);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     private static string ParseChecksum(string checksumText, string assetName)
@@ -511,6 +1128,14 @@ public sealed class UpdateApplier
     private static string GetCurrentVersion() =>
         Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown";
 
+    private static bool SameVersion(string? left, string? right)
+    {
+        static string Normalize(string? value) => (value ?? string.Empty).Trim().TrimStart('v', 'V');
+        var a = Normalize(left);
+        var b = Normalize(right);
+        return a.Length > 0 && b.Length > 0 && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static void TryDelete(string path)
     {
         try
@@ -545,6 +1170,23 @@ public sealed class UpdateApplier
         }
         catch { }
         Console.WriteLine("[Update] " + message);
+    }
+
+    private sealed class PersistedUpdateState
+    {
+        public string Phase { get; set; } = "idle";
+        public string? Version { get; set; }
+        public string? AssetName { get; set; }
+        public string? AssetUrl { get; set; }
+        public string? ChecksumUrl { get; set; }
+        public long AssetSize { get; set; }
+        public long DownloadedBytes { get; set; }
+        public string? ExpectedHash { get; set; }
+        public string? ETag { get; set; }
+        public string? LastModified { get; set; }
+        public string? Error { get; set; }
+        public string? StagingDirectory { get; set; }
+        public DateTimeOffset UpdatedAt { get; set; }
     }
 
     private sealed class PendingUpdate
@@ -660,3 +1302,13 @@ public sealed class UpdateApplier
 }
 
 public sealed record StagedUpdate(string StagingDirectory, string Version, string AssetName);
+
+public sealed record StageStartResult(
+    bool Staged,
+    StagedUpdate? StagedUpdate,
+    UpdateProgressDto Progress,
+    string? Error = null)
+{
+    public static StageStartResult Rejected(string error) =>
+        new(false, null, new UpdateProgressDto { Phase = "busy" }, error);
+}

@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Mutter.Core.Interfaces;
@@ -26,7 +27,18 @@ public static class WebServiceExtensions
         // 注册 SignalR 通知服务
         services.AddSingleton<INotificationService, SignalRNotificationService>();
 
-        // 自更新：检查最新正式版、下载校验并替换程序文件
+        // 自更新：检查最新正式版、下载校验并替换程序文件。
+        // 更新包下载不设总超时（慢链路可能要几十分钟），只靠连接/读取停滞超时与自动重试兜底。
+        services.AddHttpClient("update-download", client =>
+            {
+                client.Timeout = Timeout.InfiniteTimeSpan;
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("Mutter-Bot-Update");
+            })
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                ConnectTimeout = TimeSpan.FromSeconds(30),
+                AutomaticDecompression = DecompressionMethods.None
+            });
         services.AddHttpClient();
         services.AddSingleton<UpdateService>();
         services.AddSingleton<UpdateApplier>();

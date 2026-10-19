@@ -39,42 +39,46 @@ public class UpdateController : ControllerBase
     [HttpGet("progress")]
     public ActionResult<UpdateProgressDto> GetProgress() => Ok(_applier.GetProgress());
 
-    /// <summary>下载、校验并暂存最新正式版；不写安装标记，等待用户确认后才安装。</summary>
+    /// <summary>
+    /// 启动后台下载、校验与暂存；接口立即返回，前端通过 /progress 观察。
+    /// 重复调用是幂等的：正在进行时返回当前状态，已暂存时直接返回暂存版本。
+    /// </summary>
     [HttpPost("stage")]
-    public async Task<ActionResult<UpdateStageResultDto>> Stage()
+    public async Task<ActionResult<UpdateStageResultDto>> Stage(CancellationToken ct)
     {
-        if (!_applier.TryBegin())
-            return Conflict(new { error = "已有更新正在进行" });
+        var current = _applier.GetProgress();
+        if (current.Active)
+            return Accepted(ToStageResult(current));
 
-        try
-        {
-            var check = await _updateService.GetStatusAsync(CancellationToken.None);
-            if (check.Info.Error is not null)
-                return BadRequest(new { error = check.Info.Error });
-            if (!check.Info.HasUpdate)
-                return BadRequest(new { error = "当前已是最新版本" });
-            if (!check.Info.CanSelfUpdate || check.Plan is null)
-                return BadRequest(new { error = check.Info.SelfUpdateReason ?? "当前环境不支持一键更新" });
+        var check = await _updateService.GetStatusAsync(ct);
+        if (check.Info.Error is not null)
+            return BadRequest(new { error = check.Info.Error });
+        if (!check.Info.HasUpdate)
+            return BadRequest(new { error = "当前已是最新版本" });
+        if (!check.Info.CanSelfUpdate || check.Plan is null)
+            return BadRequest(new { error = check.Info.SelfUpdateReason ?? "当前环境不支持一键更新" });
 
-            var staged = await _applier.StageAsync(check.Plan, AppContext.BaseDirectory, CancellationToken.None);
-            return Ok(new UpdateStageResultDto
-            {
-                Version = staged.Version,
-                AssetName = staged.AssetName
-            });
-        }
-        catch (Exception ex)
+        var start = _applier.StartStage(check.Plan);
+        if (start.Error is not null)
+            return Conflict(new { error = start.Error });
+
+        var result = new UpdateStageResultDto
         {
-            _logger.LogError(ex, "下载更新包失败");
-            return StatusCode(
-                StatusCodes.Status500InternalServerError,
-                new { error = ex.Message });
-        }
-        finally
-        {
-            _applier.End();
-        }
+            Version = start.StagedUpdate?.Version ?? check.Plan.Version,
+            AssetName = start.StagedUpdate?.AssetName ?? check.Plan.AssetName,
+            InProgress = !start.Staged,
+            Staged = start.Staged
+        };
+        return start.Staged ? Ok(result) : Accepted(result);
     }
+
+    private static UpdateStageResultDto ToStageResult(UpdateProgressDto progress) => new()
+    {
+        Version = progress.Version ?? string.Empty,
+        AssetName = progress.AssetName ?? string.Empty,
+        InProgress = progress.Active,
+        Staged = progress.Staged
+    };
 
     /// <summary>用户确认后安装已暂存的更新，并请求宿主重启；Windows 由 helper 完成替换。</summary>
     [HttpPost("install")]
@@ -84,8 +88,8 @@ public class UpdateController : ControllerBase
         if (staged is null)
             return BadRequest(new { error = "更新包尚未下载，请先下载更新" });
 
-        if (!_applier.TryBegin())
-            return Conflict(new { error = "已有更新正在进行" });
+        if (!_applier.TryBeginInstall())
+            return Conflict(new { error = _applier.GetProgress().Active ? "更新包仍在下载，请等待完成" : "已有更新正在进行" });
 
         var restarting = false;
         try
@@ -119,7 +123,7 @@ public class UpdateController : ControllerBase
         {
             // 成功安装后保持忙碌直到进程退出，避免重启窗口内重复触发。
             if (!restarting)
-                _applier.End();
+                _applier.EndInstall();
         }
     }
 }
