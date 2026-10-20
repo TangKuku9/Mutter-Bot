@@ -2,208 +2,1435 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#f5f6fb" />
+  <meta name="description" content="Mutter 管理面板登录" />
   <title>Mutter 管理面板 - 登录</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234f46e5'/%3E%3Cstop offset='1' stop-color='%237c3aed'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M18 24a6 6 0 0 1 6-6h16a6 6 0 0 1 6 6v9a6 6 0 0 1-6 6H31l-8 7v-7h-5a6 6 0 0 1-6-6z' fill='none' stroke='%23fff' stroke-width='3' stroke-linejoin='round'/%3E%3Ccircle cx='26' cy='28' r='1.6' fill='%23fff'/%3E%3Ccircle cx='32' cy='28' r='1.6' fill='%23fff'/%3E%3Ccircle cx='38' cy='28' r='1.6' fill='%23fff'/%3E%3C/svg%3E" />
+
+  <script>
+    /*
+     * 主题引导：优先使用面板里显式保存的深色设置（localStorage），
+     * 没有保存过时跟随系统 prefers-color-scheme，并在系统主题变化时实时切换。
+     * 同时保留对 html.dark 类名的支持（与主面板 panelSettings 行为一致）。
+     */
+    (function () {
+      var root = document.documentElement;
+      var savedDark = null;
+      try {
+        var raw = localStorage.getItem('mutter-panel-settings');
+        if (raw) {
+          var saved = JSON.parse(raw);
+          if (typeof saved.darkMode === 'boolean') savedDark = saved.darkMode;
+        }
+      } catch (e) { /* 本地存储不可用时忽略 */ }
+
+      var mql = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+      var hadDarkClass = root.classList.contains('dark');
+
+      function applyTheme(dark) {
+        root.classList.toggle('dark', dark);
+        root.classList.toggle('light', !dark);
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', dark ? '#070b14' : '#f5f6fb');
+      }
+
+      applyTheme(savedDark !== null ? savedDark : (hadDarkClass || !!(mql && mql.matches)));
+
+      if (mql) {
+        var onChange = function (event) {
+          if (savedDark === null) applyTheme(event.matches);
+        };
+        if (mql.addEventListener) mql.addEventListener('change', onChange);
+        else if (mql.addListener) mql.addListener(onChange);
+      }
+    })();
+  </script>
+
   <style>
+    /* ============================================================
+       Design tokens
+       ============================================================ */
     :root {
-      --bg: #0f172a;
-      --card: #1e293b;
-      --card-2: #273449;
-      --border: #334155;
-      --text: #e2e8f0;
-      --muted: #94a3b8;
-      --accent: #6366f1;
-      --accent-hover: #4f46e5;
-      --danger: #ef4444;
+      --font-sans: "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+        "Noto Sans SC", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+      --panel-bg: #f5f6fb;
+      --panel-bg-2: #eef1f9;
+      --card-bg: #ffffff;
+      --card-border: rgba(15, 23, 42, 0.08);
+      --text: #0f172a;
+      --text-soft: #475569;
+      --muted: #667085;
+      --label: #334155;
+      --input-bg: #fbfcff;
+      --input-border: #e1e6f0;
+      --input-hover: #c7d0e0;
+      --accent: #4f46e5;
+      --accent-2: #7c3aed;
+      --accent-soft: rgba(79, 70, 229, 0.13);
+      --danger: #b42318;
+      --danger-bg: #fef3f2;
+      --danger-border: #fecdca;
+      --btn-gradient: linear-gradient(135deg, #4338ca 0%, #4f46e5 52%, #6d28d9 100%);
+      --shadow-card: 0 30px 70px -34px rgba(15, 23, 42, 0.35), 0 2px 8px rgba(15, 23, 42, 0.04);
+      --ring: 0 0 0 4px rgba(79, 70, 229, 0.15);
+      --radius: 26px;
+      color-scheme: light;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; }
+
+    html.dark {
+      --panel-bg: #070b14;
+      --panel-bg-2: #0b1020;
+      --card-bg: rgba(15, 21, 35, 0.88);
+      --card-border: rgba(148, 163, 184, 0.14);
+      --text: #edf1fa;
+      --text-soft: #c2cde0;
+      --muted: #94a3b8;
+      --label: #ccd6e6;
+      --input-bg: rgba(2, 6, 23, 0.55);
+      --input-border: rgba(148, 163, 184, 0.18);
+      --input-hover: rgba(148, 163, 184, 0.34);
+      --accent: #818cf8;
+      --accent-2: #a78bfa;
+      --accent-soft: rgba(129, 140, 248, 0.16);
+      --danger: #fda29b;
+      --danger-bg: rgba(127, 29, 29, 0.28);
+      --danger-border: rgba(248, 113, 113, 0.32);
+      --btn-gradient: linear-gradient(135deg, #4f46e5 0%, #6366f1 50%, #7c3aed 100%);
+      --shadow-card: 0 40px 90px -40px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      --ring: 0 0 0 4px rgba(129, 140, 248, 0.2);
+      color-scheme: dark;
+    }
+
+    /* ============================================================
+       Base
+       ============================================================ */
+    *, *::before, *::after { box-sizing: border-box; }
+    html { height: 100%; -webkit-text-size-adjust: 100%; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-        "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
-      background: radial-gradient(1200px 600px at 20% -10%, #1e2a52 0%, transparent 60%),
-                  radial-gradient(900px 500px at 100% 110%, #2a1e52 0%, transparent 55%),
-                  var(--bg);
+      margin: 0;
+      min-height: 100vh;
+      min-height: 100dvh;
+      font-family: var(--font-sans);
+      background: var(--panel-bg);
       color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+    }
+    button, input { font: inherit; }
+    [hidden] { display: none !important; }
+    ::selection { background: rgba(99, 102, 241, 0.24); }
+
+    .page {
+      display: grid;
+      grid-template-columns: minmax(0, 1.08fr) minmax(440px, 0.92fr);
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+
+    /* ============================================================
+       Left: brand / aurora panel
+       ============================================================ */
+    .visual {
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      color: #f4f7ff;
+      background: #070b16;
+      isolation: isolate;
+    }
+    .visual::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 0 auto;
+      width: 1px;
+      z-index: 3;
+      background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+    }
+
+    .aurora { position: absolute; inset: -8%; z-index: 0; overflow: hidden; }
+    .blob {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(78px);
+      will-change: transform;
+      transform: translate3d(0, 0, 0);
+    }
+    .blob-a {
+      top: -20%; left: -14%;
+      width: 58vw; height: 58vw;
+      max-width: 780px; max-height: 780px;
+      background: radial-gradient(circle at 38% 38%, rgba(79, 70, 229, 0.95), rgba(79, 70, 229, 0) 68%);
+      opacity: 0.7;
+      animation: drift-a 22s ease-in-out infinite alternate;
+    }
+    .blob-b {
+      right: -20%; bottom: -28%;
+      width: 54vw; height: 54vw;
+      max-width: 720px; max-height: 720px;
+      background: radial-gradient(circle at 52% 46%, rgba(14, 165, 233, 0.7), rgba(14, 165, 233, 0) 66%);
+      opacity: 0.6;
+      animation: drift-b 27s ease-in-out infinite alternate;
+    }
+    .blob-c {
+      top: 24%; right: 0;
+      width: 38vw; height: 38vw;
+      max-width: 520px; max-height: 520px;
+      background: radial-gradient(circle, rgba(168, 85, 247, 0.52), rgba(168, 85, 247, 0) 66%);
+      opacity: 0.65;
+      animation: drift-c 19s ease-in-out infinite alternate;
+    }
+    .blob-d {
+      bottom: 4%; left: 10%;
+      width: 32vw; height: 32vw;
+      max-width: 440px; max-height: 440px;
+      background: radial-gradient(circle, rgba(244, 114, 182, 0.34), rgba(244, 114, 182, 0) 67%);
+      opacity: 0.6;
+      animation: drift-d 24s ease-in-out infinite alternate;
+    }
+
+    @keyframes drift-a {
+      0%   { transform: translate3d(0, 0, 0) scale(1); }
+      100% { transform: translate3d(9%, 7%, 0) scale(1.16); }
+    }
+    @keyframes drift-b {
+      0%   { transform: translate3d(0, 0, 0) scale(1.05); }
+      100% { transform: translate3d(-8%, -6%, 0) scale(0.92); }
+    }
+    @keyframes drift-c {
+      0%   { transform: translate3d(0, 0, 0) scale(1); }
+      100% { transform: translate3d(-7%, 9%, 0) scale(1.12); }
+    }
+    @keyframes drift-d {
+      0%   { transform: translate3d(0, 0, 0) scale(1.04); }
+      100% { transform: translate3d(8%, -8%, 0) scale(0.94); }
+    }
+
+    /* 细网格 + 暗角，给极光一点结构和纵深 */
+    .grid-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+      background-size: 72px 72px;
+      -webkit-mask-image: radial-gradient(ellipse at 28% 32%, #000 0%, transparent 72%);
+      mask-image: radial-gradient(ellipse at 28% 32%, #000 0%, transparent 72%);
+      opacity: 0.55;
+    }
+    .vignette {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      background: radial-gradient(125% 95% at 30% 30%, transparent 34%, rgba(3, 7, 18, 0.62) 100%);
+    }
+    .noise {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      opacity: 0.05;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+    }
+
+    .visual-inner {
+      position: relative;
+      z-index: 4;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 100%;
+      padding: clamp(36px, 4.5vw, 64px);
+    }
+
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      flex: none;
+      border-radius: 13px;
+      color: #ffffff;
+      background: linear-gradient(145deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.05));
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      box-shadow: 0 10px 26px rgba(3, 7, 18, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+      -webkit-backdrop-filter: blur(10px);
+      backdrop-filter: blur(10px);
+    }
+    .brand-mark svg { width: 22px; height: 22px; }
+    .brand-name {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1;
+    }
+    .brand-sub {
+      margin-left: 2px;
+      padding-left: 14px;
+      border-left: 1px solid rgba(255, 255, 255, 0.16);
+      font-size: 11.5px;
+      letter-spacing: 0.16em;
+      color: rgba(226, 232, 240, 0.56);
+      line-height: 1;
+    }
+
+    .hero { margin-top: clamp(48px, 9vh, 104px); max-width: 640px; }
+    .kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 22px;
+      font-size: 11.5px;
+      font-weight: 500;
+      letter-spacing: 0.2em;
+      color: rgba(203, 213, 225, 0.64);
+    }
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #5eead4;
+      box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.13), 0 0 16px rgba(94, 234, 212, 0.85);
+      animation: breathe 3.2s ease-in-out infinite;
+    }
+    @keyframes breathe {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 4px rgba(94, 234, 212, 0.13), 0 0 16px rgba(94, 234, 212, 0.85); }
+      50%      { opacity: 0.55; box-shadow: 0 0 0 7px rgba(94, 234, 212, 0.05), 0 0 22px rgba(94, 234, 212, 0.55); }
+    }
+
+    .hero-title {
+      margin: 0;
+      font-size: clamp(40px, 4.3vw, 62px);
+      font-weight: 600;
+      line-height: 1.13;
+      letter-spacing: -0.035em;
+      color: #f6f8ff;
+    }
+    .hero-accent {
+      background: linear-gradient(100deg, #c7d2fe 0%, #a5b4fc 32%, #67e8f9 72%, #a7f3d0 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      color: transparent;
+    }
+    .hero-lede {
+      max-width: 26em;
+      margin: 22px 0 0;
+      font-size: 15px;
+      line-height: 1.85;
+      letter-spacing: 0.01em;
+      color: rgba(203, 213, 225, 0.66);
+    }
+
+    /* 聊天气泡浮层：点明这是聊天机器人 */
+    .chat-float { position: relative; max-width: 430px; margin-top: clamp(32px, 5vh, 56px); }
+    .chat-card {
+      position: relative;
+      padding: 18px;
+      border-radius: 22px;
+      background: linear-gradient(150deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04));
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      box-shadow: 0 34px 70px -34px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+      -webkit-backdrop-filter: blur(18px);
+      backdrop-filter: blur(18px);
+      animation: float 8s ease-in-out infinite;
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0); }
+      50%      { transform: translateY(-8px); }
+    }
+    .chat-head { display: flex; align-items: center; gap: 12px; }
+    .bot-avatar {
+      display: grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      flex: none;
+      border-radius: 12px;
+      color: #ffffff;
+      background: linear-gradient(140deg, rgba(129, 140, 248, 0.95), rgba(34, 211, 238, 0.8));
+      box-shadow: 0 8px 22px rgba(56, 189, 248, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+    }
+    .bot-avatar svg { width: 20px; height: 20px; }
+    .chat-name { display: block; font-size: 14px; font-weight: 600; letter-spacing: 0.01em; }
+    .chat-state {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 3px;
+      font-size: 11px;
+      color: rgba(203, 213, 225, 0.58);
+    }
+    .chat-state i {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #5eead4;
+      box-shadow: 0 0 8px rgba(94, 234, 212, 0.9);
+    }
+    .chat-pill {
+      margin-left: auto;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.07);
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      color: rgba(224, 231, 255, 0.68);
+    }
+    .chat-body { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+    .msg {
+      max-width: 84%;
+      padding: 10px 13px;
+      border-radius: 14px;
+      font-size: 12.5px;
+      line-height: 1.65;
+      letter-spacing: 0.01em;
+    }
+    .msg-bot {
+      align-self: flex-start;
+      border-top-left-radius: 5px;
+      background: rgba(255, 255, 255, 0.09);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: rgba(240, 245, 255, 0.88);
+    }
+    .msg-user {
+      align-self: flex-end;
+      border-top-right-radius: 5px;
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.9), rgba(139, 92, 246, 0.84));
+      color: #ffffff;
+      box-shadow: 0 10px 22px -10px rgba(79, 70, 229, 0.85);
+    }
+    .msg-line {
+      align-self: flex-start;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-width: 84%;
+    }
+    .msg-line .msg { max-width: 100%; }
+    .msg-name {
+      padding-left: 4px;
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      color: rgba(203, 213, 225, 0.48);
+    }
+    .msg-other {
+      border-top-left-radius: 5px;
+      background: rgba(255, 255, 255, 0.045);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      color: rgba(226, 232, 240, 0.72);
+    }
+    .chat-gate {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 1px 0;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      color: rgba(165, 180, 252, 0.64);
+    }
+    .chat-gate::before,
+    .chat-gate::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.24), transparent);
+    }
+    .msg-timed {
+      background: linear-gradient(140deg, rgba(129, 140, 248, 0.28), rgba(34, 211, 238, 0.13));
+      border-color: rgba(129, 140, 248, 0.36);
+      color: rgba(240, 245, 255, 0.94);
+      box-shadow: 0 12px 28px -18px rgba(79, 70, 229, 0.9);
+    }
+    .msg.typing {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      width: auto;
+      padding: 13px 15px;
+    }
+    .msg.typing span {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: rgba(226, 232, 240, 0.62);
+      animation: typing 1.4s ease-in-out infinite;
+    }
+    .msg.typing span:nth-child(2) { animation-delay: 0.16s; }
+    .msg.typing span:nth-child(3) { animation-delay: 0.32s; }
+    @keyframes typing {
+      0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+      30%           { transform: translateY(-3px); opacity: 1; }
+    }
+
+    .visual-foot {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: auto;
+      padding-top: 40px;
+      font-size: 11.5px;
+      letter-spacing: 0.05em;
+      color: rgba(203, 213, 225, 0.54);
+    }
+    .visual-foot .sep {
+      width: 3px;
+      height: 3px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.7;
+    }
+
+    /* ============================================================
+       Right: form panel
+       ============================================================ */
+    .panel {
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
       min-height: 100vh;
-      padding: 24px;
+      min-height: 100dvh;
+      padding: clamp(24px, 4vw, 56px);
+      overflow-x: hidden;
+      overflow-y: auto;
+      background: var(--panel-bg);
     }
-    .card {
+    .panel-decor {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(560px 420px at 88% 4%, rgba(99, 102, 241, 0.1), transparent 62%),
+        radial-gradient(480px 380px at 4% 96%, rgba(34, 211, 238, 0.08), transparent 64%);
+    }
+    .panel-decor::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image: radial-gradient(rgba(15, 23, 42, 0.11) 1px, transparent 1px);
+      background-size: 22px 22px;
+      opacity: 0.18;
+      -webkit-mask-image: radial-gradient(ellipse at center, #000, transparent 72%);
+      mask-image: radial-gradient(ellipse at center, #000, transparent 72%);
+    }
+    html.dark .panel-decor {
+      background:
+        radial-gradient(620px 460px at 88% 2%, rgba(99, 102, 241, 0.17), transparent 62%),
+        radial-gradient(520px 420px at 2% 98%, rgba(14, 165, 233, 0.1), transparent 64%);
+    }
+    html.dark .panel-decor::after {
+      background-image: radial-gradient(rgba(148, 163, 184, 0.28) 1px, transparent 1px);
+      opacity: 0.14;
+    }
+
+    .panel-shell {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
       width: 100%;
-      max-width: 380px;
-      background: linear-gradient(180deg, var(--card) 0%, var(--card-2) 100%);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 36px 32px 28px;
-      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+      max-width: 424px;
+      margin: auto;
     }
-    .logo {
-      width: 52px;
+
+    .card {
+      position: relative;
+      padding: clamp(28px, 3.2vw, 42px);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      background: var(--card-bg);
+      box-shadow: var(--shadow-card);
+      overflow: hidden;
+    }
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.95), transparent);
+      opacity: 0.9;
+    }
+    html.dark .card::before {
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+    }
+
+    .mobile-brand { display: none; align-items: center; gap: 11px; margin-bottom: 26px; }
+    .mobile-brand .brand-mark {
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      border: 0;
+      color: #ffffff;
+      background: linear-gradient(140deg, #4f46e5, #7c3aed);
+      box-shadow: 0 10px 24px -8px rgba(79, 70, 229, 0.8);
+    }
+    .mobile-brand .brand-name { color: var(--text); font-size: 20px; }
+    .mobile-brand .brand-sub {
+      color: var(--muted);
+      border-color: var(--card-border);
+      font-size: 11px;
+      letter-spacing: 0.14em;
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 14px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.22em;
+      color: var(--muted);
+    }
+    .eyebrow::before {
+      content: "";
+      width: 20px;
+      height: 1px;
+      background: linear-gradient(90deg, var(--accent), transparent);
+    }
+    .form-head h1 {
+      margin: 0;
+      font-size: 30px;
+      font-weight: 700;
+      line-height: 1.22;
+      letter-spacing: -0.03em;
+      color: var(--text);
+    }
+    .form-sub {
+      margin: 10px 0 0;
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+
+    .field { margin-top: 18px; }
+    .field:first-of-type { margin-top: 28px; }
+    .field label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      color: var(--label);
+    }
+    .label-row { display: flex; align-items: baseline; justify-content: space-between; }
+    .label-row label { margin-bottom: 8px; }
+    .hint {
+      font-size: 11px;
+      letter-spacing: 0.02em;
+      color: var(--muted);
+      opacity: 0.9;
+    }
+
+    .control {
+      position: relative;
+      display: flex;
+      align-items: center;
+      border: 1px solid var(--input-border);
+      border-radius: 13px;
+      background: var(--input-bg);
+      transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+    }
+    .control:hover { border-color: var(--input-hover); }
+    .control:focus-within {
+      border-color: var(--accent);
+      background: var(--card-bg);
+      box-shadow: var(--ring);
+    }
+    .control-icon {
+      position: absolute;
+      left: 15px;
+      width: 18px;
+      height: 18px;
+      color: #94a3b8;
+      pointer-events: none;
+      transition: color 0.18s ease;
+    }
+    .control:focus-within .control-icon { color: var(--accent); }
+    .control.has-reveal input { padding-right: 54px; }
+    .control input {
+      width: 100%;
       height: 52px;
-      border-radius: 14px;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      padding: 0 16px 0 44px;
+      border: 0;
+      border-radius: 13px;
+      outline: 0;
+      background: transparent;
+      color: var(--text);
+      font-size: 14.5px;
+      letter-spacing: 0.01em;
+    }
+    .control input::placeholder { color: #a3aec0; opacity: 1; }
+    html.dark .control input::placeholder { color: #6b7890; }
+    .control input:-webkit-autofill,
+    .control input:-webkit-autofill:hover,
+    .control input:-webkit-autofill:focus {
+      -webkit-text-fill-color: var(--text);
+      box-shadow: 0 0 0 1000px var(--input-bg) inset;
+      transition: background-color 9999s ease-out;
+    }
+
+    .reveal {
+      position: absolute;
+      right: 6px;
+      display: grid;
+      place-items: center;
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      transition: color 0.15s ease, background-color 0.15s ease;
+    }
+    .reveal:hover { color: var(--text-soft); background: var(--accent-soft); }
+    .reveal:focus-visible {
+      outline: none;
+      color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    .reveal svg { width: 19px; height: 19px; }
+
+    .alert {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-top: 20px;
+      padding: 12px 14px;
+      border: 1px solid var(--danger-border);
+      border-radius: 12px;
+      background: var(--danger-bg);
+      color: var(--danger);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .alert svg { flex: none; width: 17px; height: 17px; margin-top: 1px; }
+    .alert.shake { animation: shake 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97) both; }
+    @keyframes shake {
+      10%, 90% { transform: translateX(-1px); }
+      20%, 80% { transform: translateX(2px); }
+      30%, 50%, 70% { transform: translateX(-4px); }
+      40%, 60% { transform: translateX(4px); }
+    }
+    .alert.is-success {
+      border-color: rgba(16, 185, 129, 0.3);
+      background: rgba(16, 185, 129, 0.09);
+      color: #047857;
+    }
+    html.dark .alert.is-success {
+      border-color: rgba(52, 211, 153, 0.34);
+      background: rgba(6, 78, 59, 0.32);
+      color: #6ee7b7;
+    }
+    .alert-icon-success { display: none; }
+    .alert.is-success .alert-icon-error { display: none; }
+    .alert.is-success .alert-icon-success { display: block; }
+
+    .notice {
+      display: none;
+      align-items: flex-start;
+      gap: 10px;
+      margin-top: 20px;
+      padding: 12px 14px;
+      border: 1px solid var(--accent-soft);
+      border-radius: 12px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .notice.show { display: flex; }
+    .notice svg { flex: none; width: 17px; height: 17px; margin-top: 2px; }
+
+    .submit {
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
-      margin: 0 auto 18px;
-      font-size: 24px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
-    }
-    h1 {
-      font-size: 20px;
-      text-align: center;
-      margin-bottom: 6px;
-      font-weight: 600;
-    }
-    .subtitle {
-      text-align: center;
-      color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 26px;
-    }
-    .field { margin-bottom: 16px; }
-    label {
-      display: block;
-      font-size: 13px;
-      color: var(--muted);
-      margin-bottom: 6px;
-    }
-    input {
+      gap: 10px;
       width: 100%;
-      padding: 11px 13px;
-      background: #0f1729;
-      border: 1px solid var(--border);
-      border-radius: 9px;
-      color: var(--text);
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.15s, box-shadow 0.15s;
-    }
-    input:focus {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
-    }
-    input::placeholder { color: #64748b; }
-    .btn {
-      width: 100%;
-      padding: 12px;
-      margin-top: 6px;
-      background: var(--accent);
-      border: none;
-      border-radius: 9px;
-      color: #fff;
+      height: 54px;
+      margin-top: 26px;
+      padding: 0 20px;
+      border: 0;
+      border-radius: 14px;
+      overflow: hidden;
+      color: #ffffff;
+      background: var(--btn-gradient);
+      box-shadow: 0 18px 32px -16px rgba(79, 70, 229, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.18);
       font-size: 15px;
       font-weight: 600;
+      letter-spacing: 0.12em;
       cursor: pointer;
-      transition: background 0.15s, transform 0.05s;
+      transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.2s ease;
     }
-    .btn:hover { background: var(--accent-hover); }
-    .btn:active { transform: translateY(1px); }
-    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
-    .alert {
+    .submit::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(110deg, transparent 28%, rgba(255, 255, 255, 0.2) 46%, transparent 64%);
+      transform: translateX(-130%);
+      transition: transform 0.7s ease;
+      pointer-events: none;
+    }
+    .submit:hover::before { transform: translateX(130%); }
+    .submit:hover {
+      filter: brightness(1.07);
+      transform: translateY(-1px);
+      box-shadow: 0 22px 40px -16px rgba(79, 70, 229, 0.88), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    }
+    .submit:active { transform: translateY(0); filter: brightness(0.98); }
+    .submit:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 4px var(--accent-soft), 0 18px 32px -16px rgba(79, 70, 229, 0.8);
+    }
+    .submit:disabled { cursor: progress; transform: none; filter: saturate(0.92); }
+    .submit:disabled::before { display: none; }
+    .submit-label, .submit-arrow, .spinner { position: relative; z-index: 1; }
+    .submit-arrow {
+      width: 18px;
+      height: 18px;
+      transition: transform 0.2s ease;
+    }
+    .submit:hover .submit-arrow { transform: translateX(3px); }
+    .submit.is-loading:hover .submit-arrow { transform: none; }
+    .submit.is-loading .submit-arrow { display: none; }
+    .spinner {
       display: none;
-      background: rgba(239, 68, 68, 0.12);
-      border: 1px solid rgba(239, 68, 68, 0.4);
-      color: #fca5a5;
-      padding: 10px 12px;
-      border-radius: 9px;
-      font-size: 13px;
-      margin-bottom: 16px;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255, 255, 255, 0.35);
+      border-top-color: #ffffff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
     }
-    .alert.show { display: block; }
-    .footer {
-      text-align: center;
+    .submit.is-loading .spinner { display: block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .security-note {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      margin: 24px 0 0;
+      padding-top: 18px;
+      border-top: 1px solid var(--card-border);
+      font-size: 11.5px;
+      letter-spacing: 0.03em;
       color: var(--muted);
-      font-size: 12px;
-      margin-top: 22px;
+    }
+    .security-note svg { width: 14px; height: 14px; opacity: 0.85; }
+
+    .panel-foot {
+      margin: 0;
+      text-align: center;
+      font-size: 11.5px;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+    .panel-foot span { margin: 0 6px; opacity: 0.55; }
+
+    /* ============================================================
+       Responsive
+       ============================================================ */
+    @media (max-width: 1024px) {
+      .page { grid-template-columns: minmax(0, 1fr) minmax(410px, 0.95fr); }
+      .visual-inner { padding: 40px; }
+      .hero-title { font-size: clamp(38px, 4.4vw, 52px); }
+    }
+
+    @media (max-width: 900px) {
+      .page { display: block; min-height: 100dvh; }
+      .visual { display: none; }
+      .panel {
+        min-height: 100dvh;
+        padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+      }
+      .panel-decor {
+        background:
+          radial-gradient(540px 460px at 4% -8%, rgba(99, 102, 241, 0.2), transparent 64%),
+          radial-gradient(480px 420px at 106% 106%, rgba(14, 165, 233, 0.16), transparent 62%);
+      }
+      html.dark .panel-decor {
+        background:
+          radial-gradient(560px 480px at 4% -8%, rgba(99, 102, 241, 0.26), transparent 64%),
+          radial-gradient(500px 440px at 106% 106%, rgba(14, 165, 233, 0.16), transparent 62%);
+      }
+      .panel-shell { max-width: 424px; }
+      .card {
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.9);
+        -webkit-backdrop-filter: blur(18px);
+        backdrop-filter: blur(18px);
+      }
+      html.dark .card { background: rgba(15, 21, 35, 0.86); }
+      .mobile-brand { display: flex; }
+      .control input { font-size: 16px; }
+    }
+
+    @media (max-width: 420px) {
+      .panel { padding-left: 14px; padding-right: 14px; }
+      .card { padding: 26px 22px; }
+      .form-head h1 { font-size: 27px; }
+      .eyebrow { margin-bottom: 12px; }
+      .mobile-brand { margin-bottom: 22px; }
+    }
+
+    /* 宽屏但高度有限时，收紧左侧内容，避免页脚被裁掉 */
+    @media (min-width: 901px) and (max-height: 800px) {
+      .visual-inner { padding: 34px 48px; }
+      .hero { margin-top: 38px; }
+      .hero-title { font-size: clamp(34px, 3.5vw, 46px); }
+      .hero-lede { margin-top: 16px; font-size: 14px; line-height: 1.72; }
+      .chat-float { margin-top: 26px; }
+      .chat-card { padding: 14px; }
+      .chat-body { margin-top: 13px; }
+      .msg { padding: 8px 12px; font-size: 12px; }
+      .visual-foot { padding-top: 26px; }
+    }
+    @media (min-width: 901px) and (max-height: 620px) {
+      .chat-float { display: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .blob, .chat-card, .status-dot, .msg.typing span, .alert.shake { animation: none !important; }
+      .submit, .submit::before, .submit-arrow, .control, .reveal, .spinner { transition: none !important; }
+      .submit:hover, .submit:active { transform: none; }
+      .submit:hover .submit-arrow { transform: none; }
     }
   </style>
 </head>
 <body>
-  <div class="card">
-    <div class="logo">Q</div>
-    <h1>Mutter 管理面板</h1>
-    <div class="subtitle">请登录以继续</div>
-
-    <div id="alert" class="alert" role="alert"></div>
-
-    <form id="loginForm" autocomplete="on">
-      <div class="field">
-        <label for="username">账号</label>
-        <input id="username" name="username" type="text" placeholder="请输入账号" autocomplete="username" required autofocus />
+  <div class="page">
+    <section class="visual" aria-label="Mutter 品牌介绍">
+      <div class="aurora" aria-hidden="true">
+        <span class="blob blob-a"></span>
+        <span class="blob blob-b"></span>
+        <span class="blob blob-c"></span>
+        <span class="blob blob-d"></span>
+        <div class="grid-overlay"></div>
+        <div class="vignette"></div>
+        <div class="noise"></div>
       </div>
-      <div class="field">
-        <label for="password">密码</label>
-        <input id="password" name="password" type="password" placeholder="请输入密码" autocomplete="current-password" required />
-      </div>
-      <button type="submit" class="btn" id="submitBtn">登 录</button>
-    </form>
 
-    <div class="footer">Mutter 管理面板</div>
+      <div class="visual-inner">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+              <path d="M20.5 11.6a8.1 8.1 0 0 1-8.2 8.1 8.7 8.7 0 0 1-3.8-.9L4 20l1.2-4.3a8.6 8.6 0 0 1-1.2-4.1A8.1 8.1 0 0 1 12.2 3.5a8.1 8.1 0 0 1 8.3 8.1Z" />
+              <path d="M8.6 11.6h.01M12.2 11.6h.01M15.8 11.6h.01" />
+            </svg>
+          </span>
+          <span class="brand-name">Mutter</span>
+          <span class="brand-sub">管理面板</span>
+        </div>
+
+        <div class="hero">
+          <p class="kicker"><span class="status-dot" aria-hidden="true"></span>QQ 群聊 · AI 伙伴</p>
+          <p class="hero-title">懂群聊，<br /><span class="hero-accent">也懂分寸。</span></p>
+          <p class="hero-lede">Mutter 会读空气，也会挑时机开口。让每一次插话，都恰到好处。</p>
+        </div>
+
+        <div class="chat-float" aria-hidden="true">
+          <div class="chat-card">
+            <div class="chat-head">
+              <span class="bot-avatar">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                  <path d="M12 2.8v3.4" />
+                  <rect x="4.6" y="6.2" width="14.8" height="12.2" rx="3.6" />
+                  <path d="M9 12h.01M15 12h.01" />
+                  <path d="M9.4 15.4h5.2" />
+                </svg>
+              </span>
+              <div class="chat-id">
+                <span class="chat-name">Mutter</span>
+                <span class="chat-state"><i></i>在线 · 正在读空气</span>
+              </div>
+              <span class="chat-pill">择机发言</span>
+            </div>
+            <div class="chat-body">
+              <div class="msg-line">
+                <span class="msg-name">小满</span>
+                <div class="msg msg-other">周末去爬黄山了，山上全是人</div>
+              </div>
+              <div class="msg-line">
+                <span class="msg-name">阿柴</span>
+                <div class="msg msg-other">你应该国庆去爬泰山</div>
+              </div>
+              <p class="chat-gate">判定此刻值得开口</p>
+              <div class="msg msg-bot msg-timed">国庆去泰山根本不用自己走，会被人潮一路架上山顶喵~</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="visual-foot">
+          <span>随时随地部署</span>
+          <span class="sep" aria-hidden="true"></span>
+          <span>所有数据均只留存本地</span>
+        </div>
+      </div>
+    </section>
+
+    <main class="panel">
+      <div class="panel-decor" aria-hidden="true"></div>
+
+      <div class="panel-shell">
+        <div class="card">
+          <div class="mobile-brand">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                <path d="M20.5 11.6a8.1 8.1 0 0 1-8.2 8.1 8.7 8.7 0 0 1-3.8-.9L4 20l1.2-4.3a8.6 8.6 0 0 1-1.2-4.1A8.1 8.1 0 0 1 12.2 3.5a8.1 8.1 0 0 1 8.3 8.1Z" />
+                <path d="M8.6 11.6h.01M12.2 11.6h.01M15.8 11.6h.01" />
+              </svg>
+            </span>
+            <span class="brand-name">Mutter</span>
+            <span class="brand-sub">管理面板</span>
+          </div>
+
+          <header class="form-head">
+            <p class="eyebrow">管理控制台</p>
+            <h1 id="formTitle">欢迎回来</h1>
+            <p class="form-sub" id="formSub">登录以继续管理你的 Mutter 机器人。</p>
+          </header>
+
+          <div class="alert" id="alert" role="alert" aria-live="assertive" hidden>
+            <svg class="alert-icon-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7.4v5.4" />
+              <path d="M12 16.4h.01" />
+            </svg>
+            <svg class="alert-icon-success" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="12" r="9" />
+              <path d="m8.4 12.2 2.4 2.4 4.8-4.8" />
+            </svg>
+            <span id="alertText"></span>
+          </div>
+
+          <div class="notice" id="notice" role="status">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M12 3 5 5.9v5.5c0 4.2 2.9 7.6 7 9.5 4.1-1.9 7-5.3 7-9.5V5.9L12 3Z" />
+              <path d="M12 9.4v4.2" />
+              <path d="M12 16.6h.01" />
+            </svg>
+            <span>当前密码为安装包初始默认密码，首次使用必须先修改。请设置至少 8 位的新密码，修改后使用新密码登录。</span>
+          </div>
+
+          <form id="loginForm" novalidate>
+            <div class="field">
+              <label for="username">账号</label>
+              <div class="control">
+                <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M4 20c0-3.3 3.6-6 8-6s8 2.7 8 6" />
+                </svg>
+                <input
+                  id="username"
+                  name="username"
+                  type="text"
+                  placeholder="请输入管理员账号"
+                  autocomplete="username"
+                  autocapitalize="none"
+                  autocorrect="off"
+                  spellcheck="false"
+                  enterkeyhint="next"
+                  aria-required="true"
+                  required
+                  autofocus
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <div class="label-row">
+                <label for="password">密码</label>
+                <span class="hint" id="passwordHint">区分大小写</span>
+              </div>
+              <div class="control has-reveal">
+                <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <rect x="4.6" y="10.4" width="14.8" height="9.8" rx="2.6" />
+                  <path d="M8.2 10.4V7.2a3.8 3.8 0 0 1 7.6 0v3.2" />
+                  <path d="M12 14.2v2.1" />
+                </svg>
+                <input
+                  id="password"
+                  name="password"
+                  type="password"
+                  placeholder="请输入密码"
+                  autocomplete="current-password"
+                  aria-describedby="passwordHint"
+                  enterkeyhint="go"
+                  aria-required="true"
+                  required
+                />
+                <button class="reveal" id="togglePassword" type="button" aria-label="显示密码" aria-pressed="false">
+                  <svg id="iconEye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <path d="M2.6 12S6.2 5.6 12 5.6 21.4 12 21.4 12 17.8 18.4 12 18.4 2.6 12 2.6 12Z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                  <svg id="iconEyeOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" hidden>
+                    <path d="m3.4 3.4 17.2 17.2" />
+                    <path d="M10.4 6.2A9.9 9.9 0 0 1 12 6c5.8 0 9.4 6 9.4 6a17.4 17.4 0 0 1-3.3 4" />
+                    <path d="M6.4 7A17.3 17.3 0 0 0 2.6 12S6.2 18 12 18a9.8 9.8 0 0 0 4.4-1" />
+                    <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <button class="submit" id="submitBtn" type="submit" aria-busy="false">
+              <span class="spinner" aria-hidden="true"></span>
+              <span class="submit-label" id="submitLabel">登 录</span>
+              <svg class="submit-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="M5 12h14" />
+                <path d="m13 6 6 6-6 6" />
+              </svg>
+            </button>
+          </form>
+
+          <form id="changeForm" novalidate style="display: none">
+            <div class="field">
+              <label for="currentPassword">当前密码</label>
+              <div class="control">
+                <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <rect x="4.6" y="10.4" width="14.8" height="9.8" rx="2.6" />
+                  <path d="M8.2 10.4V7.2a3.8 3.8 0 0 1 7.6 0v3.2" />
+                  <path d="M12 14.2v2.1" />
+                </svg>
+                <input
+                  id="currentPassword"
+                  name="currentPassword"
+                  type="password"
+                  placeholder="请输入当前密码"
+                  autocomplete="current-password"
+                  aria-required="true"
+                  required
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <div class="label-row">
+                <label for="newPassword">新密码</label>
+                <span class="hint">至少 8 位</span>
+              </div>
+              <div class="control">
+                <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <path d="M14.4 6.4a4.6 4.6 0 0 0-6.1 6.1L3.6 17.2v3.2h3.2l.9-.9v-2.2h2.2l.9-.9v-2.2h2.2l1.6-1.6a4.6 4.6 0 0 0-.2-6.2Z" />
+                  <path d="M16.4 7.6h.01" />
+                </svg>
+                <input
+                  id="newPassword"
+                  name="newPassword"
+                  type="password"
+                  placeholder="请输入新密码"
+                  autocomplete="new-password"
+                  enterkeyhint="next"
+                  aria-required="true"
+                  required
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="confirmPassword">确认新密码</label>
+              <div class="control">
+                <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <path d="M12 3 5 5.9v5.5c0 4.2 2.9 7.6 7 9.5 4.1-1.9 7-5.3 7-9.5V5.9L12 3Z" />
+                  <path d="m9.1 11.9 2 2 4-4" />
+                </svg>
+                <input
+                  id="confirmPassword"
+                  name="confirmPassword"
+                  type="password"
+                  placeholder="请再次输入新密码"
+                  autocomplete="new-password"
+                  enterkeyhint="go"
+                  aria-required="true"
+                  required
+                />
+              </div>
+            </div>
+
+            <button class="submit" id="changeBtn" type="submit" aria-busy="false">
+              <span class="spinner" aria-hidden="true"></span>
+              <span class="submit-label" id="changeLabel">修改密码</span>
+              <svg class="submit-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="M5 12h14" />
+                <path d="m13 6 6 6-6 6" />
+              </svg>
+            </button>
+          </form>
+
+          <p class="security-note">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M12 3 5 5.9v5.5c0 4.2 2.9 7.6 7 9.5 4.1-1.9 7-5.3 7-9.5V5.9L12 3Z" />
+              <path d="m9.1 11.9 2 2 4-4" />
+            </svg>
+            仅限授权管理员访问
+          </p>
+        </div>
+
+        <!-- 版本号与 Directory.Build.props / web/package.json 保持一致（静态页不经过 Vite 注入） -->
+        <p class="panel-foot">Mutter 管理面板<span>·</span>v2.0.3</p>
+      </div>
+    </main>
   </div>
 
   <script>
     (function () {
+      'use strict';
+
       var params = new URLSearchParams(window.location.search);
-      var returnUrl = params.get("return") || "/";
+      var returnUrl = params.get('return') || '/';
 
       // 仅允许相对路径，防止开放重定向
-      if (!returnUrl.startsWith("/") || returnUrl.startsWith("//")) {
-        returnUrl = "/";
+      if (returnUrl.charAt(0) !== '/' || returnUrl.charAt(1) === '/') {
+        returnUrl = '/';
       }
 
-      var form = document.getElementById("loginForm");
-      var alertBox = document.getElementById("alert");
-      var submitBtn = document.getElementById("submitBtn");
+      var form = document.getElementById('loginForm');
+      var changeForm = document.getElementById('changeForm');
+      var noticeBox = document.getElementById('notice');
+      var alertBox = document.getElementById('alert');
+      var alertText = document.getElementById('alertText');
+      var submitBtn = document.getElementById('submitBtn');
+      var submitLabel = document.getElementById('submitLabel');
+      var changeBtn = document.getElementById('changeBtn');
+      var changeLabel = document.getElementById('changeLabel');
+      var formTitle = document.getElementById('formTitle');
+      var formSub = document.getElementById('formSub');
+      var usernameInput = document.getElementById('username');
+      var passwordInput = document.getElementById('password');
+      var currentPasswordInput = document.getElementById('currentPassword');
+      var newPasswordInput = document.getElementById('newPassword');
+      var confirmPasswordInput = document.getElementById('confirmPassword');
+      var toggleBtn = document.getElementById('togglePassword');
+      var iconEye = document.getElementById('iconEye');
+      var iconEyeOff = document.getElementById('iconEyeOff');
 
-      function showAlert(msg) {
-        alertBox.textContent = msg;
-        alertBox.classList.add("show");
+      var submitting = false;
+      var changing = false;
+
+      function setInvalid(input, invalid) {
+        if (invalid) input.setAttribute('aria-invalid', 'true');
+        else input.removeAttribute('aria-invalid');
+      }
+
+      function showAlert(message, success) {
+        alertText.textContent = message;
+        alertBox.hidden = false;
+        alertBox.classList.toggle('is-success', !!success);
+        alertBox.classList.remove('shake');
+        if (success) return;
+        // 强制重排，让同一条错误再次出现时也能重新抖动
+        void alertBox.offsetWidth;
+        alertBox.classList.add('shake');
       }
 
       function clearAlert() {
-        alertBox.classList.remove("show");
+        if (alertBox.hidden) return;
+        alertBox.hidden = true;
+        alertBox.classList.remove('shake');
+        alertBox.classList.remove('is-success');
+        alertText.textContent = '';
+        [usernameInput, passwordInput, currentPasswordInput, newPasswordInput, confirmPasswordInput]
+          .forEach(function (input) { setInvalid(input, false); });
       }
 
-      form.addEventListener("submit", function (e) {
-        e.preventDefault();
+      function setLoading(loading) {
+        submitting = loading;
+        submitBtn.disabled = loading;
+        submitBtn.classList.toggle('is-loading', loading);
+        submitBtn.setAttribute('aria-busy', loading ? 'true' : 'false');
+        submitLabel.textContent = loading ? '登录中…' : '登 录';
+        usernameInput.readOnly = loading;
+        passwordInput.readOnly = loading;
+      }
+
+      function setChangeLoading(loading) {
+        changing = loading;
+        changeBtn.disabled = loading;
+        changeBtn.classList.toggle('is-loading', loading);
+        changeBtn.setAttribute('aria-busy', loading ? 'true' : 'false');
+        changeLabel.textContent = loading ? '提交中…' : '修改密码';
+        currentPasswordInput.readOnly = loading;
+        newPasswordInput.readOnly = loading;
+        confirmPasswordInput.readOnly = loading;
+      }
+
+      // 初始默认密码命中：切换到强制改密表单
+      function showChangeForm(currentPassword) {
+        setLoading(false);
+        clearAlert();
+        form.style.display = 'none';
+        changeForm.style.display = '';
+        noticeBox.classList.add('show');
+        formTitle.textContent = '设置新密码';
+        formSub.textContent = '初始密码不能继续使用，请先设置一个新的管理员密码。';
+        currentPasswordInput.value = currentPassword || '';
+        newPasswordInput.value = '';
+        confirmPasswordInput.value = '';
+        newPasswordInput.focus();
+      }
+
+      function showLoginForm() {
+        changeForm.style.display = 'none';
+        noticeBox.classList.remove('show');
+        form.style.display = '';
+        formTitle.textContent = '欢迎回来';
+        formSub.textContent = '登录以继续管理你的 Mutter 机器人。';
+        passwordInput.value = '';
+        passwordInput.focus();
+      }
+
+      toggleBtn.addEventListener('click', function () {
+        var visible = passwordInput.type === 'password';
+        passwordInput.type = visible ? 'text' : 'password';
+        toggleBtn.setAttribute('aria-pressed', visible ? 'true' : 'false');
+        toggleBtn.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码');
+        iconEye.hidden = visible;
+        iconEyeOff.hidden = !visible;
+        passwordInput.focus({ preventScroll: true });
+        var end = passwordInput.value.length;
+        try { passwordInput.setSelectionRange(end, end); } catch (e) { /* 忽略 */ }
+      });
+
+      [usernameInput, passwordInput, currentPasswordInput, newPasswordInput, confirmPasswordInput]
+        .forEach(function (input) {
+          input.addEventListener('input', function () {
+            if (!alertBox.hidden) clearAlert();
+            setInvalid(input, false);
+          });
+        });
+
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        if (submitting) return;
+
         clearAlert();
 
-        var username = document.getElementById("username").value.trim();
-        var password = document.getElementById("password").value;
+        var username = usernameInput.value.trim();
+        var password = passwordInput.value;
 
         if (!username || !password) {
-          showAlert("请输入账号和密码");
+          showAlert('请输入账号和密码');
+          if (!username) {
+            setInvalid(usernameInput, true);
+            usernameInput.focus();
+          } else {
+            setInvalid(passwordInput, true);
+            passwordInput.focus();
+          }
           return;
         }
 
-        submitBtn.disabled = true;
-        submitBtn.textContent = "登录中...";
+        setLoading(true);
 
-        fetch("/api/auth/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
+        fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
           body: JSON.stringify({ username: username, password: password })
         })
-          .then(function (resp) {
-            if (resp.ok) return resp.json();
-            return resp.json().then(function (data) {
-              throw new Error(data.error || "登录失败");
-            });
+          .then(function (response) {
+            return response.json()
+              .catch(function () { return null; })
+              .then(function (data) {
+                return { ok: response.ok, data: data };
+              });
           })
-          .then(function () {
-            window.location.href = returnUrl;
+          .then(function (result) {
+            if (result.ok) {
+              window.location.href = returnUrl;
+              return;
+            }
+            if (result.data && result.data.mustChangePassword) {
+              showChangeForm(password);
+              return;
+            }
+            throw new Error((result.data && result.data.error) || '登录失败');
           })
-          .catch(function (err) {
-            showAlert(err.message || "登录失败，请重试");
-            submitBtn.disabled = false;
-            submitBtn.textContent = "登 录";
+          .catch(function (error) {
+            var message = error && error.message ? error.message : '登录失败，请重试';
+            if (error instanceof TypeError) message = '无法连接服务器，请检查网络后重试';
+            showAlert(message);
+            setLoading(false);
+            passwordInput.focus({ preventScroll: true });
+            var end = passwordInput.value.length;
+            try { passwordInput.setSelectionRange(end, end); } catch (e) { /* 忽略 */ }
+          });
+      });
+
+      changeForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        if (changing) return;
+
+        clearAlert();
+
+        var currentPassword = currentPasswordInput.value;
+        var newPassword = newPasswordInput.value;
+        var confirmPassword = confirmPasswordInput.value;
+
+        if (!currentPassword || !newPassword || !confirmPassword) {
+          showAlert('请填写完整的修改密码信息');
+          return;
+        }
+        if (newPassword.length < 8) {
+          showAlert('新密码至少 8 位');
+          setInvalid(newPasswordInput, true);
+          newPasswordInput.focus();
+          return;
+        }
+        if (newPassword !== confirmPassword) {
+          showAlert('两次输入的新密码不一致');
+          setInvalid(confirmPasswordInput, true);
+          confirmPasswordInput.focus();
+          return;
+        }
+
+        setChangeLoading(true);
+
+        fetch('/api/auth/change-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            currentPassword: currentPassword,
+            newPassword: newPassword,
+            confirmPassword: confirmPassword
+          })
+        })
+          .then(function (response) {
+            return response.json()
+              .catch(function () { return null; })
+              .then(function (data) {
+                if (!response.ok) {
+                  throw new Error((data && data.error) || '修改密码失败');
+                }
+                return data;
+              });
+          })
+          .then(function (data) {
+            setChangeLoading(false);
+            showLoginForm();
+            showAlert((data && data.message) || '密码修改成功，请使用新密码登录', true);
+          })
+          .catch(function (error) {
+            var message = error && error.message ? error.message : '修改密码失败，请重试';
+            if (error instanceof TypeError) message = '无法连接服务器，请检查网络后重试';
+            showAlert(message);
+            setChangeLoading(false);
+            currentPasswordInput.focus();
           });
       });
     })();
