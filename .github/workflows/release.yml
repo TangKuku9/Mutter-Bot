@@ -149,12 +149,16 @@ jobs:
             fi
           done
 
+          # 归档根目录必须扁平：upload-artifact 对多路径会保留相对目录，
+          # 下载到 release 任务后会变成 assets/ 子目录，清单脚本和上传都会漏文件。
+          mkdir -p dist
+          mv mutter-bot-v* dist/
+          mv assets/* dist/
+
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.rid }}
-          path: |
-            mutter-bot-v*
-            assets/*
+          path: dist/*
           retention-days: 3
 
   release:
