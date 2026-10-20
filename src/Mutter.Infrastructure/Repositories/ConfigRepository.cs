@@ -35,7 +35,10 @@ public class ConfigRepository : IConfigRepository
             WebSearchEnabled = entity.WebSearchEnabled,
             WebSearchEndpoint = entity.WebSearchEndpoint,
             WebSearchShape = entity.WebSearchShape,
-            WebSearchVerifiedAt = entity.WebSearchVerifiedAt
+            WebSearchVerifiedAt = entity.WebSearchVerifiedAt,
+            WebSearchImageMode = entity.WebSearchImageMode,
+            WebSearchImageCapable = entity.WebSearchImageCapable,
+            WebSearchImageVerifiedAt = entity.WebSearchImageVerifiedAt
         };
     }
 
@@ -78,7 +81,10 @@ public class ConfigRepository : IConfigRepository
                 WebSearchEnabled = config.WebSearchEnabled,
                 WebSearchEndpoint = config.WebSearchEndpoint,
                 WebSearchShape = config.WebSearchShape,
-                WebSearchVerifiedAt = config.WebSearchVerifiedAt
+                WebSearchVerifiedAt = config.WebSearchVerifiedAt,
+                WebSearchImageMode = config.WebSearchImageMode,
+                WebSearchImageCapable = config.WebSearchImageCapable,
+                WebSearchImageVerifiedAt = config.WebSearchImageVerifiedAt
             };
             _dbContext.AiConfigs.Add(entity);
         }
@@ -97,6 +103,9 @@ public class ConfigRepository : IConfigRepository
             entity.WebSearchEndpoint = config.WebSearchEndpoint;
             entity.WebSearchShape = config.WebSearchShape;
             entity.WebSearchVerifiedAt = config.WebSearchVerifiedAt;
+            entity.WebSearchImageMode = config.WebSearchImageMode;
+            entity.WebSearchImageCapable = config.WebSearchImageCapable;
+            entity.WebSearchImageVerifiedAt = config.WebSearchImageVerifiedAt;
         }
 
         await _dbContext.SaveChangesAsync(ct);

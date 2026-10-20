@@ -168,11 +168,15 @@ public class ProactiveChatHostedService : BackgroundService
         var memoryCount = string.IsNullOrWhiteSpace(memoryText) ? 0 : 1;
         var memoryChars = memoryCount == 0 ? 0 : memoryText!.Length;
 
+        // 择机判定是内部决策，不该继承全局联网开关：它只是在判断“要不要接话”，
+        // 每条群消息都去检索既慢又费 token。联网只服务于最终回复，不服务于判断。
+        var judgeConfig = context.EffectiveConfig with { WebSearchEnabled = false };
+
         var outcome = await _structuredAi.GetStructuredOutcomeAsync<ProactiveVerdict>(
             BuildJudgePrompt(context, config.Liveliness),
             ProactivePrompts.BuildUserPrompt(window, history, images.Count, memoryText),
             images,
-            context.EffectiveConfig, ct);
+            judgeConfig, ct);
 
         if (outcome.Result is null)
         {

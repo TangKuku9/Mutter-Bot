@@ -70,6 +70,25 @@ public record AiConfig
     public DateTime? WebSearchVerifiedAt { get; set; }
 
     /// <summary>
+    /// 带图消息的联网策略：auto=能单次就单次、不支持就不检索；two_stage=不支持时先看图生成检索词再联网；
+    /// off=带图一律不检索。与 WebSearchEnabled 分开，避免把“开关”和“降级方式”混成一个旋钮。
+    /// </summary>
+    public string WebSearchImageMode { get; set; } = WebSearchImageModeAuto;
+
+    /// <summary>该策略下“图片 + 搜索”是否实测可用；null=未测。服务端只读，由探测/运行结果写入。</summary>
+    public bool? WebSearchImageCapable { get; set; }
+
+    /// <summary>图文组合的验证时间；为空表示未测。</summary>
+    public DateTime? WebSearchImageVerifiedAt { get; set; }
+
+    public const string WebSearchImageModeAuto = "auto";
+    public const string WebSearchImageModeTwoStage = "two_stage";
+    public const string WebSearchImageModeOff = "off";
+
+    public static bool IsValidWebSearchImageMode(string? mode) =>
+        mode is WebSearchImageModeAuto or WebSearchImageModeTwoStage or WebSearchImageModeOff;
+
+    /// <summary>
     /// 组装最终送给 AI 的系统提示词：SystemPrompt（空则用默认值）+ 性格特点
     /// </summary>
     public string BuildEffectiveSystemPrompt()

@@ -67,10 +67,19 @@
           检测联网搜索
         </el-button>
         <div class="hint" v-if="form.webSearchShape">
-          当前策略：{{ shapeLabel(form.webSearchShape) }}（已在探测中实测选用）
+          当前策略：{{ shapeLabel(form.webSearchShape) }}（文字已验证<span v-if="form.webSearchImageCapable === true">，带图已验证</span><span v-else-if="form.webSearchImageCapable === false">，带图不支持</span><span v-else>，带图未测</span>）
         </div>
         <div class="hint" v-else-if="form.webSearchEnabled">
           尚未选用实测策略，运行时按 API 地址自动推断——中转可能因此不生效。
+        </div>
+        <div class="hint" v-if="form.webSearchEnabled">
+          带图时：
+          <el-select v-model="form.webSearchImageMode" size="small" style="width: 150px">
+            <el-option label="跟随能力" value="auto" />
+            <el-option label="确保联网" value="two_stage" />
+            <el-option label="关闭" value="off" />
+          </el-select>
+          <ParamHelpButton :label="helpLabel('webSearchImageMode')" @click="openHelp('webSearchImageMode')" />
         </div>
       </el-form-item>
       <el-form-item>
@@ -174,6 +183,12 @@
               <el-tag size="small" :type="verdictType(row.status)">{{ verdictLabel(row.status) }}</el-tag>
             </template>
           </el-table-column>
+          <el-table-column label="带图" width="110">
+            <template #default="{ row }">
+              <el-tag size="small" :type="imageVerdictType(row.imageStatus)">{{ imageVerdictLabel(row.imageStatus) }}</el-tag>
+              <div v-if="row.imageNote" class="probe-desc">{{ row.imageNote }}</div>
+            </template>
+          </el-table-column>
           <el-table-column label="依据" min-width="220">
             <template #default="{ row }">
               <span>{{ row.note || '-' }}</span>
@@ -200,6 +215,7 @@
           或回答给出了与当前北京时间吻合的时刻而基线给不出（部分中转会抹掉前两种证据）。
           「被静默忽略」= 请求 2xx 但无任何检索证据——这正是开关打开却毫无效果的情形。
           「选用」会把形状写入配置并打开联网搜索；换地址或模型后旧策略会自动清空，需要重新检测。
+          「带图」列需要文字联网先通过才会测试；「看不到图」表示上游接受了请求但静默丢弃了图片。
         </div>
       </template>
 
@@ -253,6 +269,16 @@ const evidenceLabel = (e) => ({
   prompt_token_delta: 'Prompt token 差分',
   content_time: '当前时间比对'
 }[e] || e)
+const imageVerdictLabel = (s) => ({
+  verified: '已验证', image_rejected: '看不到图', no_evidence: '无检索证据',
+  rejected: '被拒绝', unreachable: '不可达', upstream_error: '上游错误',
+  no_native_endpoint: '无原生端点', not_tested: '未测'
+}[s] || s)
+const imageVerdictType = (s) => ({
+  verified: 'success', image_rejected: 'warning', no_evidence: 'warning',
+  rejected: 'info', unreachable: 'danger', upstream_error: 'danger',
+  no_native_endpoint: 'info', not_tested: 'info'
+}[s] || 'info')
 const shapeLabel = (s) => ({
   enable_search: 'enable_search（通义/百炼）',
   web_search_tool: 'web_search 工具（智谱）',
@@ -371,8 +397,13 @@ const applyProbe = async (row) => {
   form.value.webSearchEndpoint = row.shape === 'gemini_native' ? 'gemini' : 'openai'
   form.value.webSearchShape = row.shape
   form.value.webSearchEnabled = true
+  const imageNote = row.imageStatus === 'verified'
+    ? '，带图联网已验证'
+    : row.imageStatus === 'not_tested' || !row.imageStatus
+      ? '，带图联网未测'
+      : '，但带图联网未通过'
   try {
-    await save(`已选用「${shapeLabel(row.shape)}」，联网搜索已开启`)
+    await save(`已选用「${shapeLabel(row.shape)}」${imageNote}；联网搜索已开启`)
   } catch {
     // 保存失败由 axios 拦截器提示，表单保留当前选择，方便重试
   }
@@ -400,7 +431,8 @@ const presetHelp = computed(() => {
 
 const HELP_ORDER = [
   'presetId', 'apiBaseUrl', 'apiKey', 'modelName', 'personality', 'systemPrompt',
-  'temperature', 'maxTokens', 'maxContextMessages', 'maxAttachedImages', 'webSearchEnabled'
+  'temperature', 'maxTokens', 'maxContextMessages', 'maxAttachedImages',
+  'webSearchEnabled', 'webSearchImageMode'
 ]
 
 const HELP = {
@@ -496,6 +528,19 @@ const HELP = {
       '没有选用时按 API 地址自动推断，中转可能因此不生效。',
       '只在服务商支持时生效，会更慢也更费 token。'
     ]
+  },
+  webSearchImageMode: {
+    title: '带图时联网',
+    value: (f) => ({
+      auto: '跟随能力', two_stage: '确保联网', off: '关闭'
+    }[f.webSearchImageMode] || '跟随能力'),
+    lines: [
+      '服务商支持“图片 + 搜索”同请求时，会一次完成。',
+      '跟随能力：单次不支持时本次只回答不检索，回复速度不变。',
+      '确保联网：单次不支持时先看图生成检索词再联网回答，多一次调用、慢 2~5 秒。',
+      '关闭：带图消息一律不检索。',
+      '表情包和动图仍不会附图。'
+    ]
   }
 }
 
@@ -573,7 +618,8 @@ const save = async (successMessage = 'AI 配置已保存') => {
       maxAttachedImages: form.value.maxAttachedImages,
       webSearchEnabled: form.value.webSearchEnabled,
       webSearchEndpoint: form.value.webSearchEndpoint,
-      webSearchShape: form.value.webSearchShape
+      webSearchShape: form.value.webSearchShape,
+      webSearchImageMode: form.value.webSearchImageMode || 'auto'
     })
     ElMessage.success(successMessage)
     await load()
