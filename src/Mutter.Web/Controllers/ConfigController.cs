@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -29,6 +30,11 @@ public class ConfigController : ControllerBase
     [HttpGet("ai")]
     public async Task<ActionResult<AiConfigDto>> GetAiConfig()
     {
+        return Ok(await BuildAiConfigDtoAsync());
+    }
+
+    private async Task<AiConfigDto> BuildAiConfigDtoAsync()
+    {
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
         var characters = await BuildCharacterListAsync();
 
@@ -48,7 +54,7 @@ public class ConfigController : ControllerBase
 
         if (entity == null)
         {
-            return Ok(new AiConfigDto
+            return new AiConfigDto
             {
                 Temperature = 0.7,
                 MaxTokens = 2048,
@@ -57,10 +63,10 @@ public class ConfigController : ControllerBase
                 WebSearchImageMode = AiConfig.WebSearchImageModeAuto,
                 AvailableCharacters = characters,
                 AvailableProviders = providers
-            });
+            };
         }
 
-        return Ok(new AiConfigDto
+        return new AiConfigDto
         {
             ApiBaseUrl = entity.ApiBaseUrl,
             ApiKey = MaskApiKey(entity.ApiKey),
@@ -82,11 +88,11 @@ public class ConfigController : ControllerBase
             WebSearchImageVerifiedAt = entity.WebSearchImageVerifiedAt,
             AvailableCharacters = characters,
             AvailableProviders = providers
-        });
+        };
     }
 
     [HttpPut("ai")]
-    public async Task<IActionResult> UpdateAiConfig([FromBody] AiConfigDto dto)
+    public async Task<IActionResult> UpdateAiConfig([FromBody] AiConfigInputDto dto)
     {
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
         if (entity == null)
@@ -95,44 +101,266 @@ public class ConfigController : ControllerBase
             _dbContext.AiConfigs.Add(entity);
         }
 
-        // 先记住旧目标：下面会立刻把 dto 值写进 entity，再比较就永远相等了。
-        var previousBaseUrl = entity.ApiBaseUrl;
-        var previousModelName = entity.ModelName;
+        var error = NormalizeAndValidateAiConfigInput(dto);
+        if (error != null)
+            return BadRequest(new { error });
 
-        entity.ApiBaseUrl = dto.ApiBaseUrl;
-        // ApiKey 为空或仍是打码值时视为未修改，保留数据库中的原 Key
-        if (!string.IsNullOrWhiteSpace(dto.ApiKey) && dto.ApiKey != MaskApiKey(entity.ApiKey))
+        ApplyNormalizedAiConfigInput(entity, dto, ResolveSubmittedApiKey(entity.ApiKey, dto.ApiKey));
+        await _dbContext.SaveChangesAsync();
+        return NoContent();
+    }
+
+    // ===== AI 配置预设 =====
+
+    private const int MaxAiPresets = 50;
+    private const int MaxAiPresetConfigBytes = 512 * 1024;
+    private static readonly JsonSerializerOptions PresetJsonOptions = new(JsonSerializerDefaults.Web);
+
+    [HttpGet("ai/presets")]
+    public async Task<ActionResult<List<AiPresetSummaryDto>>> GetAiPresets()
+    {
+        var entities = await _dbContext.AiPresets
+            .OrderByDescending(p => p.UpdatedAt)
+            .ToListAsync();
+        var characters = BuildCharacterLookup(await BuildCharacterListAsync());
+        return Ok(entities.Select(e => BuildAiPresetSummary(e, characters)).ToList());
+    }
+
+    [HttpGet("ai/presets/{id:int}")]
+    public async Task<ActionResult<AiPresetDetailDto>> GetAiPreset(int id)
+    {
+        var entity = await _dbContext.AiPresets.FirstOrDefaultAsync(p => p.Id == id);
+        if (entity == null) return NotFound(new { error = "预设不存在" });
+
+        var characters = BuildCharacterLookup(await BuildCharacterListAsync());
+        return Ok(BuildAiPresetDetail(entity, characters));
+    }
+
+    [HttpPost("ai/presets")]
+    public async Task<ActionResult<AiPresetDetailDto>> CreateAiPreset([FromBody] AiPresetSaveDto dto)
+    {
+        var name = (dto.Name ?? string.Empty).Trim();
+        var nameError = await ValidatePresetNameAsync(name, null);
+        if (nameError != null) return BadRequest(new { error = nameError });
+
+        var description = (dto.Description ?? string.Empty).Trim();
+        var descriptionError = ValidatePresetDescription(description);
+        if (descriptionError != null) return BadRequest(new { error = descriptionError });
+
+        if (await _dbContext.AiPresets.CountAsync() >= MaxAiPresets)
+            return BadRequest(new { error = $"最多保存 {MaxAiPresets} 个配置预设，请先删除不用的预设" });
+
+        var current = await _dbContext.AiConfigs.FirstOrDefaultAsync();
+        AiPresetConfigDto config;
+        if (dto.Config == null)
         {
-            entity.ApiKey = dto.ApiKey;
+            config = SnapshotAiConfig(current);
         }
-        entity.ModelName = dto.ModelName;
-        entity.SystemPrompt = dto.SystemPrompt;
-        entity.Personality = dto.Personality;
-        entity.Temperature = dto.Temperature;
-        // 这三个也钳制：面板的输入框有 min/max，但 API 可以绕过面板直连提交。
+        else
+        {
+            var inputError = NormalizeAndValidateAiConfigInput(dto.Config);
+            if (inputError != null) return BadRequest(new { error = inputError });
+            config = ToPresetConfig(dto.Config);
+        }
+
+        var configJson = SerializePresetConfig(config);
+        if (Encoding.UTF8.GetByteCount(configJson) > MaxAiPresetConfigBytes)
+            return BadRequest(new { error = "预设内容过大，请缩短系统提示词后重试" });
+
+        var entity = new AiConfigPresetEntity
+        {
+            Name = name,
+            Description = description,
+            ConfigJson = configJson,
+            // 表单里的 Key 为空或仍是打码值时，取当前已保存的真 Key；取消勾选则明确不存。
+            ApiKey = dto.IncludeApiKey
+                ? ResolveSubmittedApiKey(current?.ApiKey, dto.Config?.ApiKey)
+                : string.Empty,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        _dbContext.AiPresets.Add(entity);
+        await _dbContext.SaveChangesAsync();
+
+        var characters = BuildCharacterLookup(await BuildCharacterListAsync());
+        return CreatedAtAction(nameof(GetAiPreset), new { id = entity.Id },
+            BuildAiPresetDetail(entity, characters));
+    }
+
+    [HttpPut("ai/presets/{id:int}")]
+    public async Task<ActionResult<AiPresetDetailDto>> UpdateAiPreset(int id, [FromBody] AiPresetUpdateDto dto)
+    {
+        var entity = await _dbContext.AiPresets.FirstOrDefaultAsync(p => p.Id == id);
+        if (entity == null) return NotFound(new { error = "预设不存在" });
+
+        var name = (dto.Name ?? string.Empty).Trim();
+        var nameError = await ValidatePresetNameAsync(name, id);
+        if (nameError != null) return BadRequest(new { error = nameError });
+
+        var description = (dto.Description ?? string.Empty).Trim();
+        var descriptionError = ValidatePresetDescription(description);
+        if (descriptionError != null) return BadRequest(new { error = descriptionError });
+
+        // 不传 Config = 只改名称/备注，快照和 Key 都保持原样。
+        if (dto.Config != null)
+        {
+            var inputError = NormalizeAndValidateAiConfigInput(dto.Config);
+            if (inputError != null) return BadRequest(new { error = inputError });
+
+            var current = await _dbContext.AiConfigs.FirstOrDefaultAsync();
+            entity.ApiKey = dto.IncludeApiKey switch
+            {
+                false => string.Empty,
+                true => ResolveSubmittedApiKey(current?.ApiKey, dto.Config.ApiKey),
+                null => entity.ApiKey
+            };
+
+            var configJson = SerializePresetConfig(ToPresetConfig(dto.Config));
+            if (Encoding.UTF8.GetByteCount(configJson) > MaxAiPresetConfigBytes)
+                return BadRequest(new { error = "预设内容过大，请缩短系统提示词后重试" });
+            entity.ConfigJson = configJson;
+        }
+
+        entity.Name = name;
+        entity.Description = description;
+        entity.UpdatedAt = DateTime.UtcNow;
+        await _dbContext.SaveChangesAsync();
+
+        var characters = BuildCharacterLookup(await BuildCharacterListAsync());
+        return Ok(BuildAiPresetDetail(entity, characters));
+    }
+
+    [HttpPost("ai/presets/{id:int}/duplicate")]
+    public async Task<ActionResult<AiPresetDetailDto>> DuplicateAiPreset(int id)
+    {
+        var source = await _dbContext.AiPresets.FirstOrDefaultAsync(p => p.Id == id);
+        if (source == null) return NotFound(new { error = "预设不存在" });
+
+        if (await _dbContext.AiPresets.CountAsync() >= MaxAiPresets)
+            return BadRequest(new { error = $"最多保存 {MaxAiPresets} 个配置预设，请先删除不用的预设" });
+
+        var existingNames = await _dbContext.AiPresets.Select(p => p.Name).ToListAsync();
+        var entity = new AiConfigPresetEntity
+        {
+            Name = BuildCopyName(source.Name, existingNames),
+            Description = source.Description,
+            ConfigJson = source.ConfigJson,
+            ApiKey = source.ApiKey,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        _dbContext.AiPresets.Add(entity);
+        await _dbContext.SaveChangesAsync();
+
+        var characters = BuildCharacterLookup(await BuildCharacterListAsync());
+        return CreatedAtAction(nameof(GetAiPreset), new { id = entity.Id },
+            BuildAiPresetDetail(entity, characters));
+    }
+
+    [HttpPost("ai/presets/{id:int}/apply")]
+    public async Task<ActionResult<AiConfigDto>> ApplyAiPreset(int id)
+    {
+        var preset = await _dbContext.AiPresets.FirstOrDefaultAsync(p => p.Id == id);
+        if (preset == null) return NotFound(new { error = "预设不存在" });
+
+        if (!TryReadPresetConfig(preset.ConfigJson, out var config))
+            return BadRequest(new { error = "预设数据损坏，无法应用；请删除后重新保存" });
+
+        var error = NormalizeAndValidateAiConfigInput(config);
+        if (error != null)
+            return BadRequest(new { error = $"预设内容无效：{error}" });
+
+        var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
+        if (entity == null)
+        {
+            entity = new AiConfigEntity();
+            _dbContext.AiConfigs.Add(entity);
+        }
+
+        // 预设没存 Key 就沿用当前 Key；存了则整份恢复，换服务商时不用重填。
+        var apiKey = string.IsNullOrEmpty(preset.ApiKey) ? entity.ApiKey : preset.ApiKey;
+        ApplyNormalizedAiConfigInput(entity, config, apiKey);
+        await _dbContext.SaveChangesAsync();
+
+        return Ok(await BuildAiConfigDtoAsync());
+    }
+
+    [HttpDelete("ai/presets/{id:int}")]
+    public async Task<IActionResult> DeleteAiPreset(int id)
+    {
+        var entity = await _dbContext.AiPresets.FirstOrDefaultAsync(p => p.Id == id);
+        if (entity == null) return NotFound(new { error = "预设不存在" });
+
+        _dbContext.AiPresets.Remove(entity);
+        await _dbContext.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>
+    /// 校验并就地裁剪可写配置。PUT /ai 与预设的创建/覆盖/应用共用，
+    /// 防止几条写入路径对同一个字段给出不同结论。
+    /// </summary>
+    private static string? NormalizeAndValidateAiConfigInput(AiConfigInputDto dto)
+    {
+        dto.ApiBaseUrl = (dto.ApiBaseUrl ?? string.Empty).Trim();
+        dto.ApiKey = (dto.ApiKey ?? string.Empty).Trim();
+        dto.ModelName = (dto.ModelName ?? string.Empty).Trim();
+        dto.SystemPrompt ??= string.Empty;
+        dto.Personality ??= string.Empty;
+        dto.Temperature = Math.Clamp(dto.Temperature, 0, 2);
+
+        // 面板输入框有 min/max，但 API 可以绕过面板直连提交。
         // MaxTokens=0 会让输入预算算成 0、上下文被压到一条；MaxContextMessages=0 同理。
-        entity.MaxTokens = Math.Clamp(dto.MaxTokens, 64, 32768);
-        entity.MaxContextMessages = Math.Clamp(dto.MaxContextMessages, 2, 100);
-        // 附图张数在这里钳制：负数是无效输入，过大只会白烧 token 与带宽
-        entity.MaxAttachedImages = Math.Clamp(dto.MaxAttachedImages, 0, AiConfig.CeilingAttachedImages);
-        entity.WebSearchEnabled = dto.WebSearchEnabled;
+        dto.MaxTokens = Math.Clamp(dto.MaxTokens, 64, 32768);
+        dto.MaxContextMessages = Math.Clamp(dto.MaxContextMessages, 2, 100);
+        // 附图张数：负数是无效输入，过大只会白烧 token 与带宽
+        dto.MaxAttachedImages = Math.Clamp(dto.MaxAttachedImages, 0, AiConfig.CeilingAttachedImages);
 
         var imageMode = (dto.WebSearchImageMode ?? string.Empty).Trim();
         if (imageMode.Length == 0) imageMode = AiConfig.WebSearchImageModeAuto;
         if (!AiConfig.IsValidWebSearchImageMode(imageMode))
-            return BadRequest(new { error = "带图联网策略只能是 auto / two_stage / off" });
-        entity.WebSearchImageMode = imageMode;
+            return "带图联网策略只能是 auto / two_stage / off";
+        dto.WebSearchImageMode = imageMode;
 
         // 已选用的搜索策略：只接受探测矩阵里真实存在的形状，防止面板/脚本写入任意参数。
         var endpoint = (dto.WebSearchEndpoint ?? string.Empty).Trim();
         var shape = (dto.WebSearchShape ?? string.Empty).Trim();
         if (endpoint is not ("" or "openai" or "gemini"))
-            return BadRequest(new { error = "联网搜索通道只能是 openai 或 gemini" });
+            return "联网搜索通道只能是 openai 或 gemini";
         if (shape.Length > 0 &&
             !Mutter.Core.Services.WebSearchProbe.Cases.Any(c => c.Shape == shape))
-            return BadRequest(new { error = $"未知的联网搜索形状：{shape}" });
+            return $"未知的联网搜索形状：{shape}";
         if ((shape == "gemini_native") != (endpoint == "gemini"))
-            return BadRequest(new { error = "搜索形状与通道不匹配" });
+            return "搜索形状与通道不匹配";
+
+        dto.WebSearchEndpoint = endpoint;
+        dto.WebSearchShape = shape;
+        return null;
+    }
+
+    /// <summary>
+    /// 把已校验的配置写进实体。调用方负责先解析出要落库的 Key。
+    /// </summary>
+    private void ApplyNormalizedAiConfigInput(AiConfigEntity entity, AiConfigInputDto dto, string apiKey)
+    {
+        // 先记住旧目标：下面会立刻把 dto 值写进 entity，再比较就永远相等了。
+        var previousBaseUrl = entity.ApiBaseUrl;
+        var previousModelName = entity.ModelName;
+
+        entity.ApiBaseUrl = dto.ApiBaseUrl;
+        entity.ApiKey = apiKey;
+        entity.ModelName = dto.ModelName;
+        entity.SystemPrompt = dto.SystemPrompt;
+        entity.Personality = dto.Personality;
+        entity.Temperature = dto.Temperature;
+        entity.MaxTokens = dto.MaxTokens;
+        entity.MaxContextMessages = dto.MaxContextMessages;
+        entity.MaxAttachedImages = dto.MaxAttachedImages;
+        entity.WebSearchEnabled = dto.WebSearchEnabled;
+        entity.WebSearchImageMode = dto.WebSearchImageMode;
+
+        var endpoint = dto.WebSearchEndpoint;
+        var shape = dto.WebSearchShape;
 
         // 换了地址或模型，旧策略的验证结论不再可信：除了本次同时选用的新策略，一律清空回退自动推断。
         var targetChanged = !string.Equals(previousBaseUrl, dto.ApiBaseUrl, StringComparison.Ordinal)
@@ -147,8 +375,8 @@ public class ConfigController : ControllerBase
 
         var strategyChanged = !string.Equals(shape, entity.WebSearchShape, StringComparison.Ordinal)
                            || !string.Equals(endpoint, entity.WebSearchEndpoint, StringComparison.Ordinal);
-        var targetBaseUrl = (dto.ApiBaseUrl ?? string.Empty).Trim();
-        var targetModel = (dto.ModelName ?? string.Empty).Trim();
+        var targetBaseUrl = dto.ApiBaseUrl;
+        var targetModel = dto.ModelName;
 
         // 先取本次探测对“新策略”的结论，再清运行时负缓存——Clear 会连探测账本一起清掉，
         // 顺序反了就会出现“刚测出带图可用、一保存又变成未测”。
@@ -176,10 +404,201 @@ public class ConfigController : ControllerBase
             entity.WebSearchImageCapable = imageCapable;
             entity.WebSearchImageVerifiedAt = DateTime.UtcNow;
         }
-
-        await _dbContext.SaveChangesAsync();
-        return NoContent();
     }
+
+    /// <summary>
+    /// 表单里的 Key 为空或仍是打码值（说明用户没改），保持数据库中的原 Key。
+    /// </summary>
+    private static string ResolveSubmittedApiKey(string? currentKey, string? submittedKey)
+    {
+        currentKey ??= string.Empty;
+        if (string.IsNullOrWhiteSpace(submittedKey) || submittedKey == MaskApiKey(currentKey))
+            return currentKey;
+        return submittedKey;
+    }
+
+    private static AiPresetConfigDto SnapshotAiConfig(AiConfigEntity? entity)
+    {
+        if (entity == null) return new AiPresetConfigDto();
+
+        return new AiPresetConfigDto
+        {
+            Version = 1,
+            ApiBaseUrl = entity.ApiBaseUrl,
+            ModelName = entity.ModelName,
+            SystemPrompt = entity.SystemPrompt,
+            Personality = entity.Personality,
+            Temperature = entity.Temperature,
+            MaxTokens = entity.MaxTokens,
+            MaxContextMessages = entity.MaxContextMessages,
+            MaxAttachedImages = entity.MaxAttachedImages,
+            WebSearchEnabled = entity.WebSearchEnabled,
+            WebSearchEndpoint = entity.WebSearchEndpoint,
+            WebSearchShape = entity.WebSearchShape,
+            WebSearchImageMode = string.IsNullOrWhiteSpace(entity.WebSearchImageMode)
+                ? AiConfig.WebSearchImageModeAuto
+                : entity.WebSearchImageMode
+        };
+    }
+
+    private static AiPresetConfigDto ToPresetConfig(AiConfigInputDto input) => new()
+    {
+        Version = 1,
+        ApiBaseUrl = input.ApiBaseUrl,
+        ModelName = input.ModelName,
+        SystemPrompt = input.SystemPrompt,
+        Personality = input.Personality,
+        Temperature = input.Temperature,
+        MaxTokens = input.MaxTokens,
+        MaxContextMessages = input.MaxContextMessages,
+        MaxAttachedImages = input.MaxAttachedImages,
+        WebSearchEnabled = input.WebSearchEnabled,
+        WebSearchEndpoint = input.WebSearchEndpoint,
+        WebSearchShape = input.WebSearchShape,
+        WebSearchImageMode = input.WebSearchImageMode
+    };
+
+    private static string SerializePresetConfig(AiPresetConfigDto config)
+    {
+        // 双保险：Key 只走单独一列，任何调用方都不可能把它序列化进快照。
+        config.Version = 1;
+        config.ApiKey = string.Empty;
+        return JsonSerializer.Serialize(config, PresetJsonOptions);
+    }
+
+    private static bool TryReadPresetConfig(string? json, out AiPresetConfigDto config)
+    {
+        config = new AiPresetConfigDto();
+        if (string.IsNullOrWhiteSpace(json)) return false;
+
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<AiPresetConfigDto>(json, PresetJsonOptions);
+            if (parsed == null) return false;
+            config = parsed;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static Dictionary<string, CharacterDto> BuildCharacterLookup(IEnumerable<CharacterDto> characters)
+    {
+        var lookup = new Dictionary<string, CharacterDto>(StringComparer.OrdinalIgnoreCase);
+        foreach (var character in characters)
+            lookup[character.Name] = character;
+        return lookup;
+    }
+
+    private static AiPresetSummaryDto BuildAiPresetSummary(
+        AiConfigPresetEntity entity,
+        IReadOnlyDictionary<string, CharacterDto> characters)
+    {
+        var valid = TryReadPresetConfig(entity.ConfigJson, out var config);
+        var personality = config.Personality ?? string.Empty;
+        var personalityMissing = false;
+        var personalityDisplayName = string.Empty;
+
+        if (!string.IsNullOrWhiteSpace(personality))
+        {
+            if (characters.TryGetValue(personality, out var character))
+            {
+                personalityDisplayName = character.DisplayName;
+            }
+            else
+            {
+                personalityDisplayName = personality;
+                personalityMissing = true;
+            }
+        }
+
+        return new AiPresetSummaryDto
+        {
+            Id = entity.Id,
+            Name = entity.Name,
+            Description = entity.Description,
+            ApiBaseUrl = config.ApiBaseUrl ?? string.Empty,
+            ModelName = config.ModelName ?? string.Empty,
+            Personality = personality,
+            PersonalityDisplayName = personalityDisplayName,
+            PersonalityMissing = personalityMissing,
+            WebSearchEnabled = config.WebSearchEnabled,
+            WebSearchShape = config.WebSearchShape ?? string.Empty,
+            HasApiKey = !string.IsNullOrEmpty(entity.ApiKey),
+            IsValid = valid,
+            CreatedAt = entity.CreatedAt,
+            UpdatedAt = entity.UpdatedAt
+        };
+    }
+
+    private static AiPresetDetailDto BuildAiPresetDetail(
+        AiConfigPresetEntity entity,
+        IReadOnlyDictionary<string, CharacterDto> characters)
+    {
+        var summary = BuildAiPresetSummary(entity, characters);
+        TryReadPresetConfig(entity.ConfigJson, out var config);
+        config.ApiKey = string.Empty;
+
+        return new AiPresetDetailDto
+        {
+            Id = summary.Id,
+            Name = summary.Name,
+            Description = summary.Description,
+            ApiBaseUrl = summary.ApiBaseUrl,
+            ModelName = summary.ModelName,
+            Personality = summary.Personality,
+            PersonalityDisplayName = summary.PersonalityDisplayName,
+            PersonalityMissing = summary.PersonalityMissing,
+            WebSearchEnabled = summary.WebSearchEnabled,
+            WebSearchShape = summary.WebSearchShape,
+            HasApiKey = summary.HasApiKey,
+            IsValid = summary.IsValid,
+            CreatedAt = summary.CreatedAt,
+            UpdatedAt = summary.UpdatedAt,
+            Config = config,
+            ApiKey = MaskApiKey(entity.ApiKey)
+        };
+    }
+
+    private async Task<string?> ValidatePresetNameAsync(string name, int? excludeId)
+    {
+        if (name.Length is < 1 or > 40)
+            return "预设名称需为 1-40 个字符";
+
+        var names = await _dbContext.AiPresets
+            .Select(p => new { p.Id, p.Name })
+            .ToListAsync();
+        return names.Any(p =>
+            (!excludeId.HasValue || p.Id != excludeId.Value) &&
+            string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+            ? $"预设「{name}」已存在"
+            : null;
+    }
+
+    private static string? ValidatePresetDescription(string description) =>
+        description.Length > 200 ? "预设备注不能超过 200 个字符" : null;
+
+    private static string BuildCopyName(string sourceName, IEnumerable<string> existingNames)
+    {
+        var names = new HashSet<string>(existingNames, StringComparer.OrdinalIgnoreCase);
+        const string suffix = " 副本";
+        var baseName = TrimToLength(sourceName, 40 - suffix.Length) + suffix;
+        if (!names.Contains(baseName)) return baseName;
+
+        for (var i = 2; i < 1000; i++)
+        {
+            var numbered = $"{suffix} {i}";
+            var candidate = TrimToLength(sourceName, 40 - numbered.Length) + numbered;
+            if (!names.Contains(candidate)) return candidate;
+        }
+
+        return Guid.NewGuid().ToString("N")[..8];
+    }
+
+    private static string TrimToLength(string value, int max) =>
+        value.Length <= max ? value : value[..max];
 
     /// <summary>
     /// 联网搜索探测（一次性返回）：保留给脚本/旧前端；面板用流式版本看逐项进度。
@@ -526,13 +945,26 @@ public class ConfigController : ControllerBase
 
         // 清理引用：全局人设与各群人设若指向被删人设则回退为空（默认）
         var aiConfig = await _dbContext.AiConfigs.FirstOrDefaultAsync();
-        if (aiConfig != null && aiConfig.Personality == name)
+        if (aiConfig != null &&
+            string.Equals(aiConfig.Personality, name, StringComparison.OrdinalIgnoreCase))
             aiConfig.Personality = string.Empty;
 
         var groupConfigs = await _dbContext.GroupConfigs
             .Where(g => g.ActiveCharacter == name).ToListAsync();
         foreach (var g in groupConfigs)
             g.ActiveCharacter = null;
+
+        // 预设里引用同一人设的也清掉，否则应用预设时那个标识会被当成自由文本性格塞进提示词。
+        var presets = await _dbContext.AiPresets.ToListAsync();
+        foreach (var preset in presets)
+        {
+            if (!TryReadPresetConfig(preset.ConfigJson, out var config)) continue;
+            if (!string.Equals(config.Personality, name, StringComparison.OrdinalIgnoreCase)) continue;
+
+            config.Personality = string.Empty;
+            preset.ConfigJson = SerializePresetConfig(config);
+            preset.UpdatedAt = DateTime.UtcNow;
+        }
 
         await _dbContext.SaveChangesAsync();
         return NoContent();
