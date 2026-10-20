@@ -12,7 +12,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DOTNET_VERSION: '9.0.x'
+  # 固定 SDK/运行时 patch：应用层包只在运行时版本一致时可用；runner 自动升级会让
+  # 每次发布都悄悄变成“必须下完整包”。升级运行时应当是一次显式提交。
+  DOTNET_VERSION: '9.0.316'
   NODE_VERSION: '20'
 
 jobs:
@@ -87,7 +89,9 @@ jobs:
         run: |
           set -euo pipefail
           version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
-          mkdir -p stage
+          mkdir -p stage assets
+          python_cmd=python3
+          if [ "$RUNNER_OS" = "Windows" ]; then python_cmd=python; fi
           for kind in self-contained framework-dependent; do
             pkg="mutter-bot-v${version}-${{ matrix.rid }}-${kind}"
             mkdir -p "stage/${pkg}"
@@ -122,12 +126,35 @@ jobs:
             else
               tar -C stage -czf "${pkg}.tar.gz" "${pkg}"
             fi
+
+            # 自包含包额外产出应用层包；框架依赖包本身只有 5MB 左右，直接沿用完整包。
+            archive="${pkg}.${{ matrix.archive }}"
+            if [ "$kind" = "self-contained" ]; then
+              "$python_cmd" tools/packaging/make_update_assets.py \
+                --publish-dir "out/${kind}" \
+                --rid "${{ matrix.rid }}" \
+                --flavor "$kind" \
+                --version "$version" \
+                --full-archive "$archive" \
+                --out-dir assets
+            else
+              "$python_cmd" tools/packaging/make_update_assets.py \
+                --publish-dir "out/${kind}" \
+                --rid "${{ matrix.rid }}" \
+                --flavor "$kind" \
+                --version "$version" \
+                --full-archive "$archive" \
+                --out-dir assets \
+                --no-app
+            fi
           done
 
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.rid }}
-          path: mutter-bot-v*
+          path: |
+            mutter-bot-v*
+            assets/*
           retention-days: 3
 
   release:
@@ -142,6 +169,33 @@ jobs:
           pattern: release-*
           path: releases
           merge-multiple: true
+
+      - name: 生成更新清单
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
+          tag="$GITHUB_REF_NAME"
+          python3 tools/packaging/assemble_update_manifest.py \
+            --fragments-dir releases \
+            --version "$version" \
+            --tag "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --output releases/update.json
+
+          if [ -n "${UPDATE_SIGNING_KEY:-}" ]; then
+            key_file="$RUNNER_TEMP/update-signing-key.pem"
+            printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key_file"
+            openssl dgst -sha256 -sign "$key_file" -out "$RUNNER_TEMP/update.json.sig" releases/update.json
+            base64 -w0 "$RUNNER_TEMP/update.json.sig" > releases/update.json.sig
+            rm -f "$key_file" "$RUNNER_TEMP/update.json.sig"
+            echo "update.json 已签名"
+          else
+            echo "未配置 UPDATE_SIGNING_KEY，update.json 不签名；镜像/自定义源需要签名后才能启用"
+          fi
+
+          rm -f releases/update-fragment-*.json
 
       - name: 生成校验和
         run: |
@@ -169,6 +223,8 @@ jobs:
 
           - **self-contained**：内置 .NET 9 运行时，解压即用。
           - **framework-dependent**：需预装 ASP.NET Core 9 Runtime。
+          - 面板内更新优先下载 \`*-app.zip\` 应用层包（约 5-6MB）；运行时版本变化时自动改用完整包。
+          - \`update.json\` 是更新清单，\`update.json.sig\` 是可选签名；旧版本仍按完整包更新。
           - Windows 解压后编辑同目录 \`appsettings.json\`，运行 \`mutter-bot.exe\`（默认 TUI）或 \`mutter-bot.exe --headless\`。
           - Linux 解压后进入目录执行 \`sudo ./install.sh .\`；首次安装后编辑 \`/opt/mutter-bot/appsettings.json\`，再 \`sudo systemctl restart mutter-bot\`。
           - 自包含包不包含 ICU，精简 Linux 发行版需安装 \`libicu\`。

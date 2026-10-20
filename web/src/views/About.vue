@@ -115,12 +115,21 @@
                 </el-link>
               </el-tooltip>
               <span v-else class="update-feedback" :class="updateState.type">{{ updateState.text }}</span>
+              <span v-if="updatePlanText && !update.downloading" class="update-feedback muted">{{ updatePlanText }}</span>
               <el-button
                 :loading="update.checking"
                 :disabled="update.downloading || update.installing || update.restarting"
                 @click="checkUpdate"
               >
                 检查更新
+              </el-button>
+              <el-button
+                size="small"
+                text
+                :disabled="update.downloading || update.installing || update.restarting"
+                @click="openUpdateSettings"
+              >
+                更新设置
               </el-button>
             </div>
           </div>
@@ -230,11 +239,84 @@
         title="本项目仅供学习交流与个人研究使用，运行与二次开发请遵守 QQ 机器人平台规则与相关法律法规。" />
     </el-card>
   </div>
+
+  <el-dialog v-model="updateSettingsVisible" title="更新设置" width="660px" @closed="resetSettingsFeedback">
+    <el-form label-width="96px">
+      <el-form-item label="更新方式">
+        <el-radio-group v-model="updateSettings.mode">
+          <el-radio-button value="auto">自动</el-radio-button>
+          <el-radio-button value="full">仅完整包</el-radio-button>
+          <el-radio-button value="check">仅检查</el-radio-button>
+        </el-radio-group>
+        <div class="hint">
+          自动：运行时版本一致时优先下载约 5-6MB 的应用层包，否则自动改用完整包。
+        </div>
+      </el-form-item>
+
+      <el-form-item label="更新源">
+        <el-radio-group v-model="updateSettings.source">
+          <el-radio-button value="github">GitHub 官方</el-radio-button>
+          <el-radio-button value="mirror">镜像</el-radio-button>
+          <el-radio-button value="custom">自定义</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+
+      <el-form-item v-if="updateSettings.source !== 'github'" label="清单地址">
+        <el-input
+          v-model="updateSettings.manifestUrl"
+          placeholder="https://example.com/mutter-bot/update.json"
+        />
+      </el-form-item>
+
+      <el-form-item label="签名公钥">
+        <el-input
+          v-model="updateSettings.publicKey"
+          type="textarea"
+          :rows="3"
+          placeholder="PEM 或 Base64 SPKI；镜像/自定义源必填"
+        />
+        <div class="hint">
+          镜像/自定义源必须提供公钥并验证 update.json 签名；官方源可留空。
+        </div>
+      </el-form-item>
+
+      <el-form-item>
+        <el-button :loading="settingsTesting" :disabled="!settingsLoaded" @click="testUpdateSource">测试更新源</el-button>
+        <el-button type="primary" :loading="settingsSaving" :disabled="!settingsLoaded" @click="saveUpdateSettings">保存</el-button>
+      </el-form-item>
+    </el-form>
+
+    <el-alert v-if="settingsError" type="error" :closable="false" show-icon :title="settingsError"
+      style="margin-bottom: 12px" />
+
+    <div v-if="settingsTestResult" class="settings-test">
+      <el-tag :type="settingsTestResult.reachable ? 'success' : 'danger'" size="small" effect="plain">
+        {{ settingsTestResult.reachable ? '源可用' : '源不可用' }}
+      </el-tag>
+      <span v-if="settingsTestResult.version">版本 {{ settingsTestResult.version }}</span>
+      <span>{{ settingsTestResult.latencyMs }} ms</span>
+      <span>签名：{{ signatureLabel(settingsTestResult.signatureStatus) }}</span>
+      <span v-if="settingsTestResult.reachable">
+        完整包 {{ formatBytes(settingsTestResult.fullAssetSize) }}
+        <template v-if="settingsTestResult.appAssetSize">
+          / 应用层 {{ formatBytes(settingsTestResult.appAssetSize) }}
+        </template>
+      </span>
+      <div v-if="settingsTestResult.error" class="settings-test-error">
+        {{ settingsTestResult.error }}
+      </div>
+    </div>
+
+    <div class="probe-footnote">
+      更新设置保存在安装目录的 <code>update-settings.json</code>，更新时不会被覆盖。
+      官方清单地址：<code>{{ updateSettings.officialManifestUrl }}</code>
+    </div>
+  </el-dialog>
 </template>
 
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowRight, ChatDotRound, Download, Opportunity, Picture, User, Search, Monitor, Check } from '@element-plus/icons-vue'
 import { appVersion as version } from '../version'
 import { panelSettings, colorPresets, resetPanelSettings } from '../panelSettings'
@@ -306,9 +388,31 @@ const update = ref({
   hasUpdate: false,
   canSelfUpdate: false,
   selfUpdateReason: '',
+  assetKind: 'full',
+  assetSize: 0,
+  appAssetSize: 0,
+  fullAssetSize: 0,
+  recommendedKind: 'full',
+  runtimeChanged: false,
+  source: 'github',
+  signatureStatus: '',
+  stagedKind: '',
   releaseUrl: '',
   error: '',
   applyError: ''
+})
+const updateSettingsVisible = ref(false)
+const settingsSaving = ref(false)
+const settingsTesting = ref(false)
+const settingsLoaded = ref(false)
+const settingsError = ref('')
+const settingsTestResult = ref(null)
+const updateSettings = ref({
+  mode: 'auto',
+  source: 'github',
+  manifestUrl: '',
+  publicKey: '',
+  officialManifestUrl: ''
 })
 let updateTimer = null
 let progressTimer = null
@@ -328,6 +432,26 @@ const downloadBytesText = computed(() => {
   if (!downloaded && !total) return ''
   return total > 0 ? `${formatBytes(downloaded)} / ${formatBytes(total)}` : formatBytes(downloaded)
 })
+
+const updatePlanText = computed(() => {
+  if (update.value.staged) {
+    const kind = update.value.stagedKind === 'app' ? '应用层' : '完整包'
+    return `已下载 v${update.value.stagedVersion || update.value.latestVersion} · ${kind}`
+  }
+  if (!update.value.hasUpdate || !update.value.canSelfUpdate || !update.value.assetSize) return ''
+  const size = formatBytes(update.value.assetSize)
+  if (update.value.assetKind === 'app') return `应用层更新 · ${size}（运行时无需重下）`
+  if (update.value.runtimeChanged) return `完整包更新 · ${size}（运行时版本变化）`
+  return `完整包更新 · ${size}`
+})
+
+const signatureLabel = (status) => ({
+  valid: '有效',
+  missing: '未签名',
+  invalid: '无效',
+  not_configured: '未配置公钥',
+  legacy: '旧版 API'
+}[status] || status || '未知')
 
 const updateState = computed(() => {
   if (update.value.restarting) return { type: 'restarting', text: '更新完成，服务正在重启…' }
@@ -388,6 +512,7 @@ const applyProgress = (data) => {
       downloading: false,
       staged: true,
       stagedVersion: data?.version || update.value.stagedVersion,
+      stagedKind: data?.kind || update.value.stagedKind,
       progress: 100,
       progressPhase: 'done',
       downloadedBytes: totalBytes || downloadedBytes,
@@ -467,8 +592,17 @@ const checkUpdate = async () => {
       hasUpdate: Boolean(data.hasUpdate),
       canSelfUpdate: Boolean(data.canSelfUpdate),
       selfUpdateReason: data.selfUpdateReason || '',
+      assetKind: data.assetKind || 'full',
+      assetSize: Number(data.assetSize) || 0,
+      appAssetSize: Number(data.appAssetSize) || 0,
+      fullAssetSize: Number(data.fullAssetSize) || 0,
+      recommendedKind: data.recommendedKind || 'full',
+      runtimeChanged: Boolean(data.runtimeChanged),
+      source: data.source || 'github',
+      signatureStatus: data.signatureStatus || '',
       staged: Boolean(data.staged),
       stagedVersion: data.stagedVersion || '',
+      stagedKind: data.stagedKind || '',
       releaseUrl: data.releaseUrl || `${repoUrl}/releases/latest`,
       error: data.error || ''
     }
@@ -629,7 +763,8 @@ const downloadUpdate = async () => {
         progress: 100,
         progressPhase: 'done',
         staged: true,
-        stagedVersion: data.version || update.value.latestVersion
+        stagedVersion: data.version || update.value.latestVersion,
+        stagedKind: data.kind || update.value.assetKind
       }
       await requestInstall()
     }
@@ -657,6 +792,63 @@ const downloadUpdate = async () => {
         progress?.error ||
         '启动下载失败，请稍后重试'
     }
+  }
+}
+
+const openUpdateSettings = async () => {
+  updateSettingsVisible.value = true
+  settingsLoaded.value = false
+  settingsError.value = ''
+  settingsTestResult.value = null
+  try {
+    const { data } = await api.get('/update/settings', { timeout: 5000, skipErrorMessage: true })
+    updateSettings.value = { ...updateSettings.value, ...data }
+    settingsLoaded.value = true
+  } catch (err) {
+    settingsError.value = err?.response?.data?.error || '读取更新设置失败'
+  }
+}
+
+const resetSettingsFeedback = () => {
+  settingsError.value = ''
+  settingsTestResult.value = null
+  settingsLoaded.value = false
+}
+
+const testUpdateSource = async () => {
+  if (!settingsLoaded.value) return
+  settingsTesting.value = true
+  settingsError.value = ''
+  settingsTestResult.value = null
+  try {
+    const { data } = await api.post('/update/test-source', updateSettings.value, {
+      timeout: 20000,
+      skipErrorMessage: true
+    })
+    settingsTestResult.value = data
+  } catch (err) {
+    settingsError.value = err?.response?.data?.error || '测试更新源失败'
+  } finally {
+    settingsTesting.value = false
+  }
+}
+
+const saveUpdateSettings = async () => {
+  if (!settingsLoaded.value) return
+  settingsSaving.value = true
+  settingsError.value = ''
+  try {
+    await api.put('/update/settings', updateSettings.value, {
+      timeout: 10000,
+      skipErrorMessage: true
+    })
+    ElMessage.success('更新设置已保存')
+    updateSettingsVisible.value = false
+    await checkUpdate()
+  } catch (err) {
+    settingsError.value = err?.response?.data?.error || '保存更新设置失败'
+  } finally {
+    settingsSaving.value = false
   }
 }
 
@@ -771,6 +963,14 @@ html.dark .hero-card {
 .stack-name { font-weight: 600; color: var(--el-text-color-primary); white-space: nowrap; }
 .stack-desc { color: var(--el-text-color-secondary); text-align: right; }
 .disclaimer { margin-top: 16px; }
+.hint { width: 100%; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; margin-top: 4px; }
+.settings-test {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 10px 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px;
+  font-size: 12px; color: var(--el-text-color-regular);
+}
+.settings-test-error { flex-basis: 100%; color: var(--el-color-danger); line-height: 1.6; }
+.probe-footnote { margin-top: 12px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.7; }
 @media (max-width: 1100px) {
   .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
@@ -20,6 +22,8 @@ using Mutter.Infrastructure.Entities;
 using Mutter.Infrastructure.Repositories;
 using Mutter.Infrastructure.Services;
 using Mutter.Web.Controllers;
+using Mutter.Web.Models;
+using Mutter.Web.Services;
 
 // 择机主动发言自检：纯逻辑门禁 + 生产库副本上的迁移幂等 + DI 装配。
 // 用法：
@@ -652,6 +656,102 @@ var legacyHash = $"sha256${Convert.ToBase64String(legacySalt)}$" +
 Check(PanelPasswordHasher.Verify(legacyHash, "s3cret-pass"), "旧格式哈希（无迭代数段）仍可校验通过");
 Check(!PanelPasswordHasher.Verify(legacyHash, "wrong-pass"), "旧格式哈希校验错误口令失败");
 Check(PanelPasswordHasher.NeedsRehash(legacyHash), "旧格式哈希标记为需要重哈希");
+
+Console.WriteLine("== 3h. 分层更新、清单与签名（纯逻辑） ==");
+var defaultUpdate = new UpdateSettings();
+defaultUpdate.Normalize();
+Check(defaultUpdate.Mode == UpdateSettings.ModeAuto &&
+      defaultUpdate.Source == UpdateSettings.SourceGitHub,
+    "更新设置默认：自动方式 + GitHub 官方源");
+Check(defaultUpdate.Validate(out _), "官方源使用内置公钥时配置校验通过");
+
+var mirrorUpdate = new UpdateSettings
+{
+    Source = UpdateSettings.SourceMirror,
+    ManifestUrl = "https://mirror.example.com/mutter-bot/update.json",
+    PublicKey = "configured"
+};
+Check(mirrorUpdate.Validate(out _), "镜像源在填写 HTTPS 清单与公钥后通过校验");
+var missingKey = new UpdateSettings
+{
+    Source = UpdateSettings.SourceMirror,
+    ManifestUrl = "https://mirror.example.com/mutter-bot/update.json",
+    PublicKey = string.Empty
+};
+Check(!missingKey.Validate(out _), "镜像源缺少公钥时拒绝保存");
+var insecureMirror = new UpdateSettings
+{
+    Source = UpdateSettings.SourceCustom,
+    ManifestUrl = "http://mirror.example.com/update.json",
+    PublicKey = "configured"
+};
+Check(!insecureMirror.Validate(out _), "镜像源拒绝 HTTP 清单地址");
+
+using (var signingKey = ECDsa.Create(ECCurve.NamedCurves.nistP256))
+{
+    var publicKey = Convert.ToBase64String(signingKey.ExportSubjectPublicKeyInfo());
+    var payload = Encoding.UTF8.GetBytes("""{"version":"2.0.5"}""");
+    var signature = Convert.ToBase64String(signingKey.SignData(
+        payload, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
+    Check(UpdateSignature.TryValidatePublicKey(publicKey, out _), "ECDSA P-256 公钥格式可识别");
+    Check(UpdateSignature.TryVerify(payload, signature, publicKey, out _), "清单签名校验通过");
+    Check(!UpdateSignature.TryVerify(Encoding.UTF8.GetBytes("""{"version":"9.9.9"}"""),
+            signature, publicKey, out _),
+        "清单被篡改时签名校验失败");
+    Check(!UpdateSignature.TryValidatePublicKey("not-a-public-key", out _), "非法公钥被拒绝");
+}
+
+// CI 用 OpenSSL 生成 DER 签名；这里固定一组 OpenSSL 产物，防止 .NET 默认的 P1363
+// 签名格式与发布流水线错位。
+const string opensslPayload = "mutter-update-manifest-test";
+const string opensslPublicKey =
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEi+LT02j42M77a+ILW73HyRw566HVwPnpHon0aBLZHmb4Do7PnU2uP2dPQgFgT7trhZ3AxNgrsptckqZlZOjNoA==";
+const string opensslSignature =
+    "MEYCIQD9Fx4tT1FE2Jy5jNQx0oqCJSFO4wlFtPHp8WKNnwx13AIhAMBrUIgQaMoU1vq1SZSwkdI3H2ha6TDW1enClolU+mYT";
+Check(UpdateSignature.TryVerify(
+        Encoding.UTF8.GetBytes(opensslPayload), opensslSignature, opensslPublicKey, out _),
+    "OpenSSL 生成的 DER 签名可被 .NET 校验（发布流水线与客户端格式一致）");
+
+var currentRuntime = $"{Environment.Version.Major}.{Environment.Version.Minor}.{Environment.Version.Build}";
+Check(UpdateService.IsAppRuntimeCompatible(currentRuntime, "self-contained", out _),
+    "运行时版本一致时应用层包可用");
+Check(!UpdateService.IsAppRuntimeCompatible("1.0.0", "self-contained", out _),
+    "运行时版本不一致时拒绝应用层包");
+Check(UpdateService.IsAppRuntimeCompatible(null, "framework-dependent", out _),
+    "框架依赖包不绑定内置运行时版本");
+
+Check(UpdateService.TryResolveAssetUrl(
+        "https://github.com/o/r/releases/latest/download/update.json",
+        "a.zip", out var resolvedAsset, out _) &&
+      resolvedAsset.EndsWith("/download/a.zip", StringComparison.Ordinal),
+    "清单相对资产地址按清单目录解析");
+Check(!UpdateService.TryResolveAssetUrl(
+        "https://github.com/o/r/releases/latest/download/update.json",
+        "http://evil.example/a.zip", out _, out _),
+    "资产地址必须是 HTTPS");
+
+Check(AppLayerManifest.IsSafeRelativePath("wwwroot/assets/index.js", out _),
+    "应用层清单允许子目录文件");
+Check(!AppLayerManifest.IsSafeRelativePath("../evil.dll", out _), "应用层清单拒绝 ..");
+Check(!AppLayerManifest.IsSafeRelativePath("/etc/passwd", out _), "应用层清单拒绝绝对路径");
+Check(!AppLayerManifest.IsSafeRelativePath("appsettings.json", out _), "应用层清单拒绝配置文件");
+Check(!AppLayerManifest.IsSafeRelativePath("mutter-bot.db", out _), "应用层清单拒绝数据库");
+Check(AppLayerManifest.IsProtectedPath("update-settings.json"),
+    "update-settings.json 在所有更新路径中受保护");
+
+var manifestJson = """
+    {"schema":1,"version":"2.0.5","assets":[
+      {"name":"mutter-bot-v2.0.5-win-x64-self-contained.zip","kind":"full",
+       "rid":"win-x64","flavor":"self-contained","runtimeVersion":"9.0.18",
+       "size":49114326,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+       "url":"mutter-bot-v2.0.5-win-x64-self-contained.zip"}]}
+    """;
+Check(UpdateManifest.TryParse(Encoding.UTF8.GetBytes(manifestJson), out _) is not null,
+    "合法 update.json 可解析");
+var badManifestJson = manifestJson.Replace(
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "bad", StringComparison.Ordinal);
+Check(UpdateManifest.TryParse(Encoding.UTF8.GetBytes(badManifestJson), out _) is null,
+    "SHA256 非法的 update.json 被拒绝");
 
 if (logicOnly)
 {

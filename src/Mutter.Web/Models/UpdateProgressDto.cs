@@ -9,6 +9,7 @@ public class UpdateProgressDto
     public string Phase { get; set; } = "idle";
     public string? Version { get; set; }
     public string? AssetName { get; set; }
+    public string Kind { get; set; } = "full";
     public string? Error { get; set; }
     public bool Resumable { get; set; }
     public bool Staged { get; set; }
