@@ -1,6 +1,10 @@
 namespace Mutter.Web.Models;
 
-public class AiConfigDto
+/// <summary>
+/// AI 配置的可写字段。面板保存、配置预设的创建/覆盖/应用共用这一份契约，
+/// 避免几处各写一套字段后逐渐漂移。
+/// </summary>
+public class AiConfigInputDto
 {
     public string ApiBaseUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;
@@ -14,9 +18,6 @@ public class AiConfigDto
     /// <summary>@ 回复 / 私聊最多附带几张图，0=不带图。</summary>
     public int MaxAttachedImages { get; set; }
 
-    /// <summary>附图张数上限，供面板对齐输入框。</summary>
-    public int CeilingAttachedImages { get; set; } = Mutter.Core.Models.Config.AiConfig.CeilingAttachedImages;
-
     public bool WebSearchEnabled { get; set; }
 
     /// <summary>已选用的联网搜索通道：空=按地址推断，openai=兼容接口形状，gemini=原生通道。</summary>
@@ -25,11 +26,23 @@ public class AiConfigDto
     /// <summary>已选用的探测形状 id。</summary>
     public string WebSearchShape { get; set; } = string.Empty;
 
-    /// <summary>该策略的验证时间（只读，由服务端在选用时写入）。</summary>
-    public DateTime? WebSearchVerifiedAt { get; set; }
-
     /// <summary>带图联网策略：auto / two_stage / off。</summary>
     public string WebSearchImageMode { get; set; } = "auto";
+}
+
+/// <summary>
+/// 面板读取的完整 AI 配置：可写字段 + 只读状态与可选项。
+/// </summary>
+public class AiConfigDto : AiConfigInputDto
+{
+    /// <summary>附图张数上限，供面板对齐输入框。</summary>
+    public int CeilingAttachedImages { get; set; } = Mutter.Core.Models.Config.AiConfig.CeilingAttachedImages;
+
+    /// <summary>内置默认系统提示词，供面板在用户留空时展示全文。</summary>
+    public string DefaultSystemPrompt { get; set; } = Mutter.Core.Models.Config.AiConfig.DefaultSystemPrompt;
+
+    /// <summary>该策略的验证时间（只读，由服务端在选用时写入）。</summary>
+    public DateTime? WebSearchVerifiedAt { get; set; }
 
     /// <summary>“图片 + 搜索”是否实测可用（只读，由探测/运行结果写入）。</summary>
     public bool? WebSearchImageCapable { get; set; }

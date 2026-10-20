@@ -3,13 +3,31 @@
     <template #header>
       <div class="card-head">
         <b>AI 配置</b>
-        <el-button size="small" @click="openHelp('presetId')">参数说明</el-button>
+        <el-button size="small" @click="openHelp('configPreset')">参数说明</el-button>
       </div>
     </template>
 
     <el-form :model="form" label-width="130px" style="max-width: 760px">
-      <el-form-item label="服务商预设">
-        <el-select v-model="presetId" placeholder="选择预设自动填充" clearable style="width: 320px" @change="applyPreset">
+      <el-form-item label="配置预设">
+        <el-select v-model="selectedPresetId" placeholder="选择已保存的预设" clearable style="width: 260px">
+          <el-option v-for="p in presets" :key="p.id" :label="p.name" :value="p.id">
+            <span>{{ p.name }}</span>
+            <span style="float: right; color: #909399; font-size: 12px">{{ p.modelName || '未填模型' }}</span>
+          </el-option>
+        </el-select>
+        <el-button style="margin-left: 12px" :disabled="!selectedPresetId" :loading="applyingPreset"
+          @click="applySelectedPreset()">应用</el-button>
+        <el-button style="margin-left: 12px" @click="openSavePreset()">保存为预设</el-button>
+        <el-button style="margin-left: 12px" @click="openManagePresets()">管理预设</el-button>
+        <ParamHelpButton :label="helpLabel('configPreset')" @click="openHelp('configPreset')" />
+        <div class="hint" v-if="selectedPreset">
+          {{ selectedPreset.hasApiKey ? '已保存密钥' : '未保存密钥，应用时沿用当前 Key' }}
+          <span v-if="selectedPreset.personalityMissing">；人设「{{ selectedPreset.personality }}」已不存在</span>
+        </div>
+        <div class="hint" v-if="isDirty">当前表单有未保存修改；保存或应用后会重新开始对比。</div>
+      </el-form-item>
+      <el-form-item label="服务商">
+        <el-select v-model="presetId" placeholder="选择服务商自动填充" clearable style="width: 320px" @change="applyPreset">
           <el-option v-for="p in form.availableProviders" :key="p.id" :label="p.name" :value="p.id">
             <span>{{ p.name }}</span>
             <span style="float: right; color: #909399; font-size: 12px">{{ p.defaultModel }}</span>
@@ -43,13 +61,17 @@
       <el-form-item label="系统提示词">
         <el-input v-model="form.systemPrompt" type="textarea" :rows="5" placeholder="留空则使用内置默认提示词" />
         <ParamHelpButton :label="helpLabel('systemPrompt')" @click="openHelp('systemPrompt')" />
+        <div class="hint">
+          <span v-if="!form.systemPrompt">当前使用内置默认提示词。</span>
+          <el-button size="small" link type="primary" @click="defaultPromptDialog = true">查看内置默认提示词</el-button>
+        </div>
       </el-form-item>
       <el-form-item label="Temperature">
         <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" show-input style="max-width: 420px" />
         <ParamHelpButton :label="helpLabel('temperature')" @click="openHelp('temperature')" />
       </el-form-item>
       <el-form-item label="最大 Tokens">
-        <el-input-number v-model="form.maxTokens" :min="256" :max="32768" :step="256" />
+        <el-input-number v-model="form.maxTokens" :min="64" :max="32768" :step="256" />
         <ParamHelpButton :label="helpLabel('maxTokens')" @click="openHelp('maxTokens')" />
       </el-form-item>
       <el-form-item label="上下文条数">
@@ -136,6 +158,119 @@
       <template #footer v-if="!charReadonly">
         <el-button @click="editDialog = false">取消</el-button>
         <el-button type="primary" :loading="charSaving" @click="saveCharacter">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 保存为预设 -->
+    <el-dialog v-model="savePresetDialog" title="保存为预设" width="520px">
+      <el-form :model="presetForm" label-width="96px">
+        <el-form-item label="名称" required>
+          <el-input v-model="presetForm.name" maxlength="40" show-word-limit placeholder="例如：群聊日常、深度推理" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="presetForm.description" maxlength="200" show-word-limit placeholder="可选，用来区分用途" />
+        </el-form-item>
+        <el-form-item label="API Key">
+          <el-switch v-model="presetForm.includeApiKey" active-text="一并保存" />
+          <div class="hint">关闭后预设不含密钥，应用时沿用当前配置的 Key。</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="savePresetDialog = false">取消</el-button>
+        <el-button type="primary" :loading="presetSaving" @click="savePreset">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 重命名预设 -->
+    <el-dialog v-model="editPresetDialog" title="编辑预设" width="520px">
+      <el-form :model="presetEditForm" label-width="96px">
+        <el-form-item label="名称" required>
+          <el-input v-model="presetEditForm.name" maxlength="40" show-word-limit />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="presetEditForm.description" maxlength="200" show-word-limit />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editPresetDialog = false">取消</el-button>
+        <el-button type="primary" :loading="presetSaving" @click="savePresetMeta">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 预设管理 -->
+    <el-dialog v-model="managePresetDialog" title="配置预设管理" width="1000px">
+      <el-table :data="presets" size="small" empty-text="还没有保存过配置预设">
+        <el-table-column label="名称" min-width="160">
+          <template #default="{ row }">
+            <div>
+              {{ row.name }}
+              <el-tag v-if="!row.isValid" size="small" type="danger">数据损坏</el-tag>
+            </div>
+            <div v-if="row.description" class="probe-desc">{{ row.description }}</div>
+            <div class="probe-desc">更新于 {{ fmt(row.updatedAt) }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="服务商 / 模型" min-width="200">
+          <template #default="{ row }">
+            <div>{{ row.modelName || '未填模型' }}</div>
+            <div class="probe-desc">{{ row.apiBaseUrl || '未填地址' }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="人设" width="100">
+          <template #default="{ row }">
+            {{ row.personalityDisplayName || '未指定' }}
+            <el-tag v-if="row.personalityMissing" size="small" type="warning">已失效</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="联网" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.webSearchEnabled ? 'success' : 'info'">
+              {{ row.webSearchEnabled ? '开启' : '关闭' }}
+            </el-tag>
+            <div v-if="row.webSearchEnabled" class="probe-desc">
+              {{ row.webSearchShape ? shapeShortLabel(row.webSearchShape) : '自动推断' }}
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="密钥" width="80">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.hasApiKey ? 'success' : 'info'">
+              {{ row.hasApiKey ? '已保存' : '未保存' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="300" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" link type="primary" :disabled="!row.isValid"
+              @click="applyPresetById(row.id, true)">应用</el-button>
+            <el-button size="small" link type="primary" @click="openPresetMeta(row)">重命名</el-button>
+            <el-button size="small" link type="warning" @click="overwritePreset(row)">覆盖</el-button>
+            <el-button size="small" link type="primary" @click="duplicatePreset(row)">复制</el-button>
+            <el-popconfirm title="删除后不影响当前生效配置，确认删除？" @confirm="removePreset(row)">
+              <template #reference>
+                <el-button size="small" link type="danger">删除</el-button>
+              </template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="probe-footnote">
+        「覆盖」会用当前表单内容替换该预设的配置快照；「应用」会立即覆盖并保存当前生效配置。
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="openSavePreset(true)">从当前表单新建</el-button>
+        <el-button @click="managePresetDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 内置默认系统提示词 -->
+    <el-dialog v-model="defaultPromptDialog" title="内置默认系统提示词" width="760px">
+      <el-input :model-value="form.defaultSystemPrompt || '未获取到默认提示词'" type="textarea" :rows="14" readonly />
+      <div class="probe-footnote">
+        系统提示词留空时使用这段内容；选中「人设」后，角色提示词会在此基础上追加。
+      </div>
+      <template #footer>
+        <el-button @click="defaultPromptDialog = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -233,7 +368,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading, CircleCheck } from '@element-plus/icons-vue'
 import api from '../api'
 import { useParamHelp } from '../paramHelp'
@@ -244,6 +379,42 @@ const form = ref({ availableProviders: [], availableCharacters: [] })
 const presetId = ref('')
 const loading = ref(false)
 const saving = ref(false)
+
+// 配置预设：当前选中项、已保存列表与管理弹窗状态
+const presets = ref([])
+const selectedPresetId = ref(null)
+const applyingPreset = ref(false)
+const savePresetDialog = ref(false)
+const editPresetDialog = ref(false)
+const managePresetDialog = ref(false)
+const presetSaving = ref(false)
+const presetForm = ref({ name: '', description: '', includeApiKey: true })
+const presetEditForm = ref({ id: null, name: '', description: '' })
+const defaultPromptDialog = ref(false)
+// 上次读取/应用/保存后的表单快照，用来判断有没有未保存修改
+const baseline = ref('')
+
+// 只取服务端可写字段；预设接口和 PUT /ai 共用同一份契约
+const configPayload = () => ({
+  apiBaseUrl: form.value.apiBaseUrl || '',
+  apiKey: form.value.apiKey || '',
+  modelName: form.value.modelName || '',
+  systemPrompt: form.value.systemPrompt || '',
+  personality: form.value.personality || '',
+  temperature: form.value.temperature ?? 0.7,
+  maxTokens: form.value.maxTokens ?? 2048,
+  maxContextMessages: form.value.maxContextMessages ?? 20,
+  maxAttachedImages: form.value.maxAttachedImages ?? 3,
+  webSearchEnabled: !!form.value.webSearchEnabled,
+  webSearchEndpoint: form.value.webSearchEndpoint || '',
+  webSearchShape: form.value.webSearchShape || '',
+  webSearchImageMode: form.value.webSearchImageMode || 'auto'
+})
+
+const isDirty = computed(() =>
+  !!baseline.value && JSON.stringify(configPayload()) !== baseline.value)
+const selectedPreset = computed(() =>
+  presets.value.find((p) => p.id === selectedPresetId.value) || null)
 
 // 联网搜索探测：流式逐项进度；全部完成后展示报告，可对已验证形状“选用”
 const probing = ref(false)
@@ -287,6 +458,16 @@ const shapeLabel = (s) => ({
   builtin_web_search: '内联 google_search',
   gemini_native: 'Gemini 原生 google_search'
 }[s] || s)
+// 管理表格空间有限，只展示形状标识，完整说明留给探测报告
+const shapeShortLabel = (s) => ({
+  enable_search: 'enable_search',
+  web_search_tool: 'web_search',
+  google_search_tool: 'google_search',
+  web_search_options: 'web_search_options',
+  builtin_web_search: '内联搜索',
+  gemini_native: 'Gemini 原生'
+}[s] || s)
+const fmt = (s) => (s ? new Date(s + (s.endsWith('Z') ? '' : 'Z')).toLocaleString('zh-CN', { hour12: false }) : '-')
 
 const handleProbeEvent = (ev) => {
   if (ev.type === 'start') {
@@ -430,19 +611,29 @@ const presetHelp = computed(() => {
 })
 
 const HELP_ORDER = [
-  'presetId', 'apiBaseUrl', 'apiKey', 'modelName', 'personality', 'systemPrompt',
+  'configPreset', 'presetId', 'apiBaseUrl', 'apiKey', 'modelName', 'personality', 'systemPrompt',
   'temperature', 'maxTokens', 'maxContextMessages', 'maxAttachedImages',
   'webSearchEnabled', 'webSearchImageMode'
 ]
 
 const HELP = {
+  configPreset: {
+    title: '配置预设',
+    value: () => selectedPreset.value?.name || '未选择',
+    lines: [
+      '把当前整套 AI 配置保存成快照，之后可以一键切换。',
+      '「服务商」只填地址和模型；配置预设还会包含人设、提示词、参数和联网设置。',
+      '「保存为预设」保存的是当前表单，包括还没点「保存配置」的修改。',
+      '应用预设会立即覆盖并保存当前配置；之后对表单的修改不会自动同步回预设。'
+    ]
+  },
   presetId: {
-    title: '服务商预设',
+    title: '服务商',
     value: () => (form.value.availableProviders || []).find((p) => p.id === presetId.value)?.name || '未选择',
     lines: [
-      '选一个预设会填好 API 地址和默认模型，API Key 仍要自己填。',
+      '选一个服务商会填好 API 地址和默认模型，API Key 仍要自己填。',
       '没有合适的选「自定义」，地址和模型名自己写。',
-      '预设只负责填一次，选完照样可以改地址或模型。'
+      '它只负责填一次，和上面的「配置预设」不是一回事。'
     ]
   },
   apiBaseUrl: {
@@ -482,7 +673,7 @@ const HELP = {
     title: '系统提示词',
     value: (f) => (f.systemPrompt ? `${f.systemPrompt.length} 字` : '内置默认'),
     lines: [
-      '留空则使用内置默认提示词。',
+      '留空则使用内置默认提示词，可点下方「查看内置默认提示词」看全文。',
       '「群管理」里的「群专属提示词」会整段替换掉这里的全局提示词，是替换不是追加。'
     ]
   },
@@ -554,7 +745,141 @@ const load = async () => {
   try {
     const { data } = await api.get('/config/ai')
     form.value = data
+    baseline.value = JSON.stringify(configPayload())
   } finally { loading.value = false }
+}
+
+const loadPresets = async () => {
+  const { data } = await api.get('/config/ai/presets')
+  presets.value = data
+}
+
+const openSavePreset = (fromManage = false) => {
+  if (fromManage) managePresetDialog.value = false
+  presetForm.value = { name: '', description: '', includeApiKey: true }
+  savePresetDialog.value = true
+}
+
+const savePreset = async () => {
+  const name = presetForm.value.name.trim()
+  if (!name) {
+    ElMessage.warning('预设名称不能为空')
+    return
+  }
+  presetSaving.value = true
+  try {
+    const { data } = await api.post('/config/ai/presets', {
+      name,
+      description: presetForm.value.description.trim(),
+      includeApiKey: presetForm.value.includeApiKey,
+      config: configPayload()
+    })
+    savePresetDialog.value = false
+    await loadPresets()
+    if (data?.id) selectedPresetId.value = data.id
+    ElMessage.success(`已保存预设「${data?.name || name}」`)
+  } finally { presetSaving.value = false }
+}
+
+const openManagePresets = async () => {
+  await loadPresets()
+  managePresetDialog.value = true
+}
+
+const openPresetMeta = (row) => {
+  presetEditForm.value = { id: row.id, name: row.name, description: row.description }
+  editPresetDialog.value = true
+}
+
+const savePresetMeta = async () => {
+  const name = presetEditForm.value.name.trim()
+  if (!name) {
+    ElMessage.warning('预设名称不能为空')
+    return
+  }
+  presetSaving.value = true
+  try {
+    await api.put(`/config/ai/presets/${presetEditForm.value.id}`, {
+      name,
+      description: presetEditForm.value.description.trim()
+    })
+    editPresetDialog.value = false
+    await loadPresets()
+    ElMessage.success('预设已更新')
+  } finally { presetSaving.value = false }
+}
+
+const overwritePreset = async (row) => {
+  const lines = [`将用当前表单内容覆盖预设「${row.name}」的配置快照。`]
+  if (isDirty.value) lines.push('当前表单有未保存修改，会一并保存进预设。')
+  lines.push('API Key 按当前生效配置保存；表单里填了新 Key 则保存新 Key。')
+  try {
+    await ElMessageBox.confirm(lines.join(''), '覆盖预设', {
+      type: 'warning', confirmButtonText: '覆盖', cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+
+  presetSaving.value = true
+  try {
+    await api.put(`/config/ai/presets/${row.id}`, {
+      name: row.name,
+      description: row.description,
+      includeApiKey: true,
+      config: configPayload()
+    })
+    await loadPresets()
+    ElMessage.success(`预设「${row.name}」已更新`)
+  } finally { presetSaving.value = false }
+}
+
+const duplicatePreset = async (row) => {
+  const { data } = await api.post(`/config/ai/presets/${row.id}/duplicate`)
+  await loadPresets()
+  ElMessage.success(`已复制为「${data?.name || '副本'}」`)
+}
+
+const removePreset = async (row) => {
+  await api.delete(`/config/ai/presets/${row.id}`)
+  if (selectedPresetId.value === row.id) selectedPresetId.value = null
+  await loadPresets()
+  ElMessage.success('预设已删除')
+}
+
+const applyPresetById = async (id, fromManage = false) => {
+  const p = presets.value.find((x) => x.id === id)
+  if (!p) return
+  if (!p.isValid) {
+    ElMessage.error('预设数据损坏，无法应用')
+    return
+  }
+
+  const lines = [`应用预设「${p.name}」会覆盖当前表单并立即保存。`]
+  if (isDirty.value) lines.push('当前表单有未保存修改，这些修改会丢失。')
+  if (!p.hasApiKey) lines.push('该预设未保存 API Key，将沿用当前 Key。')
+  if (p.personalityMissing) lines.push(`人设「${p.personality}」已不存在，应用后会按自由文本处理。`)
+  try {
+    await ElMessageBox.confirm(lines.join(''), '应用预设', {
+      type: 'warning', confirmButtonText: '应用', cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+
+  applyingPreset.value = true
+  try {
+    const { data } = await api.post(`/config/ai/presets/${id}/apply`)
+    form.value = data
+    baseline.value = JSON.stringify(configPayload())
+    selectedPresetId.value = id
+    if (fromManage) managePresetDialog.value = false
+    ElMessage.success(`已应用预设「${p.name}」`)
+  } finally { applyingPreset.value = false }
+}
+
+const applySelectedPreset = () => {
+  if (selectedPresetId.value) applyPresetById(selectedPresetId.value)
 }
 
 const applyPreset = (id) => {
@@ -606,27 +931,17 @@ const removeCharacter = async (row) => {
 const save = async (successMessage = 'AI 配置已保存') => {
   saving.value = true
   try {
-    await api.put('/config/ai', {
-      apiBaseUrl: form.value.apiBaseUrl,
-      apiKey: form.value.apiKey,
-      modelName: form.value.modelName,
-      systemPrompt: form.value.systemPrompt,
-      personality: form.value.personality,
-      temperature: form.value.temperature,
-      maxTokens: form.value.maxTokens,
-      maxContextMessages: form.value.maxContextMessages,
-      maxAttachedImages: form.value.maxAttachedImages,
-      webSearchEnabled: form.value.webSearchEnabled,
-      webSearchEndpoint: form.value.webSearchEndpoint,
-      webSearchShape: form.value.webSearchShape,
-      webSearchImageMode: form.value.webSearchImageMode || 'auto'
-    })
+    await api.put('/config/ai', configPayload())
     ElMessage.success(successMessage)
     await load()
+    // 手动保存后当前配置未必还等于选中的预设，清掉标记避免误导。
+    selectedPresetId.value = null
   } finally { saving.value = false }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await Promise.all([load(), loadPresets()])
+})
 </script>
 
 <style scoped>
