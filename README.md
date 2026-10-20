@@ -70,7 +70,7 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 ### 4. 现代化 Web 管理面板
 - **Vue 3 + Element Plus** 构建的单页管理后台（SPA）。
 - 提供系统监控、AI 与群配置的可视化编辑、会话记录查询、Token 用量统计与主动发言决策审计。
-- **安全鉴权机制**：管理口令 PBKDF2 加盐哈希认证、暴力破解频率限制、远程 Session 会话吊销。
+- **安全鉴权机制**：管理口令 PBKDF2 加盐哈希认证、初始口令首次登录强制修改、暴力破解频率限制、远程 Session 会话吊销。
 
 ---
 
@@ -287,6 +287,13 @@ sudo journalctl -u mutter-bot -f
 ```
 
 > 💡 **Linux 运行提示**：若在部分精简版 Linux 系统（如 Alpine 或最小化 Ubuntu）上运行报错，请确保安装了 ICU 基础库：`apt-get install -y libicu-dev`。
+
+### 面板安全部署建议
+
+- **首次登录强制改密**：安装包自带的初始口令（`CHANGE_ME_STRONG_PASSWORD`）是公开信息。用它登录面板时不会进入管理界面，而是强制先修改密码；初始口令被修改前无法获得任何面板会话。请在安装完成后第一时间完成首次登录与改密。
+- **公网部署必须走 TLS**：面板默认以 HTTP 明文监听，公网暴露会导致登录口令与会话 Cookie 被嗅探。请只监听 `127.0.0.1` 或用防火墙限制来源，公网访问务必通过 Nginx/Caddy 等反向代理终止 TLS。
+- **`PanelAuth:RequireSecureCookie`**：设为 `true` 后会话 Cookie 附加 `Secure` 标记（仅经 HTTPS 传输）。启用 TLS 反代后建议开启。
+- 登录接口对同一 IP 连续 5 次失败锁定 15 分钟；面板口令以 PBKDF2（SHA-256、60 万次迭代、随机盐）哈希存储。
 
 ---
 

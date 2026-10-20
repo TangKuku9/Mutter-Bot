@@ -722,6 +722,35 @@
       30%, 50%, 70% { transform: translateX(-4px); }
       40%, 60% { transform: translateX(4px); }
     }
+    .alert.is-success {
+      border-color: rgba(16, 185, 129, 0.3);
+      background: rgba(16, 185, 129, 0.09);
+      color: #047857;
+    }
+    html.dark .alert.is-success {
+      border-color: rgba(52, 211, 153, 0.34);
+      background: rgba(6, 78, 59, 0.32);
+      color: #6ee7b7;
+    }
+    .alert-icon-success { display: none; }
+    .alert.is-success .alert-icon-error { display: none; }
+    .alert.is-success .alert-icon-success { display: block; }
+
+    .notice {
+      display: none;
+      align-items: flex-start;
+      gap: 10px;
+      margin-top: 20px;
+      padding: 12px 14px;
+      border: 1px solid var(--accent-soft);
+      border-radius: 12px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .notice.show { display: flex; }
+    .notice svg { flex: none; width: 17px; height: 17px; margin-top: 2px; }
 
     .submit {
       position: relative;
@@ -970,17 +999,30 @@
 
           <header class="form-head">
             <p class="eyebrow">管理控制台</p>
-            <h1>欢迎回来</h1>
-            <p class="form-sub">登录以继续管理你的 Mutter 机器人。</p>
+            <h1 id="formTitle">欢迎回来</h1>
+            <p class="form-sub" id="formSub">登录以继续管理你的 Mutter 机器人。</p>
           </header>
 
           <div class="alert" id="alert" role="alert" aria-live="assertive" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <svg class="alert-icon-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
               <circle cx="12" cy="12" r="9" />
               <path d="M12 7.4v5.4" />
               <path d="M12 16.4h.01" />
             </svg>
+            <svg class="alert-icon-success" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="12" r="9" />
+              <path d="m8.4 12.2 2.4 2.4 4.8-4.8" />
+            </svg>
             <span id="alertText"></span>
+          </div>
+
+          <div class="notice" id="notice" role="status">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M12 3 5 5.9v5.5c0 4.2 2.9 7.6 7 9.5 4.1-1.9 7-5.3 7-9.5V5.9L12 3Z" />
+              <path d="M12 9.4v4.2" />
+              <path d="M12 16.6h.01" />
+            </svg>
+            <span>当前密码为安装包初始默认密码，首次使用必须先修改。请设置至少 8 位的新密码，修改后使用新密码登录。</span>
           </div>
 
           <form id="loginForm" novalidate>
@@ -1055,6 +1097,80 @@
             </button>
           </form>
 
+          <form id="changeForm" novalidate style="display: none">
+            <div class="field">
+              <label for="currentPassword">当前密码</label>
+              <div class="control">
+                <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <rect x="4.6" y="10.4" width="14.8" height="9.8" rx="2.6" />
+                  <path d="M8.2 10.4V7.2a3.8 3.8 0 0 1 7.6 0v3.2" />
+                  <path d="M12 14.2v2.1" />
+                </svg>
+                <input
+                  id="currentPassword"
+                  name="currentPassword"
+                  type="password"
+                  placeholder="请输入当前密码"
+                  autocomplete="current-password"
+                  aria-required="true"
+                  required
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <div class="label-row">
+                <label for="newPassword">新密码</label>
+                <span class="hint">至少 8 位</span>
+              </div>
+              <div class="control">
+                <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <path d="M14.4 6.4a4.6 4.6 0 0 0-6.1 6.1L3.6 17.2v3.2h3.2l.9-.9v-2.2h2.2l.9-.9v-2.2h2.2l1.6-1.6a4.6 4.6 0 0 0-.2-6.2Z" />
+                  <path d="M16.4 7.6h.01" />
+                </svg>
+                <input
+                  id="newPassword"
+                  name="newPassword"
+                  type="password"
+                  placeholder="请输入新密码"
+                  autocomplete="new-password"
+                  enterkeyhint="next"
+                  aria-required="true"
+                  required
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="confirmPassword">确认新密码</label>
+              <div class="control">
+                <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <path d="M12 3 5 5.9v5.5c0 4.2 2.9 7.6 7 9.5 4.1-1.9 7-5.3 7-9.5V5.9L12 3Z" />
+                  <path d="m9.1 11.9 2 2 4-4" />
+                </svg>
+                <input
+                  id="confirmPassword"
+                  name="confirmPassword"
+                  type="password"
+                  placeholder="请再次输入新密码"
+                  autocomplete="new-password"
+                  enterkeyhint="go"
+                  aria-required="true"
+                  required
+                />
+              </div>
+            </div>
+
+            <button class="submit" id="changeBtn" type="submit" aria-busy="false">
+              <span class="spinner" aria-hidden="true"></span>
+              <span class="submit-label" id="changeLabel">修改密码</span>
+              <svg class="submit-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="M5 12h14" />
+                <path d="m13 6 6 6-6 6" />
+              </svg>
+            </button>
+          </form>
+
           <p class="security-note">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
               <path d="M12 3 5 5.9v5.5c0 4.2 2.9 7.6 7 9.5 4.1-1.9 7-5.3 7-9.5V5.9L12 3Z" />
@@ -1083,27 +1199,39 @@
       }
 
       var form = document.getElementById('loginForm');
+      var changeForm = document.getElementById('changeForm');
+      var noticeBox = document.getElementById('notice');
       var alertBox = document.getElementById('alert');
       var alertText = document.getElementById('alertText');
       var submitBtn = document.getElementById('submitBtn');
       var submitLabel = document.getElementById('submitLabel');
+      var changeBtn = document.getElementById('changeBtn');
+      var changeLabel = document.getElementById('changeLabel');
+      var formTitle = document.getElementById('formTitle');
+      var formSub = document.getElementById('formSub');
       var usernameInput = document.getElementById('username');
       var passwordInput = document.getElementById('password');
+      var currentPasswordInput = document.getElementById('currentPassword');
+      var newPasswordInput = document.getElementById('newPassword');
+      var confirmPasswordInput = document.getElementById('confirmPassword');
       var toggleBtn = document.getElementById('togglePassword');
       var iconEye = document.getElementById('iconEye');
       var iconEyeOff = document.getElementById('iconEyeOff');
 
       var submitting = false;
+      var changing = false;
 
       function setInvalid(input, invalid) {
         if (invalid) input.setAttribute('aria-invalid', 'true');
         else input.removeAttribute('aria-invalid');
       }
 
-      function showAlert(message) {
+      function showAlert(message, success) {
         alertText.textContent = message;
         alertBox.hidden = false;
+        alertBox.classList.toggle('is-success', !!success);
         alertBox.classList.remove('shake');
+        if (success) return;
         // 强制重排，让同一条错误再次出现时也能重新抖动
         void alertBox.offsetWidth;
         alertBox.classList.add('shake');
@@ -1113,9 +1241,10 @@
         if (alertBox.hidden) return;
         alertBox.hidden = true;
         alertBox.classList.remove('shake');
+        alertBox.classList.remove('is-success');
         alertText.textContent = '';
-        setInvalid(usernameInput, false);
-        setInvalid(passwordInput, false);
+        [usernameInput, passwordInput, currentPasswordInput, newPasswordInput, confirmPasswordInput]
+          .forEach(function (input) { setInvalid(input, false); });
       }
 
       function setLoading(loading) {
@@ -1126,6 +1255,42 @@
         submitLabel.textContent = loading ? '登录中…' : '登 录';
         usernameInput.readOnly = loading;
         passwordInput.readOnly = loading;
+      }
+
+      function setChangeLoading(loading) {
+        changing = loading;
+        changeBtn.disabled = loading;
+        changeBtn.classList.toggle('is-loading', loading);
+        changeBtn.setAttribute('aria-busy', loading ? 'true' : 'false');
+        changeLabel.textContent = loading ? '提交中…' : '修改密码';
+        currentPasswordInput.readOnly = loading;
+        newPasswordInput.readOnly = loading;
+        confirmPasswordInput.readOnly = loading;
+      }
+
+      // 初始默认密码命中：切换到强制改密表单
+      function showChangeForm(currentPassword) {
+        setLoading(false);
+        clearAlert();
+        form.style.display = 'none';
+        changeForm.style.display = '';
+        noticeBox.classList.add('show');
+        formTitle.textContent = '设置新密码';
+        formSub.textContent = '初始密码不能继续使用，请先设置一个新的管理员密码。';
+        currentPasswordInput.value = currentPassword || '';
+        newPasswordInput.value = '';
+        confirmPasswordInput.value = '';
+        newPasswordInput.focus();
+      }
+
+      function showLoginForm() {
+        changeForm.style.display = 'none';
+        noticeBox.classList.remove('show');
+        form.style.display = '';
+        formTitle.textContent = '欢迎回来';
+        formSub.textContent = '登录以继续管理你的 Mutter 机器人。';
+        passwordInput.value = '';
+        passwordInput.focus();
       }
 
       toggleBtn.addEventListener('click', function () {
@@ -1140,12 +1305,13 @@
         try { passwordInput.setSelectionRange(end, end); } catch (e) { /* 忽略 */ }
       });
 
-      [usernameInput, passwordInput].forEach(function (input) {
-        input.addEventListener('input', function () {
-          if (!alertBox.hidden) clearAlert();
-          setInvalid(input, false);
+      [usernameInput, passwordInput, currentPasswordInput, newPasswordInput, confirmPasswordInput]
+        .forEach(function (input) {
+          input.addEventListener('input', function () {
+            if (!alertBox.hidden) clearAlert();
+            setInvalid(input, false);
+          });
         });
-      });
 
       form.addEventListener('submit', function (event) {
         event.preventDefault();
@@ -1180,14 +1346,19 @@
             return response.json()
               .catch(function () { return null; })
               .then(function (data) {
-                if (!response.ok) {
-                  throw new Error((data && data.error) || '登录失败');
-                }
-                return data;
+                return { ok: response.ok, data: data };
               });
           })
-          .then(function () {
-            window.location.href = returnUrl;
+          .then(function (result) {
+            if (result.ok) {
+              window.location.href = returnUrl;
+              return;
+            }
+            if (result.data && result.data.mustChangePassword) {
+              showChangeForm(password);
+              return;
+            }
+            throw new Error((result.data && result.data.error) || '登录失败');
           })
           .catch(function (error) {
             var message = error && error.message ? error.message : '登录失败，请重试';
@@ -1197,6 +1368,69 @@
             passwordInput.focus({ preventScroll: true });
             var end = passwordInput.value.length;
             try { passwordInput.setSelectionRange(end, end); } catch (e) { /* 忽略 */ }
+          });
+      });
+
+      changeForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        if (changing) return;
+
+        clearAlert();
+
+        var currentPassword = currentPasswordInput.value;
+        var newPassword = newPasswordInput.value;
+        var confirmPassword = confirmPasswordInput.value;
+
+        if (!currentPassword || !newPassword || !confirmPassword) {
+          showAlert('请填写完整的修改密码信息');
+          return;
+        }
+        if (newPassword.length < 8) {
+          showAlert('新密码至少 8 位');
+          setInvalid(newPasswordInput, true);
+          newPasswordInput.focus();
+          return;
+        }
+        if (newPassword !== confirmPassword) {
+          showAlert('两次输入的新密码不一致');
+          setInvalid(confirmPasswordInput, true);
+          confirmPasswordInput.focus();
+          return;
+        }
+
+        setChangeLoading(true);
+
+        fetch('/api/auth/change-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            currentPassword: currentPassword,
+            newPassword: newPassword,
+            confirmPassword: confirmPassword
+          })
+        })
+          .then(function (response) {
+            return response.json()
+              .catch(function () { return null; })
+              .then(function (data) {
+                if (!response.ok) {
+                  throw new Error((data && data.error) || '修改密码失败');
+                }
+                return data;
+              });
+          })
+          .then(function (data) {
+            setChangeLoading(false);
+            showLoginForm();
+            showAlert((data && data.message) || '密码修改成功，请使用新密码登录', true);
+          })
+          .catch(function (error) {
+            var message = error && error.message ? error.message : '修改密码失败，请重试';
+            if (error instanceof TypeError) message = '无法连接服务器，请检查网络后重试';
+            showAlert(message);
+            setChangeLoading(false);
+            currentPasswordInput.focus();
           });
       });
     })();

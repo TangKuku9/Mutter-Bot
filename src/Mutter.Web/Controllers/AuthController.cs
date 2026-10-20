@@ -46,6 +46,14 @@ public class AuthController : ControllerBase
         public string TokenPrefix { get; set; } = "";
     }
 
+    /// <summary>随安装包发布的已知初始口令；命中任意一个即视为未初始化，强制先改密。</summary>
+    private static readonly string[] DefaultPasswords = ["CHANGE_ME_STRONG_PASSWORD", "admin"];
+
+    private static bool IsUsingDefaultPassword(string? stored) =>
+        DefaultPasswords.Any(p =>
+            string.Equals(stored, p, StringComparison.Ordinal) ||
+            PanelPasswordHasher.Verify(stored, p));
+
     /// <summary>登录，校验账号密码后下发会话 Cookie。</summary>
     [HttpPost("login")]
     public IActionResult Login([FromBody] LoginRequest req)
@@ -57,8 +65,10 @@ public class AuthController : ControllerBase
         if (locked is not null)
             return Unauthorized(new { error = $"失败次数过多，请 {(int)locked.Value.TotalMinutes +1} 分钟后再试" });
 
-        var expectedUser = _config["PanelAuth:Username"] ?? "admin";
-        var storedPass = _config["PanelAuth:Password"] ?? "admin";
+        var expectedUser = _config["PanelAuth:Username"];
+        var storedPass = _config["PanelAuth:Password"];
+        if (string.IsNullOrWhiteSpace(expectedUser) || string.IsNullOrWhiteSpace(storedPass))
+            return StatusCode(500, new { error = "面板账号未配置，请检查 appsettings.json 的 PanelAuth 配置" });
 
         if (string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
             return BadRequest(new { error = "请输入账号和密码" });
@@ -72,8 +82,16 @@ public class AuthController : ControllerBase
 
         _loginGuard.RecordSuccess(ip);
 
-        // 明文旧密码登录成功后自动升级为哈希存储
-        if (!PanelPasswordHasher.IsHashed(storedPass))
+        // 初始密码未修改：不下发会话，必须先走强制改密流程
+        if (IsUsingDefaultPassword(storedPass))
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                mustChangePassword = true,
+                error = "当前密码为初始默认密码，请先修改密码后再登录"
+            });
+
+        // 明文或旧格式哈希在登录成功后透明升级到新格式
+        if (!PanelPasswordHasher.IsHashed(storedPass) || PanelPasswordHasher.NeedsRehash(storedPass))
         {
             try { WritePasswordToAppSettings(PanelPasswordHasher.Hash(req.Password)); }
             catch { /* 写文件失败不阻塞登录，下次再试 */ }
@@ -87,6 +105,7 @@ public class AuthController : ControllerBase
             HttpOnly = true,
             IsEssential = true,
             SameSite = SameSiteMode.Lax,
+            Secure = _config.GetValue("PanelAuth:RequireSecureCookie", false),
             Path = "/",
             Expires = DateTimeOffset.UtcNow.AddMinutes(timeoutMinutes)
         });
@@ -109,26 +128,43 @@ public class AuthController : ControllerBase
     public IActionResult Status()
     {
         var token = Request.Cookies[SessionCookieName];
-        var user = _config["PanelAuth:Username"] ?? "admin";
+        var user = _config["PanelAuth:Username"] ?? string.Empty;
         if (_sessions.IsValid(token))
             return Ok(new { authenticated = true, username = user });
 
         return Ok(new { authenticated = false });
     }
 
-    /// <summary>修改密码：校验当前密码后写入 appsettings.json（哈希存储），并清除所有已有会话强制重新登录。</summary>
+    /// <summary>修改密码：校验当前密码后写入 appsettings.json（哈希存储），并清除所有已有会话强制重新登录。初始密码未修改时允许无会话首改。</summary>
     [HttpPost("change-password")]
     public IActionResult ChangePassword([FromBody] ChangePasswordRequest req)
     {
+        var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         var token = Request.Cookies[SessionCookieName];
-        if (!_sessions.IsValid(token))
-            return Unauthorized(new { error = "会话已过期，请重新登录" });
+        var hasSession = _sessions.IsValid(token);
 
-        var storedPass = _config["PanelAuth:Password"] ?? "admin";
+        var storedPass = _config["PanelAuth:Password"];
+        if (string.IsNullOrWhiteSpace(storedPass))
+            return StatusCode(500, new { error = "面板账号未配置，请检查 appsettings.json 的 PanelAuth 配置" });
+
+        // 无会话只放行「初始密码首改」；该路径同样受登录失败限流保护
+        if (!hasSession)
+        {
+            if (!IsUsingDefaultPassword(storedPass))
+                return Unauthorized(new { error = "会话已过期，请重新登录" });
+
+            var locked = _loginGuard.GetLockedRemaining(ip);
+            if (locked is not null)
+                return Unauthorized(new { error = $"失败次数过多，请 {(int)locked.Value.TotalMinutes +1} 分钟后再试" });
+        }
 
         // 校验当前密码
         if (!PanelPasswordHasher.Verify(storedPass, req.CurrentPassword))
+        {
+            if (!hasSession)
+                _loginGuard.RecordFailure(ip);
             return BadRequest(new { error = "当前密码错误" });
+        }
 
         if (string.IsNullOrWhiteSpace(req.NewPassword) || req.NewPassword.Length < 8)
             return BadRequest(new { error = "新密码至少 8 位" });
@@ -139,8 +175,10 @@ public class AuthController : ControllerBase
         if (PanelPasswordHasher.Verify(storedPass, req.NewPassword))
             return BadRequest(new { error = "新密码不能与当前密码相同" });
 
+        if (DefaultPasswords.Contains(req.NewPassword, StringComparer.Ordinal))
+            return BadRequest(new { error = "新密码不能使用初始默认密码" });
+
         // 更新 appsettings.json（哈希格式）
-        var appSettingsPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
         try
         {
             WritePasswordToAppSettings(PanelPasswordHasher.Hash(req.NewPassword));
@@ -154,7 +192,7 @@ public class AuthController : ControllerBase
         _sessions.ClearAll();
         Response.Cookies.Delete(SessionCookieName, new CookieOptions { Path = "/" });
 
-        return Ok(new { message = "密码修改成功，请重新登录" });
+        return Ok(new { message = hasSession ? "密码修改成功，请重新登录" : "初始密码修改成功，请使用新密码登录" });
     }
 
     /// <summary>列出当前活跃的登录会话（令牌仅显示前缀）。</summary>
@@ -206,12 +244,16 @@ public class AuthController : ControllerBase
 }
 
 /// <summary>
-/// 面板密码哈希工具。存储格式：sha256$&lt;saltBase64&gt;$&lt;hashHex&gt;；
-/// 兼容历史明文（登录成功后由调用方自动升级）。
+/// 面板密码哈希工具。存储格式：sha256$&lt;iterations&gt;$&lt;saltBase64&gt;$&lt;hashHex&gt;；
+/// 历史格式无迭代数段（sha256$&lt;salt&gt;$&lt;hash&gt;，10 万次），校验时按旧参数解析，
+/// 登录成功后由调用方透明升级到新格式。
 /// </summary>
 public static class PanelPasswordHasher
 {
     private const string Prefix = "sha256$";
+    public const int Iterations = 600_000;
+    private const int LegacyIterations = 100_000;
+    private const int MaxIterations = 10_000_000;
 
     public static bool IsHashed(string? stored) =>
         !string.IsNullOrEmpty(stored) && stored.StartsWith(Prefix, StringComparison.Ordinal);
@@ -219,8 +261,8 @@ public static class PanelPasswordHasher
     public static string Hash(string password)
     {
         var salt = RandomNumberGenerator.GetBytes(16);
-        var hash = Derive(password, salt);
-        return $"{Prefix}{Convert.ToBase64String(salt)}${Convert.ToHexString(hash).ToLowerInvariant()}";
+        var hash = Derive(password, salt, Iterations);
+        return $"{Prefix}{Iterations}${Convert.ToBase64String(salt)}${Convert.ToHexString(hash).ToLowerInvariant()}";
     }
 
     public static bool Verify(string? stored, string password)
@@ -235,12 +277,29 @@ public static class PanelPasswordHasher
         }
 
         var parts = stored.Split('$');
-        if (parts.Length != 3) return false;
+        if (parts.Length is not (3 or 4)) return false;
         try
         {
-            var salt = Convert.FromBase64String(parts[1]);
-            var expected = Convert.FromHexString(parts[2]);
-            var actual = Derive(password, salt);
+            int iterations;
+            string saltPart, hashPart;
+            if (parts.Length == 4)
+            {
+                if (!int.TryParse(parts[1], out iterations) ||
+                    iterations <= 0 || iterations > MaxIterations)
+                    return false;
+                saltPart = parts[2];
+                hashPart = parts[3];
+            }
+            else
+            {
+                iterations = LegacyIterations;
+                saltPart = parts[1];
+                hashPart = parts[2];
+            }
+
+            var salt = Convert.FromBase64String(saltPart);
+            var expected = Convert.FromHexString(hashPart);
+            var actual = Derive(password, salt, iterations);
             return CryptographicOperations.FixedTimeEquals(expected, actual);
         }
         catch
@@ -249,10 +308,13 @@ public static class PanelPasswordHasher
         }
     }
 
-    private static byte[] Derive(string password, byte[] salt)
+    /// <summary>旧格式（无迭代数段）需要在新一次成功登录后升级到新格式。</summary>
+    public static bool NeedsRehash(string? stored) =>
+        IsHashed(stored) && stored!.Split('$').Length == 3;
+
+    private static byte[] Derive(string password, byte[] salt, int iterations)
     {
-        // PBKDF2-SHA256，10 万次迭代
-        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, 100_000, HashAlgorithmName.SHA256);
+        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256);
         return pbkdf2.GetBytes(32);
     }
 }
