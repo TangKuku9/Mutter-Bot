@@ -30,7 +30,9 @@ public class ApiAuthMiddleware
     {
         var path = context.Request.Path.Value?.ToLower() ?? "";
 
-        // 公开路径：登录页、登录/登出/状态接口、改密接口（无会话的初始密码首改）、站点图标
+        // 公开路径：登录页、登录/登出/状态接口、改密接口（无会话的初始密码首改）、品牌与站点图标。
+        // 登录页在未登录时就要加载 logo，浏览器也会在没有会话时请求 favicon，因此这些公开静态资源
+        // 必须放行；其余 wwwroot 资源仍走登录保护。
         var isPublicPath =
             path == "/login.html" ||
             path == "/api/auth/login" ||
@@ -38,7 +40,13 @@ public class ApiAuthMiddleware
             path == "/api/auth/status" ||
             path == "/api/auth/change-password" ||
             path == "/vite.svg" ||
-            path == "/favicon.ico";
+            path == "/logo-mark.svg" ||
+            path == "/logo-mark-mono-white.svg" ||
+            path == "/favicon.ico" ||
+            path == "/favicon.svg" ||
+            path == "/favicon-16.png" ||
+            path == "/favicon-32.png" ||
+            path == "/apple-touch-icon.png";
 
         if (isPublicPath)
         {
