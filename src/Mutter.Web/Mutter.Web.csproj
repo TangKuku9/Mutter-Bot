@@ -18,4 +18,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- 自检工具需要直接验证应用层更新在 Linux 上的文件替换语义 -->
+    <InternalsVisibleTo Include="ProactiveCheck" />
+  </ItemGroup>
+
 </Project>

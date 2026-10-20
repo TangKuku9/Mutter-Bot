@@ -961,8 +961,9 @@ public sealed class UpdateApplier
             if (string.Equals(marker.Kind, "app", StringComparison.Ordinal))
             {
                 // 应用层更新只覆盖程序文件，绝不清理整个安装目录，否则会把 .NET 运行时删掉。
-                CopyProgramItems(stagingDir, appDir);
+                // 先删过期文件再复制，避免旧文件与新目录结构冲突；替换动作本身见 ReplaceFile。
                 DeleteProgramFiles(appDir, marker.DeleteFiles ?? []);
+                CopyProgramItems(stagingDir, appDir);
             }
             else
             {
@@ -1209,7 +1210,33 @@ public sealed class UpdateApplier
             if (isDirectory)
                 CopyProgramItems(entry, destination);
             else
-                File.Copy(entry, destination, overwrite: true);
+                ReplaceFile(entry, destination);
+        }
+    }
+
+    /// <summary>
+    /// Linux 上直接 File.Copy(overwrite: true) 覆盖正在运行的可执行文件会触发
+    /// ETXTBSY（Text file busy），导致应用层更新失败并回滚。先复制到同目录临时文件，
+    /// 再用 rename 覆盖目标：rename 只替换目录项，运行中的旧进程继续持有旧 inode，
+    /// 待其退出后由 systemd 拉起新文件。Windows 的更新助手会等待主进程退出，保留原语义。
+    /// </summary>
+    internal static void ReplaceFile(string source, string destination)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            File.Copy(source, destination, overwrite: true);
+            return;
+        }
+
+        var temp = destination + ".new-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            File.Copy(source, temp, overwrite: false);
+            File.Move(temp, destination, overwrite: true);
+        }
+        finally
+        {
+            TryDelete(temp);
         }
     }
 

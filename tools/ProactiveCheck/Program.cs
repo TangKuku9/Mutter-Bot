@@ -753,6 +753,54 @@ var badManifestJson = manifestJson.Replace(
 Check(UpdateManifest.TryParse(Encoding.UTF8.GetBytes(badManifestJson), out _) is null,
     "SHA256 非法的 update.json 被拒绝");
 
+Console.WriteLine("== 3i. Linux 更新文件替换（运行中的可执行文件） ==");
+if (!OperatingSystem.IsLinux())
+{
+    Console.WriteLine("SKIP  非 Linux 平台跳过");
+}
+else
+{
+    var replaceRoot = Path.Combine(
+        Path.GetTempPath(), "mutter-replace-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(replaceRoot);
+    System.Diagnostics.Process? running = null;
+    try
+    {
+        var target = Path.Combine(replaceRoot, "running-exe");
+        var replacement = Path.Combine(replaceRoot, "replacement");
+        File.Copy("/bin/sleep", target);
+        File.SetUnixFileMode(
+            target,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        File.WriteAllText(replacement, "replacement");
+        running = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = target,
+            Arguments = "30",
+            UseShellExecute = false
+        }) ?? throw new InvalidOperationException("无法启动测试进程");
+        Thread.Sleep(250);
+
+        // 旧实现用 File.Copy(overwrite: true) 直接覆盖运行中的文件，Linux 会抛 ETXTBSY；
+        // 新实现先写同目录临时文件再 rename，运行中的进程继续持有旧 inode。
+        UpdateApplier.ReplaceFile(replacement, target);
+        Check(File.ReadAllText(target) == "replacement",
+            "应用层更新可替换运行中的可执行文件（Linux rename 语义）");
+    }
+    catch (Exception ex)
+    {
+        Check(false, "应用层更新替换运行中可执行文件失败：" + ex.Message);
+    }
+    finally
+    {
+        try { running?.Kill(); } catch { }
+        running?.Dispose();
+        try { Directory.Delete(replaceRoot, recursive: true); } catch { }
+    }
+}
+
 if (logicOnly)
 {
     Console.WriteLine("\n--logic-only：跳过依赖数据库的第 4~6 段。");
