@@ -15,6 +15,7 @@ public class AppDbContext : DbContext
     public DbSet<KnownUserEntity> KnownUsers => Set<KnownUserEntity>();
     public DbSet<ActiveMessageQuotaEntity> ActiveMessageQuotas => Set<ActiveMessageQuotaEntity>();
     public DbSet<CustomCharacterEntity> CustomCharacters => Set<CustomCharacterEntity>();
+    public DbSet<AiConfigPresetEntity> AiPresets => Set<AiConfigPresetEntity>();
     public DbSet<ProactiveChatConfigEntity> ProactiveChatConfigs => Set<ProactiveChatConfigEntity>();
     public DbSet<ProactiveChatLogEntity> ProactiveChatLogs => Set<ProactiveChatLogEntity>();
     public DbSet<GroupMemoryEntity> GroupMemories => Set<GroupMemoryEntity>();
@@ -78,6 +79,13 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<CustomCharacterEntity>(e =>
         {
             e.HasKey(x => x.Name);
+        });
+
+        modelBuilder.Entity<AiConfigPresetEntity>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Name).IsRequired();
+            e.HasIndex(x => x.Name).IsUnique();
         });
 
         modelBuilder.Entity<ProactiveChatConfigEntity>(e =>
@@ -202,6 +210,24 @@ public class AppDbContext : DbContext
                 "UpdatedAt" TEXT NOT NULL
             );
             """, ct);
+
+        // AI 配置预设：整套可写配置的快照。Key 单独一列，ConfigJson 里永远不含明文 Key。
+        // 新库由 EnsureCreated 按模型建表，老库靠这里补齐；两步都必须能重复执行。
+        // ExecuteSqlRawAsync 会把 SQL 当 format string，JSON 默认值里的花括号必须双写转义。
+        await Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "AiPresets" (
+                "Id" INTEGER NOT NULL CONSTRAINT "PK_AiPresets" PRIMARY KEY AUTOINCREMENT,
+                "Name" TEXT NOT NULL,
+                "Description" TEXT NOT NULL DEFAULT '',
+                "ConfigJson" TEXT NOT NULL DEFAULT '{{}}',
+                "ApiKey" TEXT NOT NULL DEFAULT '',
+                "CreatedAt" TEXT NOT NULL,
+                "UpdatedAt" TEXT NOT NULL
+            );
+            """, ct);
+        await Database.ExecuteSqlRawAsync(
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"IX_AiPresets_Name\" ON \"AiPresets\" (\"Name\")", ct);
 
         // 群记忆：每群一条人工维护的摘要，择机发言判定时作背景参考。
         // 幂等建表，兼容没有这张表的历史库；不回填，旧库升级后从"没有记忆"开始。
