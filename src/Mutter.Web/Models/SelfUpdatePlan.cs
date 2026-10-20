@@ -5,4 +5,8 @@ public sealed record SelfUpdatePlan(
     string AssetName,
     string AssetUrl,
     long AssetSize,
-    string ChecksumUrl);
+    string Kind,
+    string? ExpectedSha256,
+    string? ChecksumUrl,
+    string? RuntimeVersion,
+    bool AllowAnyHttps);

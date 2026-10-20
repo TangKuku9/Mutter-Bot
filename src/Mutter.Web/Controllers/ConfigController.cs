@@ -16,10 +16,14 @@ namespace Mutter.Web.Controllers;
 public class ConfigController : ControllerBase
 {
     private readonly AppDbContext _dbContext;
+    private readonly Mutter.Core.Services.AiSearchCapabilityStore _capabilities;
 
-    public ConfigController(AppDbContext dbContext)
+    public ConfigController(
+        AppDbContext dbContext,
+        Mutter.Core.Services.AiSearchCapabilityStore capabilities)
     {
         _dbContext = dbContext;
+        _capabilities = capabilities;
     }
 
     [HttpGet("ai")]
@@ -50,6 +54,7 @@ public class ConfigController : ControllerBase
                 MaxTokens = 2048,
                 MaxContextMessages = 20,
                 MaxAttachedImages = AiConfig.DefaultMaxAttachedImages,
+                WebSearchImageMode = AiConfig.WebSearchImageModeAuto,
                 AvailableCharacters = characters,
                 AvailableProviders = providers
             });
@@ -70,6 +75,11 @@ public class ConfigController : ControllerBase
             WebSearchEndpoint = entity.WebSearchEndpoint,
             WebSearchShape = entity.WebSearchShape,
             WebSearchVerifiedAt = entity.WebSearchVerifiedAt,
+            WebSearchImageMode = string.IsNullOrWhiteSpace(entity.WebSearchImageMode)
+                ? AiConfig.WebSearchImageModeAuto
+                : entity.WebSearchImageMode,
+            WebSearchImageCapable = entity.WebSearchImageCapable,
+            WebSearchImageVerifiedAt = entity.WebSearchImageVerifiedAt,
             AvailableCharacters = characters,
             AvailableProviders = providers
         });
@@ -107,6 +117,12 @@ public class ConfigController : ControllerBase
         entity.MaxAttachedImages = Math.Clamp(dto.MaxAttachedImages, 0, AiConfig.CeilingAttachedImages);
         entity.WebSearchEnabled = dto.WebSearchEnabled;
 
+        var imageMode = (dto.WebSearchImageMode ?? string.Empty).Trim();
+        if (imageMode.Length == 0) imageMode = AiConfig.WebSearchImageModeAuto;
+        if (!AiConfig.IsValidWebSearchImageMode(imageMode))
+            return BadRequest(new { error = "带图联网策略只能是 auto / two_stage / off" });
+        entity.WebSearchImageMode = imageMode;
+
         // 已选用的搜索策略：只接受探测矩阵里真实存在的形状，防止面板/脚本写入任意参数。
         var endpoint = (dto.WebSearchEndpoint ?? string.Empty).Trim();
         var shape = (dto.WebSearchShape ?? string.Empty).Trim();
@@ -131,11 +147,35 @@ public class ConfigController : ControllerBase
 
         var strategyChanged = !string.Equals(shape, entity.WebSearchShape, StringComparison.Ordinal)
                            || !string.Equals(endpoint, entity.WebSearchEndpoint, StringComparison.Ordinal);
+        var targetBaseUrl = (dto.ApiBaseUrl ?? string.Empty).Trim();
+        var targetModel = (dto.ModelName ?? string.Empty).Trim();
+
+        // 先取本次探测对“新策略”的结论，再清运行时负缓存——Clear 会连探测账本一起清掉，
+        // 顺序反了就会出现“刚测出带图可用、一保存又变成未测”。
+        var probed = shape.Length > 0
+            ? _capabilities.GetProbeImageCapability(targetBaseUrl, targetModel, shape)
+            : null;
+        if (targetChanged || strategyChanged)
+            _capabilities.Clear(targetBaseUrl, targetModel, shape);
+
         entity.WebSearchEndpoint = endpoint;
         entity.WebSearchShape = shape;
         entity.WebSearchVerifiedAt = shape.Length == 0
             ? null
             : strategyChanged ? DateTime.UtcNow : entity.WebSearchVerifiedAt;
+
+        // 图文能力是服务端探测结论，不从客户端接收。策略/目标变了就清空，等下一次探测或运行时验证。
+        if (targetChanged || strategyChanged || shape.Length == 0)
+        {
+            entity.WebSearchImageCapable = null;
+            entity.WebSearchImageVerifiedAt = null;
+        }
+
+        if (probed is bool imageCapable)
+        {
+            entity.WebSearchImageCapable = imageCapable;
+            entity.WebSearchImageVerifiedAt = DateTime.UtcNow;
+        }
 
         await _dbContext.SaveChangesAsync();
         return NoContent();
@@ -247,12 +287,12 @@ public class ConfigController : ControllerBase
     /// <summary>
     /// 探测的单一执行路径：一次性接口与流式接口都消费这里，避免两套逻辑漂移。
     /// </summary>
-    private static async IAsyncEnumerable<WebSearchProbeEventDto> RunProbeEventsAsync(
+    private async IAsyncEnumerable<WebSearchProbeEventDto> RunProbeEventsAsync(
         string apiBaseUrl, string apiKey, string model,
         Mutter.Core.Services.WebSearchProbeRunner runner,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
-        using var overallCts = new CancellationTokenSource(TimeSpan.FromSeconds(150));
+        using var overallCts = new CancellationTokenSource(TimeSpan.FromSeconds(180));
         using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct, overallCts.Token);
         var probeCt = probeCts.Token;
 
@@ -284,11 +324,26 @@ public class ConfigController : ControllerBase
         var baseTokens = Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(baseRoot ?? default);
         var baseText = Mutter.Core.Services.WebSearchProbe.ReadResponseText(baseRoot ?? default);
 
+        // 图文基线：同一端点、同一模型、带图但不带搜索。带图探测的 token/内容差分必须和它比，
+        // 不能拿纯文本基线去比——图片本身就会拉高 prompt token。
+        var (imageBaseStatus, imageBaseRoot, _) =
+            await runner.SendImageAsync(apiBaseUrl, apiKey, "openai", null, model, probeCt);
+        var imageBaseTokens = imageBaseStatus is null
+            ? null
+            : Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(imageBaseRoot ?? default);
+        var imageBaseText = imageBaseRoot is null
+            ? null
+            : Mutter.Core.Services.WebSearchProbe.ReadResponseText(imageBaseRoot.Value);
+
         // Gemini 原生通道要有自己的基线：同一模型、同一端点、不带工具。内容差分必须同端点比，
         // 否则兼容层与原生层的行为差异会被误当成检索证据。
         int? geminiBaseTokens = null;
         string? geminiBaseText = null;
         var geminiBaselineTried = false;
+
+        int? geminiImageBaseTokens = null;
+        string? geminiImageBaseText = null;
+        var geminiImageBaselineTried = false;
 
         var results = new List<WebSearchProbeResultDto>();
         foreach (var probeCase in Mutter.Core.Services.WebSearchProbe.Cases)
@@ -325,8 +380,63 @@ public class ConfigController : ControllerBase
                 GroundingField = verdict.GroundingField,
                 Note = verdict.Note,
                 PromptTokensDelta = verdict.PromptTokensDelta,
-                Evidence = verdict.Evidence
+                Evidence = verdict.Evidence,
+                ImageStatus = "not_tested",
+                ImageNote = "文字联网未通过，未测带图"
             };
+
+            // 只有文字形状已验证才值得再花一次请求测图文组合；否则先证明搜索本身能用。
+            if (verdict.Status == "verified")
+            {
+                if (isGemini && !geminiImageBaselineTried)
+                {
+                    geminiImageBaselineTried = true;
+                    var (gis, gir, _) = await runner.SendImageAsync(
+                        apiBaseUrl, apiKey, "gemini", null, model, probeCt);
+                    geminiImageBaseTokens = gis is null
+                        ? null
+                        : Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(gir ?? default);
+                    geminiImageBaseText = gir is null
+                        ? null
+                        : Mutter.Core.Services.WebSearchProbe.ReadResponseText(gir.Value);
+                }
+
+                var (imageStatus, imageRoot, imageError) = await runner.SendImageAsync(
+                    apiBaseUrl, apiKey, probeCase.Endpoint, probeCase.Shape, model, probeCt);
+                var imageCmpTokens = isGemini
+                    ? geminiImageBaseTokens ?? imageBaseTokens
+                    : imageBaseTokens;
+                var imageCmpText = isGemini
+                    ? geminiImageBaseText ?? imageBaseText
+                    : imageBaseText;
+                int? imageDelta = imageStatus is not null && imageCmpTokens is int ib
+                    ? Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(imageRoot ?? default) - ib
+                    : null;
+                var imageText = imageRoot is null
+                    ? null
+                    : Mutter.Core.Services.WebSearchProbe.ReadResponseText(imageRoot.Value);
+                var imageVerdict = imageStatus is null
+                    ? new Mutter.Core.Services.WebSearchProbeVerdict("unreachable", Note: imageError)
+                    : Mutter.Core.Services.WebSearchProbe.ImageVerdict(
+                        probeCase.Shape, imageStatus, imageRoot, imageDelta, imageCmpText, imageText);
+                if (probeCase.Endpoint == "gemini" && imageStatus == 404)
+                    imageVerdict = new Mutter.Core.Services.WebSearchProbeVerdict(
+                        "no_native_endpoint", Note: "该地址下没有找到 Gemini 原生 :generateContent 端点");
+
+                result.ImageStatus = imageVerdict.Status;
+                result.ImageNote = imageVerdict.Note;
+                result.ImageEvidence = imageVerdict.Evidence;
+                result.ImagePromptTokensDelta = imageVerdict.PromptTokensDelta;
+
+                // 结论明确才记账：超时/5xx/无原生端点不代表“图文不支持”，不该污染下次选用。
+                if (imageVerdict.Status is "verified" or "image_rejected" or "no_evidence" or "rejected")
+                {
+                    _capabilities.RecordProbe(
+                        apiBaseUrl, model, probeCase.Shape,
+                        imageCapable: imageVerdict.Status == "verified");
+                }
+            }
+
             results.Add(result);
             yield return new WebSearchProbeEventDto { Type = "case", Result = result };
         }
@@ -528,6 +638,12 @@ public class WebSearchProbeResultDto
 
     /// <summary>证据类型：grounding_metadata / prompt_token_delta / content_time。</summary>
     public string? Evidence { get; set; }
+
+    /// <summary>图文组合的判定：verified / image_rejected / no_evidence / not_tested 等。</summary>
+    public string ImageStatus { get; set; } = "not_tested";
+    public string? ImageNote { get; set; }
+    public string? ImageEvidence { get; set; }
+    public int? ImagePromptTokensDelta { get; set; }
 }
 
 public class WebSearchProbeReportDto

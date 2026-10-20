@@ -40,6 +40,7 @@ public static class WebServiceExtensions
                 AutomaticDecompression = DecompressionMethods.None
             });
         services.AddHttpClient();
+        services.AddSingleton<UpdateSettingsStore>();
         services.AddSingleton<UpdateService>();
         services.AddSingleton<UpdateApplier>();
 

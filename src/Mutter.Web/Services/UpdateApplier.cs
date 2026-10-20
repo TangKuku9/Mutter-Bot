@@ -137,7 +137,8 @@ public sealed class UpdateApplier
     private void PrepareForPlanLocked(SelfUpdatePlan plan)
     {
         var sameAsset = string.Equals(_state.Version, plan.Version, StringComparison.Ordinal) &&
-                        string.Equals(_state.AssetName, plan.AssetName, StringComparison.Ordinal);
+                        string.Equals(_state.AssetName, plan.AssetName, StringComparison.Ordinal) &&
+                        string.Equals(_state.Kind, plan.Kind, StringComparison.Ordinal);
 
         if (!sameAsset)
         {
@@ -148,6 +149,9 @@ public sealed class UpdateApplier
                 AssetName = plan.AssetName,
                 AssetUrl = plan.AssetUrl,
                 ChecksumUrl = plan.ChecksumUrl,
+                ExpectedSha256 = plan.ExpectedSha256,
+                Kind = plan.Kind,
+                RuntimeVersion = plan.RuntimeVersion,
                 AssetSize = plan.AssetSize
             };
         }
@@ -155,6 +159,9 @@ public sealed class UpdateApplier
         {
             _state.AssetUrl = plan.AssetUrl;
             _state.ChecksumUrl = plan.ChecksumUrl;
+            _state.ExpectedSha256 = plan.ExpectedSha256;
+            _state.Kind = plan.Kind;
+            _state.RuntimeVersion = plan.RuntimeVersion;
             if (plan.AssetSize > 0)
                 _state.AssetSize = plan.AssetSize;
         }
@@ -217,7 +224,10 @@ public sealed class UpdateApplier
         var stagingValid = StagingIsValid() && !string.IsNullOrWhiteSpace(_state.Version);
         if (stagingValid)
         {
-            _staged = new StagedUpdate(StagingDir, _state.Version!, _state.AssetName ?? string.Empty);
+            var kind = string.IsNullOrWhiteSpace(_state.Kind) ? "full" : _state.Kind;
+            var deleteFiles = _state.DeleteFiles ?? [];
+            _staged = new StagedUpdate(
+                StagingDir, _state.Version!, _state.AssetName ?? string.Empty, kind, deleteFiles);
             _state.Phase = "done";
             _state.StagingDirectory = StagingDir;
             UpdateProgressLocked(active: false, "done", null, persistNow: true);
@@ -290,8 +300,9 @@ public sealed class UpdateApplier
     {
         try
         {
-            ValidateAssetUrl(plan.AssetUrl);
-            ValidateAssetUrl(plan.ChecksumUrl);
+            ValidateAssetUrl(plan.AssetUrl, plan.AllowAnyHttps);
+            if (!string.IsNullOrWhiteSpace(plan.ChecksumUrl))
+                ValidateAssetUrl(plan.ChecksumUrl, plan.AllowAnyHttps);
             Directory.CreateDirectory(DownloadDir);
 
             var expectedHash = await ResolveChecksumAsync(plan, ct);
@@ -330,6 +341,11 @@ public sealed class UpdateApplier
             if (!File.Exists(Path.Combine(StagingNewDir, exeName)))
                 throw new InvalidOperationException("更新包缺少可执行文件，已取消更新");
 
+            var kind = plan.Kind == "app" ? "app" : "full";
+            IReadOnlyList<string> deleteFiles = Array.Empty<string>();
+            if (kind == "app")
+                deleteFiles = (await ValidateAppLayerAsync(StagingNewDir, plan, ct)).Delete;
+
             TryDelete(StagingDir);
             Directory.Move(StagingNewDir, StagingDir);
             TryDelete(DownloadDir);
@@ -337,7 +353,9 @@ public sealed class UpdateApplier
 
             lock (_sync)
             {
-                _staged = new StagedUpdate(StagingDir, plan.Version, plan.AssetName);
+                _staged = new StagedUpdate(StagingDir, plan.Version, plan.AssetName, kind, deleteFiles);
+                _state.Kind = kind;
+                _state.DeleteFiles = deleteFiles.ToList();
                 _state.DownloadedBytes = Math.Max(_state.DownloadedBytes, _state.AssetSize);
                 _state.StagingDirectory = StagingDir;
                 _state.Error = null;
@@ -385,8 +403,109 @@ public sealed class UpdateApplier
         }
     }
 
+    /// <summary>
+    /// 应用层包只替换程序文件，安装前必须逐文件校验；同时拒绝包含运行时核心文件的包，
+    /// 避免一次“应用层更新”把 CLR 替换成不匹配的版本。
+    /// </summary>
+    private static async Task<AppLayerManifest> ValidateAppLayerAsync(
+        string packageRoot, SelfUpdatePlan plan, CancellationToken ct)
+    {
+        var manifestPath = Path.Combine(packageRoot, "app-layer.json");
+        if (!File.Exists(manifestPath))
+            throw new InvalidOperationException("应用层包缺少 app-layer.json");
+
+        var manifest = AppLayerManifest.TryParse(manifestPath, out var error);
+        if (manifest is null)
+            throw new InvalidOperationException(error);
+
+        if (!SameVersion(manifest.Version, plan.Version))
+            throw new InvalidOperationException(
+                $"应用层包版本不匹配：包内 {manifest.Version}，清单 {plan.Version}");
+
+        if (string.Equals(manifest.Flavor, "self-contained", StringComparison.Ordinal))
+        {
+            var expected = plan.RuntimeVersion ?? manifest.RuntimeVersion;
+            if (!RuntimeMatches(expected))
+                throw new InvalidOperationException(
+                    $"应用层包运行时版本不匹配：需要 {expected ?? "未知"}，当前 {CurrentRuntimeVersion()}");
+        }
+
+        var currentRid = OperatingSystem.IsWindows() ? "win-x64" : "linux-x64";
+        if (!string.IsNullOrWhiteSpace(manifest.Rid) &&
+            !string.Equals(manifest.Rid, currentRid, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"应用层包平台不匹配：包内 {manifest.Rid}，当前 {currentRid}");
+
+        var currentFlavor = DetectFlavor(GetAppDirectory());
+        if (!string.Equals(manifest.Flavor, currentFlavor, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"应用层包类型不匹配：包内 {manifest.Flavor}，当前 {currentFlavor}");
+
+        var root = Path.GetFullPath(packageRoot).TrimEnd(Path.DirectorySeparatorChar)
+                   + Path.DirectorySeparatorChar;
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        var forbidden = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "coreclr.dll", "hostfxr.dll", "hostpolicy.dll", "clrjit.dll",
+            "System.Private.CoreLib.dll",
+            "libcoreclr.so", "libhostfxr.so", "libhostpolicy.so"
+        };
+
+        foreach (var file in manifest.Files)
+        {
+            var relative = file.Path.Replace('\\', '/');
+            var name = Path.GetFileName(relative);
+            if (forbidden.Contains(name))
+                throw new InvalidOperationException($"应用层包包含运行时文件：{relative}");
+
+            var fullPath = Path.GetFullPath(Path.Combine(
+                packageRoot, relative.Replace('/', Path.DirectorySeparatorChar)));
+            if (!fullPath.StartsWith(root, comparison))
+                throw new InvalidOperationException($"应用层包路径异常：{relative}");
+            if (!File.Exists(fullPath))
+                throw new InvalidOperationException($"应用层包缺少文件：{relative}");
+            if (new FileInfo(fullPath).Length != file.Size)
+                throw new InvalidOperationException($"应用层包文件大小不符：{relative}");
+
+            var hash = await ComputeSha256Async(fullPath, ct);
+            if (!string.Equals(hash, file.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"应用层包文件校验失败：{relative}");
+        }
+
+        var exeName = OperatingSystem.IsWindows() ? "mutter-bot.exe" : "mutter-bot";
+        if (!manifest.Files.Any(f => string.Equals(
+                f.Path.Replace('\\', '/'), exeName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("应用层包清单未包含可执行文件");
+
+        return manifest;
+    }
+
+    private static bool RuntimeMatches(string? expected)
+    {
+        if (string.IsNullOrWhiteSpace(expected))
+            return false;
+        if (!Version.TryParse(expected.Trim().TrimStart('v', 'V'), out var value))
+            return false;
+
+        var current = Environment.Version;
+        return value.Major == current.Major &&
+               value.Minor == current.Minor &&
+               value.Build == current.Build;
+    }
+
+    private static string CurrentRuntimeVersion() =>
+        $"{Environment.Version.Major}.{Environment.Version.Minor}.{Environment.Version.Build}";
+
     private async Task<string> ResolveChecksumAsync(SelfUpdatePlan plan, CancellationToken ct)
     {
+        if (!string.IsNullOrWhiteSpace(plan.ExpectedSha256))
+            return plan.ExpectedSha256.Trim().ToLowerInvariant();
+
+        if (string.IsNullOrWhiteSpace(plan.ChecksumUrl))
+            throw new InvalidOperationException("更新包缺少校验值，已拒绝安装");
+
         lock (_sync)
         {
             if (!string.IsNullOrWhiteSpace(_state.ExpectedHash))
@@ -701,6 +820,8 @@ public sealed class UpdateApplier
             Version = staged.Version,
             AssetName = staged.AssetName,
             StagingDirectory = staged.StagingDirectory,
+            Kind = staged.Kind,
+            DeleteFiles = staged.DeleteFiles.ToList(),
             CreatedAt = DateTimeOffset.UtcNow
         };
         File.WriteAllText(
@@ -733,7 +854,9 @@ public sealed class UpdateApplier
             Hidden = restartArgs.Any(a => a is "--headless" or "-h"),
             LogPath = Path.Combine(logDir, "update.log"),
             CurrentVersion = GetCurrentVersion(),
-            Version = staged.Version
+            Version = staged.Version,
+            Kind = staged.Kind,
+            DeleteFiles = staged.DeleteFiles.ToList()
         };
 
         var scriptPath = Path.Combine(helperDir, "apply.ps1");
@@ -835,13 +958,23 @@ public sealed class UpdateApplier
 
         try
         {
-            ClearProgramItems(appDir);
-            CopyProgramItems(stagingDir, appDir);
+            if (string.Equals(marker.Kind, "app", StringComparison.Ordinal))
+            {
+                // 应用层更新只覆盖程序文件，绝不清理整个安装目录，否则会把 .NET 运行时删掉。
+                CopyProgramItems(stagingDir, appDir);
+                DeleteProgramFiles(appDir, marker.DeleteFiles ?? []);
+            }
+            else
+            {
+                ClearProgramItems(appDir);
+                CopyProgramItems(stagingDir, appDir);
+            }
+
             SetUnixPermissions(appDir);
             TryDelete(updateDir);
             TryDeleteWorkRoot(stagingDir);
             DeleteOldBackups(backupBase, backupDir);
-            Log(appDir, $"已更新到 v{marker.Version}，旧版本备份：{backupDir}");
+            Log(appDir, $"已更新到 v{marker.Version}（{marker.Kind}），旧版本备份：{backupDir}");
         }
         catch (Exception ex)
         {
@@ -886,6 +1019,7 @@ public sealed class UpdateApplier
             Phase = phase,
             Version = _state.Version,
             AssetName = _state.AssetName,
+            Kind = string.IsNullOrWhiteSpace(_state.Kind) ? "full" : _state.Kind,
             Error = error,
             Resumable = resumable,
             Staged = _staged is not null,
@@ -920,7 +1054,34 @@ public sealed class UpdateApplier
     private bool StagingIsValid()
     {
         var exeName = OperatingSystem.IsWindows() ? "mutter-bot.exe" : "mutter-bot";
-        return Directory.Exists(StagingDir) && File.Exists(Path.Combine(StagingDir, exeName));
+        if (!Directory.Exists(StagingDir) || !File.Exists(Path.Combine(StagingDir, exeName)))
+            return false;
+
+        if (_state.Kind != "app")
+            return true;
+
+        var manifestPath = Path.Combine(StagingDir, "app-layer.json");
+        if (!File.Exists(manifestPath))
+            return false;
+
+        var manifest = AppLayerManifest.TryParse(manifestPath, out _);
+        if (manifest is null)
+            return false;
+
+        foreach (var file in manifest.Files)
+        {
+            var path = Path.Combine(
+                StagingDir, file.Path.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(path) || new FileInfo(path).Length != file.Size)
+                return false;
+
+            using var stream = File.OpenRead(path);
+            var hash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            if (!string.Equals(hash, file.Sha256, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
     }
 
     private string GetArchivePath(string assetName) => Path.Combine(DownloadDir, assetName);
@@ -1068,6 +1229,26 @@ public sealed class UpdateApplier
         }
     }
 
+    private static void DeleteProgramFiles(string appDir, IEnumerable<string> files)
+    {
+        var root = Path.GetFullPath(appDir).TrimEnd(Path.DirectorySeparatorChar)
+                   + Path.DirectorySeparatorChar;
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+        foreach (var relative in files)
+        {
+            if (!AppLayerManifest.IsSafeRelativePath(relative, out _))
+                continue;
+
+            var fullPath = Path.GetFullPath(Path.Combine(
+                appDir, relative.Replace('/', Path.DirectorySeparatorChar)));
+            if (fullPath.StartsWith(root, comparison))
+                TryDelete(fullPath);
+        }
+    }
+
     private static bool IsProtectedName(string name, bool isDirectory)
     {
         if (isDirectory)
@@ -1079,6 +1260,11 @@ public sealed class UpdateApplier
 
         if (name.StartsWith("appsettings", StringComparison.OrdinalIgnoreCase) &&
             name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // 更新偏好与应用层清单不参与替换；前者是用户设置，后者只在暂存目录里用。
+        if (name.Equals("update-settings.json", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("app-layer.json", StringComparison.OrdinalIgnoreCase))
             return true;
 
         if (name.Equals("mutter-bot.db", StringComparison.OrdinalIgnoreCase) ||
@@ -1115,10 +1301,15 @@ public sealed class UpdateApplier
         }
     }
 
-    private static void ValidateAssetUrl(string url)
+    private static void ValidateAssetUrl(string url, bool allowAnyHttps)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-            uri.Scheme != Uri.UriSchemeHttps ||
+            uri.Scheme != Uri.UriSchemeHttps)
+        {
+            throw new InvalidOperationException("更新地址必须是 HTTPS，已拒绝下载");
+        }
+
+        if (!allowAnyHttps &&
             !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("更新地址不是 GitHub Release，已拒绝下载");
@@ -1127,6 +1318,17 @@ public sealed class UpdateApplier
 
     private static string GetCurrentVersion() =>
         Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown";
+
+    private static string GetAppDirectory() =>
+        AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+    private static string DetectFlavor(string appDir)
+    {
+        var hasHostFxr =
+            File.Exists(Path.Combine(appDir, "hostfxr.dll")) ||
+            File.Exists(Path.Combine(appDir, "libhostfxr.so"));
+        return hasHostFxr ? "self-contained" : "framework-dependent";
+    }
 
     private static bool SameVersion(string? left, string? right)
     {
@@ -1179,6 +1381,10 @@ public sealed class UpdateApplier
         public string? AssetName { get; set; }
         public string? AssetUrl { get; set; }
         public string? ChecksumUrl { get; set; }
+        public string? ExpectedSha256 { get; set; }
+        public string Kind { get; set; } = "full";
+        public string? RuntimeVersion { get; set; }
+        public List<string> DeleteFiles { get; set; } = [];
         public long AssetSize { get; set; }
         public long DownloadedBytes { get; set; }
         public string? ExpectedHash { get; set; }
@@ -1194,6 +1400,8 @@ public sealed class UpdateApplier
         public string Version { get; set; } = string.Empty;
         public string AssetName { get; set; } = string.Empty;
         public string StagingDirectory { get; set; } = string.Empty;
+        public string Kind { get; set; } = "full";
+        public List<string> DeleteFiles { get; set; } = [];
         public DateTimeOffset CreatedAt { get; set; }
     }
 
@@ -1210,6 +1418,8 @@ public sealed class UpdateApplier
         public string LogPath { get; set; } = string.Empty;
         public string CurrentVersion { get; set; } = string.Empty;
         public string Version { get; set; } = string.Empty;
+        public string Kind { get; set; } = "full";
+        public List<string> DeleteFiles { get; set; } = [];
     }
 
     private const string WindowsHelperScript = """
@@ -1235,36 +1445,50 @@ public sealed class UpdateApplier
 
         $backupDir = $null
         $backupComplete = $false
+        $kind = if ($cfg.Kind) { [string]$cfg.Kind } else { 'full' }
         $excludeDirs = @(
             (Join-Path $cfg.AppDir 'logs'),
             (Join-Path $cfg.AppDir '.backup'),
             (Join-Path $cfg.AppDir '.update')
         )
-        $excludeFiles = @('appsettings*.json', 'mutter-bot.db', 'mutter-bot.db-wal', 'mutter-bot.db-shm', '*.bak.*')
+        $excludeFiles = @('appsettings*.json', 'mutter-bot.db', 'mutter-bot.db-wal', 'mutter-bot.db-shm', '*.bak.*',
+            'update-settings.json', 'app-layer.json')
 
         try {
             while (Get-Process -Id $cfg.ParentPid -ErrorAction SilentlyContinue) {
                 Start-Sleep -Milliseconds 500
             }
-            Write-UpdateLog "parent process exited; applying update to $($cfg.Version)"
+            Write-UpdateLog "parent process exited; applying $kind update to $($cfg.Version)"
 
             New-Item -ItemType Directory -Force -Path $cfg.BackupBase | Out-Null
             $backupDir = Join-Path $cfg.BackupBase ("v" + $cfg.CurrentVersion + "-" + (Get-Date -Format 'yyyyMMddHHmmss'))
             New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 
-            $backupArgs = @($cfg.AppDir, $backupDir, '/E', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS',
-                '/XD', $excludeDirs[0], $excludeDirs[1], $excludeDirs[2],
-                '/XF', $excludeFiles[0], $excludeFiles[1], $excludeFiles[2], $excludeFiles[3], $excludeFiles[4])
+            $backupArgs = @($cfg.AppDir, $backupDir, '/E', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/XD') +
+                $excludeDirs + @('/XF') + $excludeFiles
             & robocopy @backupArgs | Out-Null
             if ($LASTEXITCODE -ge 8) { throw "backup failed (robocopy $LASTEXITCODE)" }
             $backupComplete = $true
             Write-UpdateLog "backup created at $backupDir"
 
-            $applyArgs = @($cfg.StagingDir, $cfg.AppDir, '/MIR', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS',
-                '/XD', $excludeDirs[0], $excludeDirs[1], $excludeDirs[2],
-                '/XF', $excludeFiles[0], $excludeFiles[1], $excludeFiles[2], $excludeFiles[3], $excludeFiles[4])
+            # app 更新只覆盖程序文件；full 才镜像整个目录（会清理已废弃文件）。
+            $applyMode = if ($kind -eq 'app') { '/E' } else { '/MIR' }
+            $applyArgs = @($cfg.StagingDir, $cfg.AppDir, $applyMode, '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/XD') +
+                $excludeDirs + @('/XF') + $excludeFiles
             & robocopy @applyArgs | Out-Null
             if ($LASTEXITCODE -ge 8) { throw "apply failed (robocopy $LASTEXITCODE)" }
+
+            if ($kind -eq 'app') {
+                $root = [IO.Path]::GetFullPath($cfg.AppDir).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+                foreach ($rel in @($cfg.DeleteFiles)) {
+                    if (-not $rel) { continue }
+                    $full = [IO.Path]::GetFullPath((Join-Path $cfg.AppDir ([string]$rel)))
+                    if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "invalid delete path: $rel"
+                    }
+                    if (Test-Path -LiteralPath $full) { Remove-Item -LiteralPath $full -Force }
+                }
+            }
 
             Get-ChildItem -LiteralPath $cfg.BackupBase -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.FullName -ne $backupDir } |
@@ -1278,9 +1502,8 @@ public sealed class UpdateApplier
             Write-UpdateLog ("update failed: " + $_.Exception.Message)
             try {
                 if ($backupComplete -and $backupDir -and (Test-Path $backupDir)) {
-                    $restoreArgs = @($backupDir, $cfg.AppDir, '/MIR', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS',
-                        '/XD', $excludeDirs[0], $excludeDirs[1], $excludeDirs[2],
-                        '/XF', $excludeFiles[0], $excludeFiles[1], $excludeFiles[2], $excludeFiles[3], $excludeFiles[4])
+                    $restoreArgs = @($backupDir, $cfg.AppDir, '/MIR', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/XD') +
+                        $excludeDirs + @('/XF') + $excludeFiles
                     & robocopy @restoreArgs | Out-Null
                     Write-UpdateLog "restored previous version"
                 }
@@ -1301,7 +1524,12 @@ public sealed class UpdateApplier
         """;
 }
 
-public sealed record StagedUpdate(string StagingDirectory, string Version, string AssetName);
+public sealed record StagedUpdate(
+    string StagingDirectory,
+    string Version,
+    string AssetName,
+    string Kind,
+    IReadOnlyList<string> DeleteFiles);
 
 public sealed record StageStartResult(
     bool Staged,

@@ -155,15 +155,27 @@ Mutter-Bot/
 | Linux 非 systemd、开发运行、非 x64 | 不支持 | 显示「手动更新」，跳转 GitHub Releases |
 
 - 仅 **publish 产物**（压缩包解压后的安装目录）支持一键更新；从源码直接运行不会执行替换。包内的 `install.json` 是安装标记，请勿删除。
+- **分层更新**：自包含包会把 .NET 运行时与程序文件分开。运行时版本一致时只下载约 **5–6MB** 的 `*-app.zip` 应用层包；运行时版本变化时才使用完整包。框架依赖包本身只有 5MB 左右，直接走完整包。
+- 「关于 → 更新设置」可选更新方式：**自动**（优先应用层）、**仅完整包**、**仅检查**；也可切换更新源：GitHub 官方、镜像或自定义清单。镜像/自定义源必须配置清单签名公钥，否则无法防止镜像篡改更新包。
+- 更新清单是 Release 里的 `update.json`，签名文件是 `update.json.sig`。旧版本客户端仍按 `SHA256SUMS.txt` 下载完整包，不受影响。
+- 更新偏好保存在安装目录的 `update-settings.json`，它和 `appsettings*.json`、数据库、日志一样不会被更新覆盖或删除。
 - 下载完成后不会自动安装；只有确认安装时才写入待更新标记并触发重启。下载期间面板会显示实时进度条与已下载大小。
 - **下载在后台进行**：切换面板页面、刷新或关闭浏览器都不会中断；回到「关于」页会恢复显示当前进度与暂存状态。
 - **支持断点续传**：网络中断会从已下载位置自动重试；服务重启或进程异常退出后，进度保存在安装目录的 `.update/` 中，页面会显示「继续下载」。`.update/` 是更新工作目录，下载或暂存期间请勿手动删除。
 - 下载不设总时长上限，只对连接与读取停滞做超时保护（连接 90 秒、读取 60 秒无数据即重试）；连续 5 次没有进展才会暂停，之后可手动继续。
 - 更新包必须能在 `SHA256SUMS.txt` 中找到校验值，校验失败会删除损坏文件并终止本次更新。
-- `appsettings*.json`、`mutter-bot.db*`、`logs/` 不会被覆盖或删除。
+- `appsettings*.json`、`mutter-bot.db*`、`logs/`、`update-settings.json` 不会被覆盖或删除。
 - 旧版本程序文件备份在安装目录的 `.backup/vX.Y.Z-<时间戳>/`，仅保留最近一份。
 - 更新完成后服务自动重启，面板会话失效，需要重新登录。
 - 手动回滚：停止程序，将 `.backup/vX.Y.Z-<时间戳>/` 内的文件复制回安装目录覆盖同名文件（**不要删除** `appsettings*.json` 与数据库），再重新启动。
+
+> **发布者签名（镜像源必需）**：用 ECDSA P-256 私钥对 `update.json` 的原始字节签名，CI 从仓库 Secret `UPDATE_SIGNING_KEY` 读取 PEM 私钥；把公钥填到面板「更新设置 → 签名公钥」。未配置 Secret 时官方 GitHub 源仍可更新，但镜像/自定义源会拒绝未签名清单。
+>
+> ```bash
+> openssl ecparam -name prime256v1 -genkey -noout -out update-private.pem
+> openssl ec -in update-private.pem -pubout -out update-public.pem
+> # 把 update-private.pem 的内容写入 GitHub Secret：UPDATE_SIGNING_KEY
+> ```
 
 ---
 

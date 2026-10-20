@@ -43,6 +43,10 @@ node_modules/
 # User secrets
 secrets.json
 
+# 面板更新偏好与更新包清单（安装目录/本地验证产物，不入库）
+update-settings.json
+app-layer.json
+
 # Logs
 logs/
 *.log

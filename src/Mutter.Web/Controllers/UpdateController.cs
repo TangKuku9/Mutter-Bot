@@ -11,29 +11,55 @@ public class UpdateController : ControllerBase
 {
     private readonly UpdateService _updateService;
     private readonly UpdateApplier _applier;
+    private readonly UpdateSettingsStore _settingsStore;
     private readonly ILogger<UpdateController> _logger;
 
     public UpdateController(
         UpdateService updateService,
         UpdateApplier applier,
+        UpdateSettingsStore settingsStore,
         ILogger<UpdateController> logger)
     {
         _updateService = updateService;
         _applier = applier;
+        _settingsStore = settingsStore;
         _logger = logger;
     }
 
     [HttpGet]
-    public async Task<ActionResult<UpdateInfoDto>> GetStatus(CancellationToken ct)
+    public async Task<ActionResult<UpdateInfoDto>> GetStatus(
+        [FromQuery] string? kind, CancellationToken ct)
     {
-        var check = await _updateService.GetStatusAsync(ct);
+        var check = await _updateService.GetStatusAsync(ct, kind);
         var staged = _applier.GetStaged();
         if (staged is not null)
         {
             check.Info.Staged = true;
             check.Info.StagedVersion = staged.Version;
+            check.Info.StagedKind = staged.Kind;
         }
         return Ok(check.Info);
+    }
+
+    [HttpGet("settings")]
+    public ActionResult<UpdateSettingsDto> GetSettings() =>
+        Ok(UpdateSettingsDto.FromSettings(
+            _settingsStore.Get(), UpdateService.OfficialManifestUrl));
+
+    [HttpPut("settings")]
+    public ActionResult UpdateSettings([FromBody] UpdateSettingsDto dto)
+    {
+        if (!_settingsStore.TrySave(dto.ToSettings(), out var error))
+            return BadRequest(new { error });
+        return NoContent();
+    }
+
+    [HttpPost("test-source")]
+    public async Task<ActionResult<UpdateSourceTestDto>> TestSource(
+        [FromBody] UpdateSettingsDto dto, CancellationToken ct)
+    {
+        var result = await _updateService.TestSourceAsync(dto.ToSettings(), ct);
+        return Ok(result);
     }
 
     [HttpGet("progress")]
@@ -44,13 +70,14 @@ public class UpdateController : ControllerBase
     /// 重复调用是幂等的：正在进行时返回当前状态，已暂存时直接返回暂存版本。
     /// </summary>
     [HttpPost("stage")]
-    public async Task<ActionResult<UpdateStageResultDto>> Stage(CancellationToken ct)
+    public async Task<ActionResult<UpdateStageResultDto>> Stage(
+        [FromQuery] string? kind, CancellationToken ct)
     {
         var current = _applier.GetProgress();
         if (current.Active)
             return Accepted(ToStageResult(current));
 
-        var check = await _updateService.GetStatusAsync(ct);
+        var check = await _updateService.GetStatusAsync(ct, kind);
         if (check.Info.Error is not null)
             return BadRequest(new { error = check.Info.Error });
         if (!check.Info.HasUpdate)
@@ -66,6 +93,8 @@ public class UpdateController : ControllerBase
         {
             Version = start.StagedUpdate?.Version ?? check.Plan.Version,
             AssetName = start.StagedUpdate?.AssetName ?? check.Plan.AssetName,
+            Kind = start.StagedUpdate?.Kind ?? check.Plan.Kind,
+            Size = check.Plan.AssetSize,
             InProgress = !start.Staged,
             Staged = start.Staged
         };
@@ -76,6 +105,8 @@ public class UpdateController : ControllerBase
     {
         Version = progress.Version ?? string.Empty,
         AssetName = progress.AssetName ?? string.Empty,
+        Kind = progress.Kind,
+        Size = progress.TotalBytes,
         InProgress = progress.Active,
         Staged = progress.Staged
     };
@@ -109,6 +140,7 @@ public class UpdateController : ControllerBase
             return Ok(new UpdateApplyResultDto
             {
                 Version = staged.Version,
+                Kind = staged.Kind,
                 Restarting = true
             });
         }

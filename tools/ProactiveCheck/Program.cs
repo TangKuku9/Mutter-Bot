@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
@@ -20,6 +22,8 @@ using Mutter.Infrastructure.Entities;
 using Mutter.Infrastructure.Repositories;
 using Mutter.Infrastructure.Services;
 using Mutter.Web.Controllers;
+using Mutter.Web.Models;
+using Mutter.Web.Services;
 
 // 择机主动发言自检：纯逻辑门禁 + 生产库副本上的迁移幂等 + DI 装配。
 // 用法：
@@ -447,6 +451,58 @@ Check(new ProactiveChatConfig { HistoryMaxMessages = -1, EvalMaxTokens = 1 }.Nor
         is { HistoryMaxMessages: 0, EvalMaxTokens: 64 },
     "择机的历史条数与输出上限同样被钳制在可用区间");
 
+Console.WriteLine("== 3e3. 图文联网请求构建与能力账本 ==");
+var probePng = Convert.FromBase64String(WebSearchProbe.ImageProbePngBase64);
+Check(WebSearchProbe.ImageProbeSawImage("左边红色，右边蓝色，现在 2026-10-20 12:00"),
+    "探测图答复里同时出现红/蓝，判定模型看到了图");
+Check(!WebSearchProbe.ImageProbeSawImage("现在 2026-10-20 12:00"),
+    "只答时间不算看到图（图片可能被静默丢弃）");
+var imageRequest = new AiChatRequest(
+    "你是群友",
+    new[]
+    {
+        new AiMessage("user", "这张图里是什么", new[]
+        {
+            new AiResolvedImage("image/png", probePng, "probe")
+        })
+    });
+var builderConfig = new AiConfig { ModelName = "test-model", MaxTokens = 256 };
+Check(GeminiNativeRequestBuilder.TryBuild(
+        imageRequest, builderConfig, true, out var geminiBody, out var geminiReason),
+    $"Gemini 原生能构建图文请求（reason={geminiReason ?? "-"}）");
+var geminiJson = JsonSerializer.Serialize(geminiBody);
+Check(geminiJson.Contains("inline_data") && geminiJson.Contains("google_search"),
+    "同一个 Gemini 请求里既有 inline_data 又有 google_search");
+Check(!GeminiNativeRequestBuilder.TryBuild(
+        imageRequest with { ResponseFormat = "json_object" }, builderConfig, true, out _, out _),
+    "结构化输出不硬塞进 Gemini 原生通道");
+var openAiJson = JsonSerializer.Serialize(
+    OpenAiRequestBuilder.Build(imageRequest, builderConfig, "enable_search"));
+Check(openAiJson.Contains("image_url") && openAiJson.Contains("enable_search"),
+    "兼容通道把图片和搜索形状放进同一个请求");
+Check(AiChatService.ParseSearchDescription("图片描述：左红右蓝\n检索词：测试图片") is { Query: "测试图片" },
+    "两段式第一段的两行输出可解析");
+Check(AiChatService.ParseSearchDescription(
+        "图片描述：左红右蓝；检索词：当前北京时间") is { Query: "当前北京时间", Caption: "左红右蓝" },
+    "模型把两行写在同一行时也能拆出检索词（否则两段式会白跑）");
+Check(AiChatService.ParseSearchDescription("只有一句没有检索词") is null,
+    "没有检索词就放弃两段式，不拿整段话硬搜");
+Check(AiConfig.IsValidWebSearchImageMode("auto")
+      && AiConfig.IsValidWebSearchImageMode("two_stage")
+      && AiConfig.IsValidWebSearchImageMode("off")
+      && !AiConfig.IsValidWebSearchImageMode("always"),
+    "带图联网策略只接受 auto / two_stage / off");
+var caps = new AiSearchCapabilityStore();
+Check(caps.GetProbeImageCapability("u", "m", "s") is null, "未探测时带图能力是 null");
+caps.RecordProbe("u", "m", "s", imageCapable: true);
+Check(caps.GetProbeImageCapability("u", "m", "s") == true, "探测结论可读回");
+caps.MarkRuntimeUnsupported("u", "m", "s");
+Check(caps.IsRuntimeUnsupported("u", "m", "s"), "运行时确定性拒绝会进负缓存");
+caps.RecordProbe("u", "m", "s", imageCapable: false);
+Check(!caps.IsRuntimeUnsupported("u", "m", "s")
+      && caps.GetProbeImageCapability("u", "m", "s") == false,
+    "重新探测会清掉负缓存并写入新结论");
+
 Console.WriteLine("== 3e2. @ 回复的附图张数（旧代码固定只取第一张） ==");
 var five = new[] { "u1", "u2", "u3", "u4", "u5" };
 var replyCfg = new AiConfig();
@@ -600,6 +656,102 @@ var legacyHash = $"sha256${Convert.ToBase64String(legacySalt)}$" +
 Check(PanelPasswordHasher.Verify(legacyHash, "s3cret-pass"), "旧格式哈希（无迭代数段）仍可校验通过");
 Check(!PanelPasswordHasher.Verify(legacyHash, "wrong-pass"), "旧格式哈希校验错误口令失败");
 Check(PanelPasswordHasher.NeedsRehash(legacyHash), "旧格式哈希标记为需要重哈希");
+
+Console.WriteLine("== 3h. 分层更新、清单与签名（纯逻辑） ==");
+var defaultUpdate = new UpdateSettings();
+defaultUpdate.Normalize();
+Check(defaultUpdate.Mode == UpdateSettings.ModeAuto &&
+      defaultUpdate.Source == UpdateSettings.SourceGitHub,
+    "更新设置默认：自动方式 + GitHub 官方源");
+Check(defaultUpdate.Validate(out _), "官方源使用内置公钥时配置校验通过");
+
+var mirrorUpdate = new UpdateSettings
+{
+    Source = UpdateSettings.SourceMirror,
+    ManifestUrl = "https://mirror.example.com/mutter-bot/update.json",
+    PublicKey = "configured"
+};
+Check(mirrorUpdate.Validate(out _), "镜像源在填写 HTTPS 清单与公钥后通过校验");
+var missingKey = new UpdateSettings
+{
+    Source = UpdateSettings.SourceMirror,
+    ManifestUrl = "https://mirror.example.com/mutter-bot/update.json",
+    PublicKey = string.Empty
+};
+Check(!missingKey.Validate(out _), "镜像源缺少公钥时拒绝保存");
+var insecureMirror = new UpdateSettings
+{
+    Source = UpdateSettings.SourceCustom,
+    ManifestUrl = "http://mirror.example.com/update.json",
+    PublicKey = "configured"
+};
+Check(!insecureMirror.Validate(out _), "镜像源拒绝 HTTP 清单地址");
+
+using (var signingKey = ECDsa.Create(ECCurve.NamedCurves.nistP256))
+{
+    var publicKey = Convert.ToBase64String(signingKey.ExportSubjectPublicKeyInfo());
+    var payload = Encoding.UTF8.GetBytes("""{"version":"2.0.5"}""");
+    var signature = Convert.ToBase64String(signingKey.SignData(
+        payload, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
+    Check(UpdateSignature.TryValidatePublicKey(publicKey, out _), "ECDSA P-256 公钥格式可识别");
+    Check(UpdateSignature.TryVerify(payload, signature, publicKey, out _), "清单签名校验通过");
+    Check(!UpdateSignature.TryVerify(Encoding.UTF8.GetBytes("""{"version":"9.9.9"}"""),
+            signature, publicKey, out _),
+        "清单被篡改时签名校验失败");
+    Check(!UpdateSignature.TryValidatePublicKey("not-a-public-key", out _), "非法公钥被拒绝");
+}
+
+// CI 用 OpenSSL 生成 DER 签名；这里固定一组 OpenSSL 产物，防止 .NET 默认的 P1363
+// 签名格式与发布流水线错位。
+const string opensslPayload = "mutter-update-manifest-test";
+const string opensslPublicKey =
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEi+LT02j42M77a+ILW73HyRw566HVwPnpHon0aBLZHmb4Do7PnU2uP2dPQgFgT7trhZ3AxNgrsptckqZlZOjNoA==";
+const string opensslSignature =
+    "MEYCIQD9Fx4tT1FE2Jy5jNQx0oqCJSFO4wlFtPHp8WKNnwx13AIhAMBrUIgQaMoU1vq1SZSwkdI3H2ha6TDW1enClolU+mYT";
+Check(UpdateSignature.TryVerify(
+        Encoding.UTF8.GetBytes(opensslPayload), opensslSignature, opensslPublicKey, out _),
+    "OpenSSL 生成的 DER 签名可被 .NET 校验（发布流水线与客户端格式一致）");
+
+var currentRuntime = $"{Environment.Version.Major}.{Environment.Version.Minor}.{Environment.Version.Build}";
+Check(UpdateService.IsAppRuntimeCompatible(currentRuntime, "self-contained", out _),
+    "运行时版本一致时应用层包可用");
+Check(!UpdateService.IsAppRuntimeCompatible("1.0.0", "self-contained", out _),
+    "运行时版本不一致时拒绝应用层包");
+Check(UpdateService.IsAppRuntimeCompatible(null, "framework-dependent", out _),
+    "框架依赖包不绑定内置运行时版本");
+
+Check(UpdateService.TryResolveAssetUrl(
+        "https://github.com/o/r/releases/latest/download/update.json",
+        "a.zip", out var resolvedAsset, out _) &&
+      resolvedAsset.EndsWith("/download/a.zip", StringComparison.Ordinal),
+    "清单相对资产地址按清单目录解析");
+Check(!UpdateService.TryResolveAssetUrl(
+        "https://github.com/o/r/releases/latest/download/update.json",
+        "http://evil.example/a.zip", out _, out _),
+    "资产地址必须是 HTTPS");
+
+Check(AppLayerManifest.IsSafeRelativePath("wwwroot/assets/index.js", out _),
+    "应用层清单允许子目录文件");
+Check(!AppLayerManifest.IsSafeRelativePath("../evil.dll", out _), "应用层清单拒绝 ..");
+Check(!AppLayerManifest.IsSafeRelativePath("/etc/passwd", out _), "应用层清单拒绝绝对路径");
+Check(!AppLayerManifest.IsSafeRelativePath("appsettings.json", out _), "应用层清单拒绝配置文件");
+Check(!AppLayerManifest.IsSafeRelativePath("mutter-bot.db", out _), "应用层清单拒绝数据库");
+Check(AppLayerManifest.IsProtectedPath("update-settings.json"),
+    "update-settings.json 在所有更新路径中受保护");
+
+var manifestJson = """
+    {"schema":1,"version":"2.0.5","assets":[
+      {"name":"mutter-bot-v2.0.5-win-x64-self-contained.zip","kind":"full",
+       "rid":"win-x64","flavor":"self-contained","runtimeVersion":"9.0.18",
+       "size":49114326,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+       "url":"mutter-bot-v2.0.5-win-x64-self-contained.zip"}]}
+    """;
+Check(UpdateManifest.TryParse(Encoding.UTF8.GetBytes(manifestJson), out _) is not null,
+    "合法 update.json 可解析");
+var badManifestJson = manifestJson.Replace(
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "bad", StringComparison.Ordinal);
+Check(UpdateManifest.TryParse(Encoding.UTF8.GetBytes(badManifestJson), out _) is null,
+    "SHA256 非法的 update.json 被拒绝");
 
 if (logicOnly)
 {

@@ -326,8 +326,10 @@ npm run build
 
 - **版本号唯一来源**：仓库根目录 `Directory.Build.props` 的 `<Version>`。`web/package.json` 的 `version` 必须同步，CI 会校验两者一致；不要在代码中另写版本常量。
 - **发布标签**：在 `main` 的发布提交上打 `vX.Y.Z` 标签并推送。标签必须与 `<Version>` 完全对应（`v2.0.0` ↔ `2.0.0`），发布流水线会先校验再打包。
-- **产物**：工作流在 Windows 与 Linux runner 上分别构建 `win-x64`、`linux-x64` 的 self-contained 与 framework-dependent 包，附带 `SHA256SUMS.txt`，并创建 **draft** Release。
-- **发布前检查**：在 GitHub Release 页面确认四个压缩包、校验和与发布说明无误后，再手动点击 Publish release。
+- **产物**：工作流在 Windows 与 Linux runner 上分别构建 `win-x64`、`linux-x64` 的 self-contained 与 framework-dependent 包，附带 `SHA256SUMS.txt`。自包含包额外生成 `*-app.zip` 应用层包和 `update.json` 清单；配置了 `UPDATE_SIGNING_KEY` 时还会生成 `update.json.sig`。工作流创建 **draft** Release。
+- **应用层包**：CI 用 `tools/packaging/make_update_assets.py` 对比发布目录与 .NET 运行时包，只打包程序文件；`update.json` 记录运行时版本与 SHA256。修改打包逻辑时必须保证运行时文件不被误归入应用层，否则安装校验会拒绝。
+- **签名密钥**：镜像/自定义更新源依赖 ECDSA P-256 签名。私钥只放在 GitHub Actions Secret `UPDATE_SIGNING_KEY`，公钥由用户在面板填写；不要把私钥提交到仓库或写进 `appsettings.json`。
+- **发布前检查**：在 GitHub Release 页面确认完整包、应用层包、`update.json`、校验和与发布说明无误后，再手动点击 Publish release。
 
 ---
 
