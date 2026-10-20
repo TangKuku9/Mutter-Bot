@@ -28,6 +28,15 @@ public class AiConfigDto
     /// <summary>该策略的验证时间（只读，由服务端在选用时写入）。</summary>
     public DateTime? WebSearchVerifiedAt { get; set; }
 
+    /// <summary>带图联网策略：auto / two_stage / off。</summary>
+    public string WebSearchImageMode { get; set; } = "auto";
+
+    /// <summary>“图片 + 搜索”是否实测可用（只读，由探测/运行结果写入）。</summary>
+    public bool? WebSearchImageCapable { get; set; }
+
+    /// <summary>图文组合的验证时间（只读）。</summary>
+    public DateTime? WebSearchImageVerifiedAt { get; set; }
+
     public List<CharacterDto> AvailableCharacters { get; set; } = new();
     public List<ProviderPresetDto> AvailableProviders { get; set; } = new();
 }

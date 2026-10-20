@@ -174,7 +174,11 @@ public class AppDbContext : DbContext
                  {
                      "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchEndpoint\" TEXT NOT NULL DEFAULT ''",
                      "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchShape\" TEXT NOT NULL DEFAULT ''",
-                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchVerifiedAt\" TEXT"
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchVerifiedAt\" TEXT",
+                     // 带图联网：策略 + 图文组合的实测结论。老库默认 auto / 未测，行为与升级前一致。
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchImageMode\" TEXT NOT NULL DEFAULT 'auto'",
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchImageCapable\" INTEGER NULL",
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchImageVerifiedAt\" TEXT"
                  })
         {
             try

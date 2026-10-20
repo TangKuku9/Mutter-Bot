@@ -25,4 +25,13 @@ public class AiConfigEntity
 
     /// <summary>该策略的验证时间；为空表示尚未实测。</summary>
     public DateTime? WebSearchVerifiedAt { get; set; }
+
+    /// <summary>带图联网策略：auto / two_stage / off。</summary>
+    public string WebSearchImageMode { get; set; } = "auto";
+
+    /// <summary>“图片 + 搜索”是否实测可用；null=未测。</summary>
+    public bool? WebSearchImageCapable { get; set; }
+
+    /// <summary>图文组合的验证时间。</summary>
+    public DateTime? WebSearchImageVerifiedAt { get; set; }
 }

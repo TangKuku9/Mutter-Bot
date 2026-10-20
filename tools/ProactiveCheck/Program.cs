@@ -447,6 +447,58 @@ Check(new ProactiveChatConfig { HistoryMaxMessages = -1, EvalMaxTokens = 1 }.Nor
         is { HistoryMaxMessages: 0, EvalMaxTokens: 64 },
     "择机的历史条数与输出上限同样被钳制在可用区间");
 
+Console.WriteLine("== 3e3. 图文联网请求构建与能力账本 ==");
+var probePng = Convert.FromBase64String(WebSearchProbe.ImageProbePngBase64);
+Check(WebSearchProbe.ImageProbeSawImage("左边红色，右边蓝色，现在 2026-10-20 12:00"),
+    "探测图答复里同时出现红/蓝，判定模型看到了图");
+Check(!WebSearchProbe.ImageProbeSawImage("现在 2026-10-20 12:00"),
+    "只答时间不算看到图（图片可能被静默丢弃）");
+var imageRequest = new AiChatRequest(
+    "你是群友",
+    new[]
+    {
+        new AiMessage("user", "这张图里是什么", new[]
+        {
+            new AiResolvedImage("image/png", probePng, "probe")
+        })
+    });
+var builderConfig = new AiConfig { ModelName = "test-model", MaxTokens = 256 };
+Check(GeminiNativeRequestBuilder.TryBuild(
+        imageRequest, builderConfig, true, out var geminiBody, out var geminiReason),
+    $"Gemini 原生能构建图文请求（reason={geminiReason ?? "-"}）");
+var geminiJson = JsonSerializer.Serialize(geminiBody);
+Check(geminiJson.Contains("inline_data") && geminiJson.Contains("google_search"),
+    "同一个 Gemini 请求里既有 inline_data 又有 google_search");
+Check(!GeminiNativeRequestBuilder.TryBuild(
+        imageRequest with { ResponseFormat = "json_object" }, builderConfig, true, out _, out _),
+    "结构化输出不硬塞进 Gemini 原生通道");
+var openAiJson = JsonSerializer.Serialize(
+    OpenAiRequestBuilder.Build(imageRequest, builderConfig, "enable_search"));
+Check(openAiJson.Contains("image_url") && openAiJson.Contains("enable_search"),
+    "兼容通道把图片和搜索形状放进同一个请求");
+Check(AiChatService.ParseSearchDescription("图片描述：左红右蓝\n检索词：测试图片") is { Query: "测试图片" },
+    "两段式第一段的两行输出可解析");
+Check(AiChatService.ParseSearchDescription(
+        "图片描述：左红右蓝；检索词：当前北京时间") is { Query: "当前北京时间", Caption: "左红右蓝" },
+    "模型把两行写在同一行时也能拆出检索词（否则两段式会白跑）");
+Check(AiChatService.ParseSearchDescription("只有一句没有检索词") is null,
+    "没有检索词就放弃两段式，不拿整段话硬搜");
+Check(AiConfig.IsValidWebSearchImageMode("auto")
+      && AiConfig.IsValidWebSearchImageMode("two_stage")
+      && AiConfig.IsValidWebSearchImageMode("off")
+      && !AiConfig.IsValidWebSearchImageMode("always"),
+    "带图联网策略只接受 auto / two_stage / off");
+var caps = new AiSearchCapabilityStore();
+Check(caps.GetProbeImageCapability("u", "m", "s") is null, "未探测时带图能力是 null");
+caps.RecordProbe("u", "m", "s", imageCapable: true);
+Check(caps.GetProbeImageCapability("u", "m", "s") == true, "探测结论可读回");
+caps.MarkRuntimeUnsupported("u", "m", "s");
+Check(caps.IsRuntimeUnsupported("u", "m", "s"), "运行时确定性拒绝会进负缓存");
+caps.RecordProbe("u", "m", "s", imageCapable: false);
+Check(!caps.IsRuntimeUnsupported("u", "m", "s")
+      && caps.GetProbeImageCapability("u", "m", "s") == false,
+    "重新探测会清掉负缓存并写入新结论");
+
 Console.WriteLine("== 3e2. @ 回复的附图张数（旧代码固定只取第一张） ==");
 var five = new[] { "u1", "u2", "u3", "u4", "u5" };
 var replyCfg = new AiConfig();

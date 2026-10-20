@@ -31,6 +31,17 @@ public static class WebSearchProbe
     public const string ProbeQuestion = "现在北京时间几点？请按「YYYY-MM-DD HH:mm」格式只回答日期和时间，不要解释。";
 
     /// <summary>
+    /// 图文组合探测：先要求说出图片左右两半的颜色（证明图片真的被模型看到），
+    /// 再问当前时间（证明搜索真的发生）。只问时间无法区分“图片被静默丢弃”。
+    /// </summary>
+    public const string ImageProbeQuestion =
+        "先看图片：图片左半部分和右半部分各是什么颜色？再用「YYYY-MM-DD HH:mm」格式回答现在北京时间几点，不要解释。";
+
+    /// <summary>64×64、左红右蓝的 PNG。小到足以塞进任何请求体，又足够让模型辨认颜色。</summary>
+    public const string ImageProbePngBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAT0lEQVR42u3PsQkAAAzDsPz/dHpCp2wCzwalybTxvgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA+Dq47PDiz8p6GQAAAABJRU5ErkJggg==";
+
+    /// <summary>
     /// 探测请求的输出上限。64 对带思考的 Gemini 3.x / o 系列不够：思考 token 会吃满额度，
     /// 最终答复变成空串（finishReason=MAX_TOKENS），看起来像"没检索"，其实是没答完。
     /// </summary>
@@ -111,6 +122,68 @@ public static class WebSearchProbe
                 {
                     ["role"] = "user",
                     ["parts"] = new List<object> { new Dictionary<string, object> { ["text"] = question } }
+                }
+            },
+            ["generationConfig"] = new Dictionary<string, object> { ["maxOutputTokens"] = ProbeMaxOutputTokens }
+        };
+        if (withTool)
+            body["tools"] = new List<object> { new Dictionary<string, object> { ["google_search"] = new Dictionary<string, object>() } };
+        return body;
+    }
+
+    /// <summary>OpenAI 兼容的图文探测请求体：文本 + data URI 图片 + 搜索形状。</summary>
+    public static Dictionary<string, object> BuildOpenAiImageBody(string shape, string model)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["model"] = model,
+            ["max_tokens"] = ProbeMaxOutputTokens,
+            ["messages"] = new List<object>
+            {
+                new Dictionary<string, object>
+                {
+                    ["role"] = "user",
+                    ["content"] = new List<object>
+                    {
+                        new Dictionary<string, object> { ["type"] = "text", ["text"] = ImageProbeQuestion },
+                        new Dictionary<string, object>
+                        {
+                            ["type"] = "image_url",
+                            ["image_url"] = new Dictionary<string, object>
+                            {
+                                ["url"] = $"data:image/png;base64,{ImageProbePngBase64}"
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        ApplyShapeToBody(body, shape);
+        return body;
+    }
+
+    /// <summary>Gemini 原生的图文探测请求体：inline_data 图片 + 可选 google_search。</summary>
+    public static Dictionary<string, object> BuildGeminiImageBody(bool withTool)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["contents"] = new List<object>
+            {
+                new Dictionary<string, object>
+                {
+                    ["role"] = "user",
+                    ["parts"] = new List<object>
+                    {
+                        new Dictionary<string, object> { ["text"] = ImageProbeQuestion },
+                        new Dictionary<string, object>
+                        {
+                            ["inline_data"] = new Dictionary<string, object>
+                            {
+                                ["mime_type"] = "image/png",
+                                ["data"] = ImageProbePngBase64
+                            }
+                        }
+                    }
                 }
             },
             ["generationConfig"] = new Dictionary<string, object> { ["maxOutputTokens"] = ProbeMaxOutputTokens }
@@ -380,6 +453,39 @@ public static class WebSearchProbe
         return new WebSearchProbeVerdict("no_evidence", Note: "2xx 但响应不是可解析的 JSON");
     }
 
+    /// <summary>模型是否真的读到了左红右蓝的探测图。只答时间不能证明图片没被静默丢弃。</summary>
+    public static bool ImageProbeSawImage(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var lower = text.ToLowerInvariant();
+        return (lower.Contains('红') || lower.Contains("red"))
+            && (lower.Contains('蓝') || lower.Contains("blue"));
+    }
+
+    /// <summary>
+    /// 图文组合的判定：先看图片是否被识别，再复用文本探测的三类搜索证据。
+    /// 图片没识别出来时，即使 2xx 也只能报“看不到图”，不能报已验证。
+    /// </summary>
+    public static WebSearchProbeVerdict ImageVerdict(
+        string shape, int? httpStatus, JsonElement? responseRoot, int? promptTokensDelta,
+        string? baselineText = null, string? responseText = null, DateTimeOffset? now = null)
+    {
+        var searchVerdict = Verdict(shape, httpStatus, responseRoot, promptTokensDelta,
+            baselineText, responseText, now);
+
+        if (searchVerdict.Status is "unreachable" or "auth_failed" or "rejected" or "upstream_error")
+            return searchVerdict;
+
+        if (!ImageProbeSawImage(responseText))
+            return new WebSearchProbeVerdict("image_rejected", null,
+                "请求成功但模型没有读出图片里的颜色——上游可能静默丢弃了图片",
+                promptTokensDelta);
+
+        return searchVerdict.Status == "verified"
+            ? searchVerdict with { Note = "图片已识别；" + searchVerdict.Note }
+            : searchVerdict with { Note = "图片已识别，但搜索无证据：" + searchVerdict.Note };
+    }
+
     private static bool IsEmptyContainer(JsonElement e) => e.ValueKind switch
     {
         JsonValueKind.Object => !e.EnumerateObject().Any(),
@@ -406,6 +512,86 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
         return endpoint == "gemini"
             ? await SendGeminiAsync(apiBaseUrl, apiKey, withTool: shape is not null, model, ct)
             : await SendOpenAiAsync(apiBaseUrl, apiKey, shape ?? "__baseline__", model, ct);
+    }
+
+    /// <summary>带内置图片的探测：shape 为 null 表示图文基线（不带搜索）。</summary>
+    public async Task<ProbeSendResult> SendImageAsync(
+        string apiBaseUrl, string apiKey, string endpoint, string? shape, string model, CancellationToken ct = default)
+    {
+        return endpoint == "gemini"
+            ? await SendGeminiImageAsync(apiBaseUrl, apiKey, withTool: shape is not null, model, ct)
+            : await SendOpenAiImageAsync(apiBaseUrl, apiKey, shape ?? "__baseline__", model, ct);
+    }
+
+    private async Task<ProbeSendResult> SendOpenAiImageAsync(
+        string apiBaseUrl, string apiKey, string shape, string model, CancellationToken ct)
+    {
+        var body = WebSearchProbe.BuildOpenAiImageBody(shape, model);
+        var url = $"{apiBaseUrl.TrimEnd('/')}/chat/completions";
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(PerRequestTimeout);
+            using var request = new HttpRequestMessage(HttpMethod.Post, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+            using var response = await httpClient.SendAsync(request, cts.Token);
+            var raw = await response.Content.ReadAsStringAsync(cts.Token);
+            JsonElement? root = null;
+            try { root = JsonDocument.Parse(raw).RootElement.Clone(); } catch { /* 非 JSON 响应保留状态码 */ }
+            return new ProbeSendResult((int)response.StatusCode, root, null);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning("Image web search probe timed out for {Url} shape={Shape}", url, shape);
+            return new ProbeSendResult(null, null, $"请求超时（>{PerRequestTimeout.TotalSeconds:F0}s）");
+        }
+        catch (HttpRequestException ex)
+        {
+            logger.LogWarning("Image web search probe failed for {Url}: {Message}", url, ex.Message);
+            return new ProbeSendResult(null, null, ex.Message);
+        }
+    }
+
+    private async Task<ProbeSendResult> SendGeminiImageAsync(
+        string apiBaseUrl, string apiKey, bool withTool, string model, CancellationToken ct)
+    {
+        var json = JsonSerializer.Serialize(WebSearchProbe.BuildGeminiImageBody(withTool));
+        string? lastPath = null;
+        foreach (var url in WebSearchProbe.GeminiUrlCandidates(apiBaseUrl, model))
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(PerRequestTimeout);
+                using var request = new HttpRequestMessage(HttpMethod.Post, url);
+                request.Headers.Add("x-goog-api-key", apiKey);
+                if (!apiKey.StartsWith("AIza"))
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                using var response = await httpClient.SendAsync(request, cts.Token);
+                var raw = await response.Content.ReadAsStringAsync(cts.Token);
+                JsonElement? root = null;
+                try { root = JsonDocument.Parse(raw).RootElement.Clone(); } catch { }
+                if ((int)response.StatusCode == 404)
+                {
+                    lastPath = url;
+                    continue;
+                }
+                return new ProbeSendResult((int)response.StatusCode, root, null);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning("Image web search probe timed out for {Url}", url);
+                return new ProbeSendResult(null, null, $"请求超时（>{PerRequestTimeout.TotalSeconds:F0}s）");
+            }
+            catch (HttpRequestException ex)
+            {
+                logger.LogWarning("Image web search probe failed for {Url}: {Message}", url, ex.Message);
+                return new ProbeSendResult(null, null, ex.Message);
+            }
+        }
+        return new ProbeSendResult(404, null, $"未找到 Gemini 原生端点（最后尝试 {lastPath}）");
     }
 
     private async Task<ProbeSendResult> SendOpenAiAsync(
