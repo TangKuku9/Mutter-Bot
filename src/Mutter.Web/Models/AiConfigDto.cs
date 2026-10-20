@@ -38,6 +38,9 @@ public class AiConfigDto : AiConfigInputDto
     /// <summary>附图张数上限，供面板对齐输入框。</summary>
     public int CeilingAttachedImages { get; set; } = Mutter.Core.Models.Config.AiConfig.CeilingAttachedImages;
 
+    /// <summary>内置默认系统提示词，供面板在用户留空时展示全文。</summary>
+    public string DefaultSystemPrompt { get; set; } = Mutter.Core.Models.Config.AiConfig.DefaultSystemPrompt;
+
     /// <summary>该策略的验证时间（只读，由服务端在选用时写入）。</summary>
     public DateTime? WebSearchVerifiedAt { get; set; }
 

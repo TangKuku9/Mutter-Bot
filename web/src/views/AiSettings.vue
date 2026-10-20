@@ -61,6 +61,10 @@
       <el-form-item label="系统提示词">
         <el-input v-model="form.systemPrompt" type="textarea" :rows="5" placeholder="留空则使用内置默认提示词" />
         <ParamHelpButton :label="helpLabel('systemPrompt')" @click="openHelp('systemPrompt')" />
+        <div class="hint">
+          <span v-if="!form.systemPrompt">当前使用内置默认提示词。</span>
+          <el-button size="small" link type="primary" @click="defaultPromptDialog = true">查看内置默认提示词</el-button>
+        </div>
       </el-form-item>
       <el-form-item label="Temperature">
         <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" show-input style="max-width: 420px" />
@@ -259,6 +263,17 @@
       </template>
     </el-dialog>
 
+    <!-- 内置默认系统提示词 -->
+    <el-dialog v-model="defaultPromptDialog" title="内置默认系统提示词" width="760px">
+      <el-input :model-value="form.defaultSystemPrompt || '未获取到默认提示词'" type="textarea" :rows="14" readonly />
+      <div class="probe-footnote">
+        系统提示词留空时使用这段内容；选中「人设」后，角色提示词会在此基础上追加。
+      </div>
+      <template #footer>
+        <el-button @click="defaultPromptDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 联网搜索探测：流式逐项进度 → 完整报告 → 每个已验证形状可一键选用 -->
     <el-dialog v-model="probeDialog" title="联网搜索探测报告" width="760px" @close="cancelProbe">
       <el-alert v-if="probeReport && !probeReport.reachable" type="error" :closable="false" show-icon
@@ -375,6 +390,7 @@ const managePresetDialog = ref(false)
 const presetSaving = ref(false)
 const presetForm = ref({ name: '', description: '', includeApiKey: true })
 const presetEditForm = ref({ id: null, name: '', description: '' })
+const defaultPromptDialog = ref(false)
 // 上次读取/应用/保存后的表单快照，用来判断有没有未保存修改
 const baseline = ref('')
 
@@ -657,7 +673,7 @@ const HELP = {
     title: '系统提示词',
     value: (f) => (f.systemPrompt ? `${f.systemPrompt.length} 字` : '内置默认'),
     lines: [
-      '留空则使用内置默认提示词。',
+      '留空则使用内置默认提示词，可点下方「查看内置默认提示词」看全文。',
       '「群管理」里的「群专属提示词」会整段替换掉这里的全局提示词，是替换不是追加。'
     ]
   },
