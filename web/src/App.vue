@@ -1,7 +1,10 @@
 <template>
   <el-container class="layout">
     <el-aside width="200px" class="aside">
-      <div class="logo">🐾 Mutter 面板</div>
+      <div class="logo">
+        <img src="/logo-mark.svg" alt="" class="logo-mark" />
+        <span>Mutter 面板</span>
+      </div>
       <el-menu :default-active="route.path" router class="menu">
         <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
         <el-menu-item index="/chat"><el-icon><ChatDotRound /></el-icon>聊天记录</el-menu-item>
@@ -63,7 +66,8 @@ onUnmounted(() => clearInterval(timer))
 body { margin: 0; background: #f5f7fa; }
 .layout { height: 100vh; }
 .aside { background: #fff; border-right: 1px solid #e4e7ed; }
-.logo { font-size: 17px; font-weight: 700; padding: 18px 16px; color: #303133; }
+.logo { display: flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 700; padding: 18px 16px; color: #303133; }
+.logo-mark { width: 24px; height: 24px; flex: none; display: block; }
 .menu { border-right: none; }
 .header { background: #fff; border-bottom: 1px solid #e4e7ed; display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
 .main { overflow-y: auto; }

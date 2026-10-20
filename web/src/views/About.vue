@@ -3,7 +3,7 @@
     <el-card shadow="never" class="hero-card">
       <div class="hero">
         <div class="hero-brand">
-          <div class="hero-logo">🐾</div>
+          <div class="hero-logo"><img src="/logo-mark.svg" alt="" /></div>
           <div>
             <div class="hero-title">
               Mutter
@@ -879,9 +879,10 @@ html.dark .hero-card {
 .hero-brand { display: flex; align-items: center; gap: 14px; }
 .hero-logo {
   width: 52px; height: 52px; border-radius: 14px; background: var(--el-bg-color-overlay);
-  display: flex; align-items: center; justify-content: center; font-size: 28px;
+  display: flex; align-items: center; justify-content: center;
   box-shadow: 0 6px 18px var(--el-color-primary-light-8);
 }
+.hero-logo img { width: 36px; height: 36px; display: block; }
 .hero-title { display: flex; align-items: center; gap: 8px; font-size: 24px; font-weight: 700; color: var(--el-text-color-primary); }
 .hero-sub { margin-top: 4px; font-size: 13px; color: var(--el-text-color-regular); }
 .hero-actions { display: flex; gap: 8px; }

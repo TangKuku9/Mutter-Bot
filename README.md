@@ -1,4 +1,11 @@
-# Mutter
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/logo-lockup-dark.svg" />
+    <img src="brand/logo-lockup.svg" alt="Mutter" width="320" />
+  </picture>
+</p>
+
+<p align="center"><em>会看气氛的 QQ 群聊智能助手</em></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/.NET-9.0-512BD4?logo=dotnet" alt=".NET 9" />
@@ -32,6 +39,7 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 - [生产部署 (Linux & systemd)](#生产部署-linux--systemd)
 - [自检工具与质量保证](#自检工具与质量保证)
 - [贡献与安全](#贡献与安全)
+- [品牌资产](#品牌资产)
 
 ---
 
@@ -329,6 +337,12 @@ dotnet run --project tools/ProactiveCheck -- <sqlite-db-path>
 
 - **参与贡献**：请参阅 [CONTRIBUTING.md](CONTRIBUTING.md) 了解分支模型、提交规范、架构分层以及**不可协商的项目红线**。
 - **安全报告**：发现安全隐患请参阅 [SECURITY.md](SECURITY.md) 使用 GitHub Security Advisory 私密通报。
+
+---
+
+## 品牌资产
+
+标志、横版组合、应用图标、配色与使用规则见 [brand/README.md](brand/README.md)。矢量源文件与 PNG / ICO 导出均在 [`brand/`](brand/) 目录。
 
 ---
 
