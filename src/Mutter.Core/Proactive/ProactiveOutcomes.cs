@@ -15,6 +15,8 @@ public static class ProactiveOutcomes
     public const string SkippedGlobalCap = "skipped_global_cap";
     /// <summary>AI 这回没话可说（Line 为空）。</summary>
     public const string SkippedAiDeclined = "skipped_ai_declined";
+    /// <summary>联网核实后模型选择不说（草稿可能有误或已无必要），不降级成草稿硬发。</summary>
+    public const string SkippedAfterSearch = "skipped_after_search";
     public const string SkippedAiUnavailable = "skipped_ai_unavailable";
     public const string FailedAiCall = "failed_ai_call";
     public const string SkippedAiTruncated = "skipped_ai_truncated";

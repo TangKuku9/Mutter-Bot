@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models.Config;
 using Mutter.Core.Proactive;
+using Mutter.Core.Services;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
 
@@ -104,6 +105,8 @@ public class ProactiveController : ControllerBase
         public int MaxAttachedImages { get; set; } = ProactiveChatConfig.DefaultMaxAttachedImages;
         public int HistoryMaxMessages { get; set; } = ProactiveChatConfig.DefaultHistoryMaxMessages;
         public int EvalMaxTokens { get; set; } = ProactiveChatConfig.DefaultEvalMaxTokens;
+        /// <summary>择机发言是否允许在改写阶段联网核实（仍需 AI 设置里的全局联网开关）。</summary>
+        public bool WebSearchEnabled { get; set; }
         public bool AllowActiveChannel { get; set; } = true;
         public int ActivePerGroupPerMinute { get; set; } = 3;
         public int ActivePerGroupPerDay { get; set; } = 20;
@@ -148,6 +151,7 @@ public class ProactiveController : ControllerBase
             MaxAttachedImages = dto.MaxAttachedImages,
             HistoryMaxMessages = dto.HistoryMaxMessages,
             EvalMaxTokens = dto.EvalMaxTokens,
+            WebSearchEnabled = dto.WebSearchEnabled,
             AllowActiveChannel = dto.AllowActiveChannel,
             ActivePerGroupPerMinute = dto.ActivePerGroupPerMinute,
             ActivePerGroupPerDay = dto.ActivePerGroupPerDay,
@@ -202,7 +206,11 @@ public class ProactiveController : ControllerBase
             l.Detail,
             l.Model,
             l.PromptTokens,
-            l.CompletionTokens
+            l.CompletionTokens,
+            l.SearchQuery,
+            l.SearchUsed,
+            l.SpeechPromptTokens,
+            l.SpeechCompletionTokens
         }).ToList();
 
         return Ok(new { items, totalCount = total, page, pageSize });
@@ -213,6 +221,7 @@ public class ProactiveController : ControllerBase
     public async Task<ActionResult<object>> GetStatus(CancellationToken ct)
     {
         var config = await _configRepo.GetProactiveConfigAsync(ct);
+        var aiConfig = await _configRepo.GetAiConfigAsync(ct);
         // 日界按北京时间，落库时间存的是 UTC，故先取北京 00:00 再折回 UTC 时刻
         var todayUtcStart = DateTime.UtcNow.AddHours(8).Date.AddHours(-8);
 
@@ -271,6 +280,10 @@ public class ProactiveController : ControllerBase
             config.Enabled,
             config.AllowActiveChannel,
             config.MemoryInjectionEnabled,
+            config.WebSearchEnabled,
+            // 面板据此提示：择机开关打开了，但 AI 设置里没开/没配好联网时，改写不会真的检索。
+            AiWebSearchEnabled = aiConfig?.WebSearchEnabled ?? false,
+            AiWebSearchConfigured = aiConfig is not null && AiChatService.HasConfiguredSearch(aiConfig),
             TodayMemoryInjections = memoryInjectionsToday,
             ParticipatingGroups = participating.Count,
             TodayByOutcome = sinceRows,
@@ -301,6 +314,7 @@ public class ProactiveController : ControllerBase
         MaxAttachedImages = c.MaxAttachedImages,
         HistoryMaxMessages = c.HistoryMaxMessages,
         EvalMaxTokens = c.EvalMaxTokens,
+        WebSearchEnabled = c.WebSearchEnabled,
         AllowActiveChannel = c.AllowActiveChannel,
         ActivePerGroupPerMinute = c.ActivePerGroupPerMinute,
         ActivePerGroupPerDay = c.ActivePerGroupPerDay,

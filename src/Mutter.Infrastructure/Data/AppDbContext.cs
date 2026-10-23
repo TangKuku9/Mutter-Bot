@@ -481,6 +481,16 @@ public class AppDbContext : DbContext
         {
         }
 
+        // 择机联网核实开关。老库补 0：不改变升级前的行为，也不会静默产生检索费用。
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"ProactiveChatConfigs\" ADD COLUMN \"WebSearchEnabled\" INTEGER NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+        {
+        }
+
         // 群级覆盖：NULL = 跟随全局，所以刻意不给默认值（给了 0 就变成"默认全群停用"）
         try
         {
@@ -538,6 +548,25 @@ public class AppDbContext : DbContext
         }
         catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
         {
+        }
+
+        // 联网改写留痕：检索词、是否发起改写、改写那一步的用量。
+        // 与判定那一步分开记，面板才能分清 token 花在“判断”还是“写话”上。
+        foreach (var sql in new[]
+                 {
+                     "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"SearchQuery\" TEXT NULL",
+                     "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"SearchUsed\" INTEGER NOT NULL DEFAULT 0",
+                     "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"SpeechPromptTokens\" INTEGER NOT NULL DEFAULT 0",
+                     "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"SpeechCompletionTokens\" INTEGER NOT NULL DEFAULT 0"
+                 })
+        {
+            try
+            {
+                await Database.ExecuteSqlRawAsync(sql, ct);
+            }
+            catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
+            {
+            }
         }
 
         // 关键词触发/关键词搭话两条旁路已被择机发言取代，列一并删除（这两项配置在整数主键年代

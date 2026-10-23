@@ -196,6 +196,7 @@ public class ConfigRepository : IConfigRepository
             MaxAttachedImages = entity.MaxAttachedImages,
             HistoryMaxMessages = entity.HistoryMaxMessages,
             EvalMaxTokens = entity.EvalMaxTokens,
+            WebSearchEnabled = entity.WebSearchEnabled,
             AllowActiveChannel = entity.AllowActiveChannel,
             ActivePerGroupPerMinute = entity.ActivePerGroupPerMinute,
             ActivePerGroupPerDay = entity.ActivePerGroupPerDay,
@@ -227,6 +228,7 @@ public class ConfigRepository : IConfigRepository
         entity.MaxAttachedImages = normalized.MaxAttachedImages;
         entity.HistoryMaxMessages = normalized.HistoryMaxMessages;
         entity.EvalMaxTokens = normalized.EvalMaxTokens;
+        entity.WebSearchEnabled = normalized.WebSearchEnabled;
         entity.AllowActiveChannel = normalized.AllowActiveChannel;
         entity.ActivePerGroupPerMinute = normalized.ActivePerGroupPerMinute;
         entity.ActivePerGroupPerDay = normalized.ActivePerGroupPerDay;

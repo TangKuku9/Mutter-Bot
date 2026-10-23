@@ -29,6 +29,18 @@ public class ProactiveChatLogEntity
     public string? Detail { get; set; }
     public string? SentMessageId { get; set; }
     public string? Model { get; set; }
+
+    /// <summary>判定那一步的用量。改写那一步的用量单独记，面板才能分清成本花在哪。</summary>
     public int PromptTokens { get; set; }
     public int CompletionTokens { get; set; }
+
+    /// <summary>这次判定给出的检索词；空表示没进联网改写。</summary>
+    public string? SearchQuery { get; set; }
+
+    /// <summary>是否真的发起了带联网的改写调用（不代表上游一定返回了检索结果）。</summary>
+    public bool SearchUsed { get; set; }
+
+    /// <summary>联网改写那一步的用量；没走改写时为 0。</summary>
+    public int SpeechPromptTokens { get; set; }
+    public int SpeechCompletionTokens { get; set; }
 }

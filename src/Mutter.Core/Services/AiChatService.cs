@@ -487,6 +487,12 @@ public class AiChatService : IAiChatService
             ? new AiSearchStrategy("gemini", null)
             : AiSearchStrategy.CompatNoSearch;
 
+    /// <summary>
+    /// 当前配置是否真的能发出带搜索的请求。择机发言据此决定要不要多打一次改写调用：
+    /// 全局开关开着但服务商/形状都没配时，多打一次也只是普通请求，纯浪费。
+    /// </summary>
+    public static bool HasConfiguredSearch(AiConfig config) => ResolveConfiguredStrategy(config) is not null;
+
     private static AiSearchStrategy? ResolveConfiguredStrategy(AiConfig config)
     {
         if (config.WebSearchEndpoint == "gemini")

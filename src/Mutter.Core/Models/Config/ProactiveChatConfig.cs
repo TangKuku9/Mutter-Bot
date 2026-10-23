@@ -69,6 +69,13 @@ public class ProactiveChatConfig
 
     public const int DefaultEvalMaxTokens = 5120;
 
+    /// <summary>
+    /// 是否允许择机发言在改写阶段联网核实。需同时在「AI 设置」里开启联网搜索；
+    /// 默认关：升级后不静默产生检索费用，也不改变现有群的说话风格。
+    /// 即使打开，也只有判定阶段给出了 query 的窗口才会多打一次调用。
+    /// </summary>
+    public bool WebSearchEnabled { get; set; }
+
     public const int LivelinessRestrained = 0;
     public const int LivelinessNormal = 1;
     public const int LivelinessEager = 2;

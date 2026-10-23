@@ -138,6 +138,7 @@ public class ProactiveChatHostedService : BackgroundService
         }
 
         var last = window.Messages[^1];
+        var nowUtc = DateTime.UtcNow;
 
         // 只继承人设 / 模型 / 接口地址这类"这个 bot 是谁"的设置；
         // 「上下文条数」与「输出上限」改用择机自己的两个参数。
@@ -159,7 +160,7 @@ public class ProactiveChatHostedService : BackgroundService
         // 先筛再拼提示词：动图和失效链不附，"附了几张"才不会跟实际发出的对不上。
         var images = await _ai.AttachableImagesAsync(
             window.CollectImages(config.MaxAttachedImages), ct);
-        var startedAt = DateTime.UtcNow;
+        var startedAt = nowUtc;
 
         // 群记忆：全局开关关了连库都不查；群级覆盖 false 表示这个群单独停用注入（摘要仍保留）
         var memory = await LoadGroupMemoryAsync(window.GroupId, config, ct);
@@ -169,12 +170,12 @@ public class ProactiveChatHostedService : BackgroundService
         var memoryChars = memoryCount == 0 ? 0 : memoryText!.Length;
 
         // 择机判定是内部决策，不该继承全局联网开关：它只是在判断“要不要接话”，
-        // 每条群消息都去检索既慢又费 token。联网只服务于最终回复，不服务于判断。
+        // 每条群消息都去检索既慢又费 token。联网只服务于最终话术，不服务于判断。
         var judgeConfig = context.EffectiveConfig with { WebSearchEnabled = false };
 
         var outcome = await _structuredAi.GetStructuredOutcomeAsync<ProactiveVerdict>(
             BuildJudgePrompt(context, config.Liveliness),
-            ProactivePrompts.BuildUserPrompt(window, history, images.Count, memoryText),
+            ProactivePrompts.BuildUserPrompt(window, history, images.Count, memoryText, nowUtc),
             images,
             judgeConfig, ct);
 
@@ -211,10 +212,48 @@ public class ProactiveChatHostedService : BackgroundService
             return;
         }
 
+        // 第二阶段：只有判定明确给了检索词才走。闲聊、玩梗、情绪接话不会多打一次调用。
+        // 触发条件集中在 ProactiveSpeech.ShouldSearch：少任何一条都直接发草稿，行为与联网上线前一致。
+        var searchQuery = ProactivePrompts.SanitizeQuery(data.Query);
+        var searchUsed = false;
+        var speechPromptTokens = 0;
+        var speechCompletionTokens = 0;
+        string? searchDetail = null;
+
+        if (ProactiveSpeech.ShouldSearch(config, context.EffectiveConfig, line, searchQuery))
+        {
+            searchUsed = true;
+            var speech = await RewriteWithSearchAsync(
+                window, context, data, line, searchQuery!, nowUtc, ct);
+            speechPromptTokens = speech.PromptTokens;
+            speechCompletionTokens = speech.CompletionTokens;
+
+            if (speech.Declined)
+            {
+                await WriteLogAsync(window,
+                    new LogNote(ProactiveOutcomes.SkippedAfterSearch, data, null,
+                        "联网核实后模型选择不说", null, outcome,
+                        memoryCount, memoryChars, searchQuery, searchUsed,
+                        speechPromptTokens, speechCompletionTokens), ct);
+                return;
+            }
+
+            if (speech.Line is not null)
+                line = speech.Line;
+            else
+                searchDetail = $"联网改写失败，已发草稿：{Truncate(speech.Error, 160)}";
+        }
+
         var result = await _speaker.SpeakAsync(window, line, config, ct);
+        var logDetail = string.IsNullOrWhiteSpace(searchDetail)
+            ? result.Detail
+            : string.IsNullOrWhiteSpace(result.Detail)
+                ? searchDetail
+                : $"{searchDetail}；{result.Detail}";
         await WriteLogAsync(window,
-            new LogNote(result.Outcome, data, line, result.Detail, result.MessageId, outcome,
-                memoryCount, memoryChars), ct);
+            new LogNote(result.Outcome, data, line, logDetail, result.MessageId, outcome,
+                memoryCount, memoryChars, searchQuery, searchUsed,
+                speechPromptTokens, speechCompletionTokens), ct);
 
         if (result.Outcome is not (ProactiveOutcomes.SentPassive or ProactiveOutcomes.SentActive))
         {
@@ -231,14 +270,57 @@ public class ProactiveChatHostedService : BackgroundService
 
     /// <summary>判定提示词 = 择机规则 + 发言倾向 + 当前人设，保证真要开口时和 @ 回复是同一个人。</summary>
     private static string BuildJudgePrompt(BuildContextResult context, int liveliness)
-    {
-        var persona = string.IsNullOrWhiteSpace(context.CharacterPrompt)
+        => ProactivePrompts.SystemPrompt
+           + "\n\n【本群的发言倾向】\n" + ProactivePrompts.Tendency(liveliness)
+           + "\n\n【你的身份与说话风格】\n" + BuildPersona(context);
+
+    private static string BuildPersona(BuildContextResult context)
+        => string.IsNullOrWhiteSpace(context.CharacterPrompt)
             ? context.EffectiveConfig.BuildEffectiveSystemPrompt()
             : context.CharacterPrompt;
 
-        return ProactivePrompts.SystemPrompt
-            + "\n\n【本群的发言倾向】\n" + ProactivePrompts.Tendency(liveliness)
-            + "\n\n【你的身份与说话风格】\n" + persona;
+    /// <summary>
+    /// 第二阶段的联网改写。失败/超时不吞掉这次发言：调用方会退回第一阶段草稿。
+    /// 只有模型明确返回空行（核实后决定不说）才算“放弃”，记为 skipped_after_search。
+    /// 请求不带图、不带背景历史：画面信息已经在第一阶段的 image_note 里压缩好了。
+    /// </summary>
+    private async Task<SpeechRewrite> RewriteWithSearchAsync(
+        ProactiveWindow window, BuildContextResult context, ProactiveVerdict data,
+        string draft, string query, DateTime utcNow, CancellationToken ct)
+    {
+        var systemPrompt = ProactivePrompts.SpeechSystemPrompt
+            + "\n\n【你的身份与说话风格】\n" + BuildPersona(context);
+        var userPrompt = ProactivePrompts.BuildSpeechPrompt(
+            window, draft, query, ProactivePrompts.SanitizeNote(data.ImageNote), data.Topic, utcNow);
+        var startedAt = DateTime.UtcNow;
+
+        try
+        {
+            // ChatAsync 默认继承配置里的联网开关，这里正是它该生效的一步；
+            // 上游若确定性拒绝搜索，AiChatService 会自动退回不检索重发，不会把这次改写打没。
+            var response = await _ai.ChatAsync(
+                systemPrompt,
+                new List<(string Role, string Content)> { ("user", userPrompt) },
+                context.EffectiveConfig, ct);
+
+            var line = ProactivePrompts.SanitizeLine(response.Content);
+            var tookMs = (long)(DateTime.UtcNow - startedAt).TotalMilliseconds;
+            _logger.LogInformation(
+                "择机联网改写完成 group={GroupId} 用时={Ms}ms query={Query} declined={Declined}",
+                window.GroupId, tookMs, query, line is null);
+
+            return new SpeechRewrite(line, line is null, null,
+                response.PromptTokens, response.CompletionTokens);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "择机联网改写失败，退回草稿 group={GroupId}", window.GroupId);
+            return new SpeechRewrite(null, false, ex.Message, 0, 0);
+        }
     }
 
     private async Task<ProactiveChatConfig> LoadConfigAsync(CancellationToken ct)
@@ -273,7 +355,15 @@ public class ProactiveChatHostedService : BackgroundService
         string? SentMessageId = null,
         StructuredOutcome<ProactiveVerdict>? Usage = null,
         int MemoryCount = 0,
-        int MemoryPromptChars = 0);
+        int MemoryPromptChars = 0,
+        string? SearchQuery = null,
+        bool SearchUsed = false,
+        int SpeechPromptTokens = 0,
+        int SpeechCompletionTokens = 0);
+
+    /// <summary>第二阶段结果。Line 与 Declined 互斥；两者都空表示调用失败，调用方退回草稿。</summary>
+    private readonly record struct SpeechRewrite(
+        string? Line, bool Declined, string? Error, int PromptTokens, int CompletionTokens);
 
     private async Task WriteLogAsync(ProactiveWindow window, LogNote note, CancellationToken ct)
     {
@@ -290,16 +380,21 @@ public class ProactiveChatHostedService : BackgroundService
                 MemoryCount = note.MemoryCount,
                 MemoryPromptChars = note.MemoryPromptChars,
                 Outcome = note.Outcome,
-                // 留痕里的 ShouldSpeak 由"有没有 line"推导，仅供面板统计，不再是独立决策
-                ShouldSpeak = !string.IsNullOrWhiteSpace(note.Line ?? note.Data?.Line),
+                // 留痕里的 ShouldSpeak 由“最终有没有话发出去”推导。不能回退到草稿：
+                // 联网改写后放弃的那次，第一阶段虽然写了 line，也不算“本来要说话”。
+                ShouldSpeak = !string.IsNullOrWhiteSpace(note.Line),
                 Topic = Truncate(note.Data?.Topic),
-                Line = Truncate(note.Line ?? note.Data?.Line),
+                Line = Truncate(note.Line),
                 Reason = Truncate(note.Data?.Reason),
                 Detail = Truncate(note.Detail),
                 SentMessageId = note.SentMessageId,
                 Model = note.Usage?.Model,
                 PromptTokens = note.Usage?.PromptTokens ?? 0,
-                CompletionTokens = note.Usage?.CompletionTokens ?? 0
+                CompletionTokens = note.Usage?.CompletionTokens ?? 0,
+                SearchQuery = Truncate(note.SearchQuery, ProactivePrompts.MaxQueryChars),
+                SearchUsed = note.SearchUsed,
+                SpeechPromptTokens = note.SpeechPromptTokens,
+                SpeechCompletionTokens = note.SpeechCompletionTokens
             });
             await db.SaveChangesAsync(ct);
 

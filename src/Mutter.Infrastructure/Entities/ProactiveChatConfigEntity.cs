@@ -25,6 +25,9 @@ public class ProactiveChatConfigEntity
     /// <summary>单次判定调用的输出上限（与 AI 面板的 max_tokens 分开）。</summary>
     public int EvalMaxTokens { get; set; } = ProactiveChatConfig.DefaultEvalMaxTokens;
 
+    /// <summary>是否允许择机发言在改写阶段联网核实，见 <see cref="ProactiveChatConfig.WebSearchEnabled"/>。</summary>
+    public bool WebSearchEnabled { get; set; }
+
     public bool AllowActiveChannel { get; set; } = true;
     public int ActivePerGroupPerMinute { get; set; } = 3;
     public int ActivePerGroupPerDay { get; set; } = 20;

@@ -31,6 +31,19 @@
         <template #title>{{ status.deliveryHint }}</template>
       </el-alert>
 
+      <el-alert v-if="form.webSearchEnabled && status.aiWebSearchEnabled === false" type="warning"
+        :closable="false" show-icon style="margin-bottom: 12px">
+        <template #title>
+          择机联网核实已打开，但「AI 设置」里没有开启联网搜索，改写阶段不会真的检索。
+        </template>
+      </el-alert>
+      <el-alert v-else-if="form.webSearchEnabled && status.aiWebSearchConfigured === false" type="warning"
+        :closable="false" show-icon style="margin-bottom: 12px">
+        <template #title>
+          联网搜索已开启，但还没有可用的搜索通道：请回「AI 设置」完成探测并选用，否则改写会退化成普通请求。
+        </template>
+      </el-alert>
+
       <el-descriptions :column="4" border size="small">
         <el-descriptions-item label="启动以来收到">
           全量 {{ status.fullModeArrived ?? 0 }} 条 / @ {{ status.atModeArrived ?? 0 }} 条
@@ -97,6 +110,10 @@
         <el-form-item label="附图张数">
           <el-input-number v-model="form.maxAttachedImages" :min="0" :max="ceilings.attachedImages" @change="markDirty" />
           <ParamHelpButton :label="helpLabel('maxAttachedImages')" @click="openHelp('maxAttachedImages')" />
+        </el-form-item>
+        <el-form-item label="联网核实">
+          <el-switch v-model="form.webSearchEnabled" @change="markDirty" />
+          <ParamHelpButton :label="helpLabel('webSearchEnabled')" @click="openHelp('webSearchEnabled')" />
         </el-form-item>
 
         <el-divider content-position="left">判定规模（与「AI 设置」里的上下文/Token 无关）</el-divider>
@@ -194,6 +211,16 @@
             <span v-else>-</span>
           </template>
         </el-table-column>
+        <el-table-column label="联网" width="100">
+          <template #default="{ row }">
+            <el-tooltip v-if="row.searchQuery" :content="`检索词：${row.searchQuery}`" placement="top">
+              <el-tag size="small" :type="row.searchUsed ? 'primary' : 'info'">
+                {{ row.searchUsed ? '已改写' : '未启用' }}
+              </el-tag>
+            </el-tooltip>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="结论" width="120">
           <template #default="{ row }">
             <el-tag size="small" :type="outcomeType(row.outcome)">{{ outcomeLabel(row.outcome) }}</el-tag>
@@ -204,7 +231,12 @@
         </el-table-column>
         <el-table-column prop="model" label="模型" width="130" show-overflow-tooltip />
         <el-table-column label="tokens" width="90">
-          <template #default="{ row }">{{ row.promptTokens + row.completionTokens }}</template>
+          <template #default="{ row }">
+            <el-tooltip :content="`判定 ${row.promptTokens + row.completionTokens} / 改写 ${(row.speechPromptTokens || 0) + (row.speechCompletionTokens || 0)}`"
+              placement="top">
+              <span>{{ row.promptTokens + row.completionTokens + (row.speechPromptTokens || 0) + (row.speechCompletionTokens || 0) }}</span>
+            </el-tooltip>
+          </template>
         </el-table-column>
       </el-table>
       <el-pagination layout="prev, pager, next, total" :total="logTotal" :page-size="pageSize"
@@ -233,6 +265,7 @@ const outcomeMap = {
   skipped_group_cap: ['单群到量', 'warning'],
   skipped_global_cap: ['全局到量', 'warning'],
   skipped_ai_declined: ['AI 没话可说', 'info'],
+  skipped_after_search: ['联网后放弃', 'info'],
   skipped_ai_unavailable: ['AI 不可用', 'warning'],
   failed_ai_call: ['AI 调用失败', 'danger'],
   skipped_ai_truncated: ['AI 输出被截断', 'warning'],
@@ -271,7 +304,7 @@ const quietText = computed(() => {
 
 const HELP_ORDER = [
   'enabled',
-  'windowSeconds', 'windowMaxMessages', 'liveliness', 'decision', 'maxAttachedImages',
+  'windowSeconds', 'windowMaxMessages', 'liveliness', 'decision', 'maxAttachedImages', 'webSearchEnabled',
   'historyMaxMessages', 'evalMaxTokens', 'memoryInjectionEnabled',
   'cooldownMinutes', 'maxPerGroupPerDay', 'maxGlobalPerDay', 'quietHours',
   'allowActiveChannel', 'activePerGroupPerMinute', 'activePerGroupPerDay', 'activePerAccountPerMinute'
@@ -330,6 +363,17 @@ const HELP = {
       '表情包和动图不会附给模型（GIF 会把整次调用打成 500），实际附上的可能少于这个数。'
     ]
   },
+  webSearchEnabled: {
+    title: '联网核实',
+    value: (f) => (f.webSearchEnabled ? '开启' : '关闭'),
+    lines: [
+      '开启后，判定认为这句话要说时效性事实（新闻、赛事、天气、价格、日期）时，会先联网核实，再把草稿润色成最终一句。',
+      '只在模型主动给出检索词时才联网；闲聊、玩梗、情绪接话不会多打一次调用。',
+      '需要同时在「AI 设置」里开启联网搜索并选用可用通道；那边没开时，这里打开也不会真的检索。',
+      '默认关闭：升级后不会静默产生检索费用，也不会改变现有群的说话风格。',
+      '联网改写失败或超时会直接发判定阶段的草稿；核实后觉得不该说则记为「联网后放弃」。'
+    ]
+  },
   historyMaxMessages: {
     title: '背景历史条数',
     value: (f) => `${f.historyMaxMessages} 条`,
@@ -342,7 +386,7 @@ const HELP = {
     title: '判定输出上限',
     value: (f) => `${f.evalMaxTokens}`,
     lines: [
-      '判定这一步的模型输出上限，与「AI 设置」里的「最大 Tokens」互不影响。',
+      '判定与联网改写这两步共用的模型输出上限，与「AI 设置」里的「最大 Tokens」互不影响。',
       '太低会因为思考被截断而白丢一次评估，建议 5000 以上。',
       '「AI 设置」里的「上下文条数」「最大 Tokens」只作用于 @ 回复与私聊。'
     ]
@@ -432,7 +476,7 @@ function emptyForm() {
     enabled: false, windowSeconds: 60, windowMaxMessages: 12, cooldownMinutes: 45,
     maxPerGroupPerDay: 3, maxGlobalPerDay: 12, quietStartHour: 23, quietEndHour: 8,
     liveliness: 1, allowActiveChannel: true,
-    maxAttachedImages: 3, historyMaxMessages: 8, evalMaxTokens: 512,
+    maxAttachedImages: 3, historyMaxMessages: 8, evalMaxTokens: 512, webSearchEnabled: false,
     activePerGroupPerMinute: 3, activePerGroupPerDay: 20, activePerAccountPerMinute: 20,
     memoryInjectionEnabled: true,
     updatedAt: null

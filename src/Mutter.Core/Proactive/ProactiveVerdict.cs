@@ -17,6 +17,20 @@ public class ProactiveVerdict
     [JsonPropertyName("topic")]
     public string? Topic { get; set; }
 
+    /// <summary>
+    /// 需要外部实时信息时才给出的检索词；空表示这次不必联网。
+    /// 它只决定“要不要进入改写阶段”，不改变“说不说”的判断。
+    /// </summary>
+    [JsonPropertyName("query")]
+    public string? Query { get; set; }
+
+    /// <summary>
+    /// 附图的客观要点。改写那一步拿不到原图，只靠这段文字保留画面信息；
+    /// 没附图或图与话题无关时为空。
+    /// </summary>
+    [JsonPropertyName("image_note")]
+    public string? ImageNote { get; set; }
+
     /// <summary>不发言时的理由，仅用于面板留痕。</summary>
     [JsonPropertyName("reason")]
     public string? Reason { get; set; }
