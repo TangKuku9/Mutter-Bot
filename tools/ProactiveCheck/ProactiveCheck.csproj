@@ -9,7 +9,7 @@
     <ProjectReference Include="../../src/Mutter.Core/Mutter.Core.csproj" />
     <ProjectReference Include="../../src/Mutter.Infrastructure/Mutter.Infrastructure.csproj" />
     <ProjectReference Include="../../src/Mutter.Web/Mutter.Web.csproj" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.*" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.*" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.*" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.*" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.*" />
