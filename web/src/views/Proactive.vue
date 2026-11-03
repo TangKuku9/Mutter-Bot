@@ -275,6 +275,7 @@ const outcomeMap = {
   failed_rejected: ['被接收方拒收', 'danger'],
   failed_rate_limited: ['触顶频控', 'danger'],
   failed_no_channel: ['无可用的发送通道', 'danger'],
+  delivery_unknown: ['平台结果未确认', 'warning'],
   failed_api_error: ['发送失败', 'danger']
 }
 

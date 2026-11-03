@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
+using Mutter.Core.Services;
 using Mutter.Infrastructure.Data;
 
 namespace Mutter.Infrastructure.Repositories;
@@ -28,11 +29,17 @@ public class MessageRepository : IMessageRepository
 
     public async Task<List<ChatMessage>> GetGroupHistoryAsync(string groupId, int limit = 20, CancellationToken ct = default)
     {
+        var boundary = ConversationTurnScope.Current?.CreatedAt;
+        var boundaryId = await CurrentTurnRowIdAsync(ct);
         return await _dbContext.ChatMessages
             .Where(m => m.ChatType == 0 && m.GroupId == groupId)
+            .Where(m => boundary == null || m.IsBotMessage
+                || (boundaryId != null ? m.Id <= boundaryId : m.CreatedAt <= boundary))
             .OrderByDescending(m => m.CreatedAt)
+            .ThenByDescending(m => m.Id)
             .Take(limit)
             .OrderBy(m => m.CreatedAt)
+            .ThenBy(m => m.Id)
             .ToListAsync(ct);
     }
 
@@ -48,11 +55,19 @@ public class MessageRepository : IMessageRepository
 
         if (since is not null)
             query = query.Where(m => m.CreatedAt >= since);
+        if (ConversationTurnScope.Current is { } turn)
+        {
+            var boundaryId = await CurrentTurnRowIdAsync(ct);
+            query = query.Where(m => m.IsBotMessage
+                || (boundaryId != null ? m.Id <= boundaryId : m.CreatedAt <= turn.CreatedAt));
+        }
 
         return await query
             .OrderByDescending(m => m.CreatedAt)
+            .ThenByDescending(m => m.Id)
             .Take(limit)
             .OrderBy(m => m.CreatedAt)
+            .ThenBy(m => m.Id)
             .ToListAsync(ct);
     }
 
@@ -108,24 +123,21 @@ public class MessageRepository : IMessageRepository
 
     public async Task<long> CountAiCallsAsync(CancellationToken ct = default)
     {
-        return await _dbContext.ChatMessages
-            .LongCountAsync(m => m.AiModelUsed != null, ct);
+        return await _dbContext.ChatMessages.LongCountAsync(m => m.AiModelUsed != null, ct)
+            + await UnrepresentedReplies().LongCountAsync(ct);
     }
 
     public async Task<long> SumTokensAsync(CancellationToken ct = default)
     {
-        return await _dbContext.ChatMessages
-            .Where(m => m.PromptTokens != null)
-            .SumAsync(m => (long)(m.PromptTokens!.Value + (m.CompletionTokens ?? 0)), ct);
+        return await _dbContext.ChatMessages.Where(m => m.PromptTokens != null)
+            .SumAsync(m => (long)m.PromptTokens!.Value + (m.CompletionTokens ?? 0), ct)
+            + await UnrepresentedReplies().SumAsync(r => (long)r.PromptTokens + r.CompletionTokens, ct);
     }
 
     public async Task<List<DailyTokenStats>> GetDailyTokenStatsAsync(int days, CancellationToken ct = default)
     {
         var since = DateTime.UtcNow.AddDays(-days);
-        var aiMessages = await _dbContext.ChatMessages
-            .Where(m => m.PromptTokens != null && m.CreatedAt >= since)
-            .OrderBy(m => m.CreatedAt)
-            .ToListAsync(ct);
+        var aiMessages = await ReadUsageAsync(since, ct);
 
         return aiMessages
             .GroupBy(m => m.CreatedAt.ToString("yyyy-MM-dd"))
@@ -143,9 +155,7 @@ public class MessageRepository : IMessageRepository
     public async Task<List<GroupTokenStats>> GetGroupTokenStatsAsync(int days, int top, CancellationToken ct = default)
     {
         var since = DateTime.UtcNow.AddDays(-days);
-        var aiMessages = await _dbContext.ChatMessages
-            .Where(m => m.PromptTokens != null && m.ChatType == 0 && m.GroupId != null && m.CreatedAt >= since)
-            .ToListAsync(ct);
+        var aiMessages = (await ReadUsageAsync(since, ct)).Where(m => m.ChatType == 0 && m.GroupId != null).ToList();
 
         var names = await _dbContext.KnownGroups.AsNoTracking()
             .ToDictionaryAsync(g => g.GroupOpenId, g => g.Name, ct);
@@ -167,9 +177,7 @@ public class MessageRepository : IMessageRepository
     public async Task<List<UserTokenStats>> GetUserTokenStatsAsync(int days, int top, CancellationToken ct = default)
     {
         var since = DateTime.UtcNow.AddDays(-days);
-        var aiMessages = await _dbContext.ChatMessages
-            .Where(m => m.PromptTokens != null && m.CreatedAt >= since)
-            .ToListAsync(ct);
+        var aiMessages = await ReadUsageAsync(since, ct);
 
         return aiMessages
             .GroupBy(m => new { m.UserId, m.UserName })
@@ -184,4 +192,31 @@ public class MessageRepository : IMessageRepository
             .Take(top)
             .ToList();
     }
+    private async Task<long?> CurrentTurnRowIdAsync(CancellationToken ct)
+    {
+        var turn = ConversationTurnScope.Current;
+        if (turn is null) return null;
+        if (turn.MessageRowId is not null) return turn.MessageRowId;
+        return await _dbContext.ChatMessages.Where(m => m.MessageId == turn.MessageId)
+            .Select(m => (long?)m.Id).SingleOrDefaultAsync(ct);
+    }
+
+    private IQueryable<OutgoingReply> UnrepresentedReplies() =>
+        _dbContext.OutgoingReplies.Where(r => r.Model != null
+            && !_dbContext.ChatMessages.Any(m => m.MessageId == r.Id));
+
+    private async Task<List<ChatMessage>> ReadUsageAsync(DateTime since, CancellationToken ct)
+    {
+        var messages = await _dbContext.ChatMessages.AsNoTracking()
+            .Where(m => m.PromptTokens != null && m.CreatedAt >= since).ToListAsync(ct);
+        var generated = await UnrepresentedReplies().AsNoTracking().Where(r => r.CreatedAt >= since).ToListAsync(ct);
+        messages.AddRange(generated.Select(r => new ChatMessage
+        {
+            MessageId = r.Id, GroupId = r.GroupId, ChatType = r.GroupId is null ? 1 : 0,
+            UserId = r.BotId, UserName = "Bot", AiModelUsed = r.Model,
+            PromptTokens = r.PromptTokens, CompletionTokens = r.CompletionTokens, CreatedAt = r.CreatedAt
+        }));
+        return messages;
+    }
+
 }

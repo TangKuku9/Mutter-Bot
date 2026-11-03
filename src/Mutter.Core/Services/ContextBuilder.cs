@@ -11,15 +11,6 @@ public class ContextBuilder : IContextBuilder
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ContextBuilder> _logger;
 
-    /// <summary>
-    /// 字符数换算 token 的粗略比例。中文实测约 1.5 字符/token，这里取 2.0 是刻意偏保守
-    /// （宁可低估 token 数）。它只是估算，不做精确计数——项目刻意不引入 tokenizer。
-    /// </summary>
-    private const double CharsPerToken = 2.0;
-
-    /// <summary>裁剪 token 时至少保留这么多条，否则对话只剩一两句时 AI 会答非所问。</summary>
-    private const int MinRemainingMessages = 8;
-
     /// <summary>首次向数据库请求的候选条数。</summary>
     private const int InitialHistoryCandidates = 40;
 
@@ -29,12 +20,6 @@ public class ContextBuilder : IContextBuilder
     /// 条数少于面板设定值。多取一些再裁到 N，面板上的数字才作数。
     /// </summary>
     private const int MaxHistoryCandidates = 200;
-
-    /// <summary>
-    /// 输入预算的换算系数：输出上限留一部分给回复本身，其余当作输入的可用额度。
-    /// 这是个保守的估计（不是精确 token 计数），只用于兜住"对话长得离谱"的情况。
-    /// </summary>
-    private const double InputBudgetRatio = 0.75;
 
     /// <summary>
     /// 从 <paramref name="initialCandidates"/> 条候选起步、每次翻倍，直到条数够用或已到上限。
@@ -117,7 +102,7 @@ public class ContextBuilder : IContextBuilder
         }
 
         var (truncatedConversation, estimatedTokens, wasTruncated) =
-            TruncateToBudget(conversation, effectiveConfig.MaxTokens);
+            TruncateToBudget(conversation, effectiveConfig.MaxTokens, effectiveConfig.ContextWindowTokens, effectiveConfig.MaxInputTokens);
 
         // 候选数与实际条数一起打出来：缩水时一眼可见，不用再猜
         _logger.LogDebug(
@@ -165,7 +150,7 @@ public class ContextBuilder : IContextBuilder
         }
 
         var (truncatedConversation, estimatedTokens, wasTruncated) =
-            TruncateToBudget(conversation, config.MaxTokens);
+            TruncateToBudget(conversation, config.MaxTokens, config.ContextWindowTokens, config.MaxInputTokens);
 
         _logger.LogDebug("Private {UserId} context built: 候选 {Candidates} → {Count} 条, ~{Tokens} tokens",
             userId, candidatesFetched, truncatedConversation.Count, estimatedTokens);
@@ -224,6 +209,8 @@ public class ContextBuilder : IContextBuilder
 
         foreach (var msg in history)
         {
+            if (ConversationTurnScope.Current is { } turn && msg.MessageId == turn.MessageId)
+                continue;
             if (string.IsNullOrWhiteSpace(msg.PlainText))
                 continue;
 
@@ -266,46 +253,23 @@ public class ContextBuilder : IContextBuilder
         return conversation;
     }
 
-    /// <summary>
-    /// 输入预算的硬上限。由「最大 Tokens」按 <see cref="InputBudgetRatio"/> 折算而来。
-    /// 这是一个刻意保留的耦合：面板只有一个 token 旋钮，输入额度从它派生，
-    /// 而不是再给用户加第二个他更看不懂的数字。
-    /// </summary>
-    public static int InputTokenBudget(int maxTokens) => (int)(maxTokens * InputBudgetRatio);
+    /// <summary>输入预算独立于回复长度；最终系统词和图片由 AiRequestBudget 再统一检查。</summary>
+    public static int InputTokenBudget(int maxTokens) => AiRequestBudget.InputBudget(maxTokens);
 
-    /// <summary>
-    /// 把对话裁进预算。规则有两层，且顺序不能颠倒：
-    ///   1) 条数上限由 BuildConversation 负责（面板的「上下文条数」，保证语义完整）；
-    ///   2) 这里只管「太长就砍」，但绝不砍到 <see cref="MinRemainingMessages"/> 条以下 ——
-    ///      除非撞上 token 硬上限，因为那条线是防请求被上游拒掉/爆 context 的，必须服从。
-    /// 早先的写法让 8 条地板无条件压过预算，结果是"超预算"的请求照样发出去，
-    /// 跟这段代码的初衷正好相反。
-    /// </summary>
     public (List<(string Role, string Content)> Messages, int EstimatedTokens, bool WasTruncated)
-        TruncateToBudget(List<(string Role, string Content)> conversation, int maxTokens)
+        TruncateToBudget(List<(string Role, string Content)> conversation, int maxTokens,
+            int contextWindow = AiRequestBudget.DefaultContextWindow,
+            int maxInputTokens = AiRequestBudget.DefaultInputBudget)
     {
-        var tokenBudget = InputTokenBudget(maxTokens);
-
-        if (EstimateTokens(conversation) <= tokenBudget)
-            return (conversation, EstimateTokens(conversation), false);
-
-        // 先砍到 8 条，看看够不够
-        var floor = Math.Min(conversation.Count, MinRemainingMessages);
-        var truncated = conversation.TakeLast(floor).ToList();
-        var wasTruncated = truncated.Count < conversation.Count;
-
-        if (EstimateTokens(truncated) <= tokenBudget)
-            return (truncated, EstimateTokens(truncated), wasTruncated);
-
-        // 还不够小：预算优先，继续砍（此时可以低于 8 条）
-        while (truncated.Count > 1 && EstimateTokens(truncated) > tokenBudget)
-            truncated.RemoveAt(0);
-
-        return (truncated, EstimateTokens(truncated), true);
+        var budget = AiRequestBudget.InputBudget(maxTokens, contextWindow, maxInputTokens);
+        var trimmed = conversation.ToList();
+        while (trimmed.Count > 1 && EstimateTokens(trimmed) > budget)
+            trimmed.RemoveAt(0);
+        return (trimmed, EstimateTokens(trimmed), trimmed.Count != conversation.Count);
     }
 
     private static int EstimateTokens(List<(string Role, string Content)> conversation) =>
-        (int)(conversation.Sum(m => m.Content.Length) / CharsPerToken);
+        conversation.Sum(m => AiRequestBudget.EstimateText(m.Content) + 8);
 
     private static AiConfig ApplyGroupOverrides(AiConfig globalConfig, GroupConfig? groupConfig)
     {

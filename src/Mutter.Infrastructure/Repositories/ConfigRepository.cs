@@ -31,6 +31,8 @@ public class ConfigRepository : IConfigRepository
             Temperature = entity.Temperature,
             MaxTokens = entity.MaxTokens,
             MaxContextMessages = entity.MaxContextMessages,
+            ContextWindowTokens = entity.ContextWindowTokens,
+            MaxInputTokens = entity.MaxInputTokens,
             MaxAttachedImages = entity.MaxAttachedImages,
             WebSearchEnabled = entity.WebSearchEnabled,
             WebSearchEndpoint = entity.WebSearchEndpoint,
@@ -77,6 +79,8 @@ public class ConfigRepository : IConfigRepository
                 Temperature = config.Temperature,
                 MaxTokens = config.MaxTokens,
                 MaxContextMessages = config.MaxContextMessages,
+                ContextWindowTokens = config.ContextWindowTokens,
+                MaxInputTokens = config.MaxInputTokens,
                 MaxAttachedImages = config.MaxAttachedImages,
                 WebSearchEnabled = config.WebSearchEnabled,
                 WebSearchEndpoint = config.WebSearchEndpoint,
@@ -98,6 +102,8 @@ public class ConfigRepository : IConfigRepository
             entity.Temperature = config.Temperature;
             entity.MaxTokens = config.MaxTokens;
             entity.MaxContextMessages = config.MaxContextMessages;
+            entity.ContextWindowTokens = config.ContextWindowTokens;
+            entity.MaxInputTokens = config.MaxInputTokens;
             entity.MaxAttachedImages = config.MaxAttachedImages;
             entity.WebSearchEnabled = config.WebSearchEnabled;
             entity.WebSearchEndpoint = config.WebSearchEndpoint;

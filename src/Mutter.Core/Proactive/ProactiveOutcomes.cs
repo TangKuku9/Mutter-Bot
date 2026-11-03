@@ -28,4 +28,5 @@ public static class ProactiveOutcomes
     public const string FailedRateLimited = "failed_rate_limited";
     public const string FailedNoChannel = "failed_no_channel";
     public const string FailedApiError = "failed_api_error";
+    public const string DeliveryUnknown = "delivery_unknown";
 }

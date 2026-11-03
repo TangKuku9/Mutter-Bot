@@ -30,20 +30,19 @@ public class ActiveMessageService : IActiveMessageService
     private readonly RichUiCapability _richUi;
     private readonly ILogger<ActiveMessageService> _logger;
 
-    private readonly object _rateGate = new();
-    private readonly Dictionary<string, Queue<DateTime>> _minuteWindows = new();
-    private readonly Dictionary<string, (string Day, int Count)> _dailyCounters = new();
+    private readonly TimeProvider _clock;
 
     public ActiveMessageService(
         IQqBotApiService apiService,
         IServiceScopeFactory scopeFactory,
         RichUiCapability richUi,
-        ILogger<ActiveMessageService> logger)
+        ILogger<ActiveMessageService> logger, TimeProvider? clock = null)
     {
         _apiService = apiService;
         _scopeFactory = scopeFactory;
         _richUi = richUi;
         _logger = logger;
+        _clock = clock ?? TimeProvider.System;
     }
 
     public async Task<ActiveMessageSendResult> SendGroupActiveAsync(string groupOpenId, string content, CancellationToken ct = default)
@@ -93,7 +92,7 @@ public class ActiveMessageService : IActiveMessageService
 
     private async Task<ActiveMessageSendResult> SendActiveAsync(string key, OutboundMessage msg, string scope, CancellationToken ct)
     {
-        var month = DateTime.UtcNow.ToString("yyyy-MM");
+        var month = _clock.GetUtcNow().UtcDateTime.ToString("yyyy-MM");
 
         using var serviceScope = _scopeFactory.CreateScope();
         var db = serviceScope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -109,16 +108,13 @@ public class ActiveMessageService : IActiveMessageService
         }
 
         var limits = ResolveLimits(scope, config);
-        if (!TryAcquire(key, scope, limits, ct))
-        {
-            _logger.LogWarning("主动消息触发自设频控，跳过发送 subject={Scope} key={Key}", scope, key);
-            return new ActiveMessageSendResult { Success = false, Reason = "rate_limited" };
-        }
-
         var attempt = msg;
         string? sentId = null;
         for (var send = 0; ; send++)
         {
+            if (!await TryAcquireAsync(db, key, scope, limits, ct))
+                return new ActiveMessageSendResult { Success = false, Reason = "rate_limited" };
+            ct.ThrowIfCancellationRequested();
             try
             {
                 if (scope == ScopeGroup)
@@ -133,7 +129,7 @@ public class ActiveMessageService : IActiveMessageService
                                             && (QqApiErrorCodes.IsMarkdownDenied(ex.ErrCode)
                                                 || QqApiErrorCodes.IsKeyboardDenied(ex.ErrCode)))
             {
-                // 富能力被拒：记降级态并退回纯文本重发，仍只计 1 条主动配额
+                // 富能力被拒：退回纯文本；每次真实 HTTP 尝试均先持久化占用频控
                 var markdownBroken = QqApiErrorCodes.IsMarkdownDenied(ex.ErrCode);
                 _richUi.ReportDenied(markdownBroken ? RichUiCapability.CapMarkdown : RichUiCapability.CapKeyboard, ex.ErrCode);
                 _richUi.CountDegradeRetry();
@@ -149,7 +145,8 @@ public class ActiveMessageService : IActiveMessageService
                 _logger.LogWarning(ex, "发送主动消息失败 subject={Scope} key={Key} errCode={ErrCode}", scope, key, ex.ErrCode);
                 if (RejectErrCodes.Contains(ex.ErrCode))
                 {
-                    await MarkRejectedAsync(key, scope, ct);
+                    try { await MarkRejectedAsync(key, scope, ct); }
+                    catch (Exception persistError) { _logger.LogError(persistError, "接收方拒绝状态写入失败"); }
                     return new ActiveMessageSendResult { Success = false, Reason = "rejected" };
                 }
                 // 40034100 主动消息超频控：官方侧限流，记下来便于面板区分「被平台拦」与「被自己拦」
@@ -161,17 +158,29 @@ public class ActiveMessageService : IActiveMessageService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "发送主动消息异常 subject={Scope} key={Key}", scope, key);
-                return new ActiveMessageSendResult { Success = false, Reason = "error", ErrorMessage = ex.Message };
+                return new ActiveMessageSendResult { Success = false, Reason = "unknown", ErrorMessage = ex.Message };
             }
         }
 
-        await UpsertQuotaAsync(db, key, scope, month, e => { e.Count++; e.LastSentAt = DateTime.UtcNow; }, ct);
+        // 平台已确认发送；月度展示计数失败不能反转发送结果。
+        try
+        {
+            using var receiptDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var now = _clock.GetUtcNow().UtcDateTime;
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO "ActiveMessageQuotas" ("Key", "Scope", "Month", "Count", "Rejected", "LastSentAt")
+                VALUES ({key}, {scope}, {month}, 1, 0, {now})
+                ON CONFLICT ("Key", "Scope", "Month") DO UPDATE SET
+                    "Count" = "Count" + 1, "LastSentAt" = excluded."LastSentAt"
+                """, receiptDeadline.Token);
+        }
+        catch (Exception ex) { _logger.LogError(ex, "主动消息已发送，月累计写入失败 subject={Scope} key={Key}", scope, key); }
         return new ActiveMessageSendResult { Success = true, Reason = "ok", MessageId = sentId };
     }
 
     private async Task<ActiveMessageQuotaStatus> GetQuotaStatusAsync(string key, string scope, CancellationToken ct)
     {
-        var month = DateTime.UtcNow.ToString("yyyy-MM");
+        var month = _clock.GetUtcNow().UtcDateTime.ToString("yyyy-MM");
         using var serviceScope = _scopeFactory.CreateScope();
         var db = serviceScope.ServiceProvider.GetRequiredService<AppDbContext>();
         var config = await LoadLimitsAsync(serviceScope, ct);
@@ -180,7 +189,7 @@ public class ActiveMessageService : IActiveMessageService
         var entity = await db.ActiveMessageQuotas
             .FirstOrDefaultAsync(q => q.Key == key && q.Scope == scope && q.Month == month, ct);
 
-        var (usedToday, sentLastMinute) = PeekCounters(key, scope);
+        var (usedToday, sentLastMinute) = await PeekCountersAsync(db, key, scope, ct);
 
         return new ActiveMessageQuotaStatus
         {
@@ -196,7 +205,7 @@ public class ActiveMessageService : IActiveMessageService
 
     private async Task MarkRejectedAsync(string key, string scope, CancellationToken ct)
     {
-        var month = DateTime.UtcNow.ToString("yyyy-MM");
+        var month = _clock.GetUtcNow().UtcDateTime.ToString("yyyy-MM");
         using var serviceScope = _scopeFactory.CreateScope();
         var db = serviceScope.ServiceProvider.GetRequiredService<AppDbContext>();
         await UpsertQuotaAsync(db, key, scope, month, e => e.Rejected = true, ct);
@@ -205,7 +214,7 @@ public class ActiveMessageService : IActiveMessageService
 
     private async Task ClearRejectedAsync(string key, string scope, CancellationToken ct)
     {
-        var month = DateTime.UtcNow.ToString("yyyy-MM");
+        var month = _clock.GetUtcNow().UtcDateTime.ToString("yyyy-MM");
         using var serviceScope = _scopeFactory.CreateScope();
         var db = serviceScope.ServiceProvider.GetRequiredService<AppDbContext>();
         var entity = await db.ActiveMessageQuotas
@@ -232,77 +241,37 @@ public class ActiveMessageService : IActiveMessageService
     /// 取令牌：先查目标（群/用户）的分钟与日限，再查账号整体分钟限。
     /// 按「尝试」而非「成功」计数——官方频控同样按请求计，成功计数会让重试把额度打满后仍被平台拒。
     /// </summary>
-    private bool TryAcquire(
-        string key, string scope, (int PerMinute, int PerDay, int AccountPerMinute) limits, CancellationToken ct)
+    private async Task<bool> TryAcquireAsync(
+        AppDbContext db, string key, string scope,
+        (int PerMinute, int PerDay, int AccountPerMinute) limits, CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
-        var target = $"{scope}:{key}";
-        var day = now.AddHours(8).ToString("yyyy-MM-dd"); // 官方日界按北京时间的自然日
-
-        lock (_rateGate)
-        {
-            if (!Allow(target, limits.PerMinute, limits.PerDay, now, day)) return false;
-            // 账号整体分钟限：群与私聊共用同一条发送链路，用同一计数器
-            if (!Allow("account", limits.AccountPerMinute, int.MaxValue, now, day)) return false;
-
-            Touch(target, now, day);
-            Touch("account", now, day);
-            return true;
-        }
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var minute = now.AddMinutes(-1);
+        var day = now.AddHours(8).Date.AddHours(-8);
+        var id = Guid.NewGuid().ToString("N");
+        // 一条 SQLite 写语句原子完成检查与占用；多个服务实例也不会越过共享配额。
+        var inserted = await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO "ActiveMessageAttempts" ("Id", "Key", "Scope", "AttemptedAt")
+            SELECT {id}, {key}, {scope}, {now}
+            WHERE (SELECT COUNT(*) FROM "ActiveMessageAttempts"
+                   WHERE "Key" = {key} AND "Scope" = {scope} AND "AttemptedAt" >= {minute}) < {limits.PerMinute}
+              AND (SELECT COUNT(*) FROM "ActiveMessageAttempts"
+                   WHERE "Key" = {key} AND "Scope" = {scope} AND "AttemptedAt" >= {day}) < {limits.PerDay}
+              AND (SELECT COUNT(*) FROM "ActiveMessageAttempts"
+                   WHERE "AttemptedAt" >= {minute}) < {limits.AccountPerMinute}
+            """, ct);
+        return inserted == 1;
     }
 
-    private bool Allow(string counterKey, int perMinute, int perDay, DateTime now, string day)
+    private async Task<(int UsedToday, int SentLastMinute)> PeekCountersAsync(
+        AppDbContext db, string key, string scope, CancellationToken ct)
     {
-        if (_minuteWindows.TryGetValue(counterKey, out var window))
-        {
-            while (window.Count > 0 && (now - window.Peek()) > TimeSpan.FromMinutes(1))
-                window.Dequeue();
-            if (window.Count >= perMinute) return false;
-        }
-
-        if (perDay < int.MaxValue && _dailyCounters.TryGetValue(counterKey, out var daily)
-            && daily.Day == day && daily.Count >= perDay)
-            return false;
-
-        return true;
-    }
-
-    private void Touch(string counterKey, DateTime now, string day)
-    {
-        if (!_minuteWindows.TryGetValue(counterKey, out var window))
-        {
-            window = new Queue<DateTime>();
-            _minuteWindows[counterKey] = window;
-        }
-        window.Enqueue(now);
-
-        var daily = _dailyCounters.TryGetValue(counterKey, out var existing) && existing.Day == day
-            ? existing.Count + 1
-            : 1;
-        _dailyCounters[counterKey] = (day, daily);
-    }
-
-    private (int UsedToday, int SentLastMinute) PeekCounters(string key, string scope)
-    {
-        var counterKey = $"{scope}:{key}";
-        var now = DateTime.UtcNow;
-        var day = now.AddHours(8).ToString("yyyy-MM-dd");
-
-        lock (_rateGate)
-        {
-            var usedToday = _dailyCounters.TryGetValue(counterKey, out var daily) && daily.Day == day
-                ? daily.Count : 0;
-
-            var sentLastMinute = 0;
-            if (_minuteWindows.TryGetValue(counterKey, out var window))
-            {
-                while (window.Count > 0 && (now - window.Peek()) > TimeSpan.FromMinutes(1))
-                    window.Dequeue();
-                sentLastMinute = window.Count;
-            }
-
-            return (usedToday, sentLastMinute);
-        }
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var day = now.AddHours(8).Date.AddHours(-8);
+        var minute = now.AddMinutes(-1);
+        var query = db.ActiveMessageAttempts.Where(a => a.Key == key && a.Scope == scope);
+        return (await query.CountAsync(a => a.AttemptedAt >= day, ct),
+            await query.CountAsync(a => a.AttemptedAt >= minute, ct));
     }
 
     private static async Task UpsertQuotaAsync(

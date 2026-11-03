@@ -30,6 +30,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
 
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
+    private Task? _connectionTask;
     private int _disposed;
     private Task? _heartbeatTask;
 
@@ -72,7 +73,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
     }
 
     public event EventHandler<bool>? ConnectionStateChanged;
-    public event EventHandler<QqDispatch>? DispatchReceived;
+    public event Func<QqDispatch, CancellationToken, Task>? DispatchReceived;
 
     /// <summary>
     /// 本次进程启动以来各事件类型的到达计数。面板用它区分“平台没下发全量消息”
@@ -103,8 +104,10 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
 
     public async Task ConnectAsync(CancellationToken ct = default)
     {
+        if (_connectionTask is { IsCompleted: false }) return;
+        _cts?.Dispose();
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _ = Task.Run(() => ConnectWithRetryAsync(_cts.Token));
+        _connectionTask = ConnectWithRetryAsync(_cts.Token);
         await WaitForConnectionAsync(_cts.Token);
     }
 
@@ -323,7 +326,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
                 break;
 
             case GatewayOp.Dispatch:
-                HandleDispatch(payload);
+                await HandleDispatchAsync(payload, ct);
                 break;
 
             case GatewayOp.HeartbeatAck:
@@ -351,7 +354,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
         }
     }
 
-    private void HandleDispatch(GatewayPayload payload)
+    private async Task HandleDispatchAsync(GatewayPayload payload, CancellationToken ct)
     {
         if (payload.S.HasValue)
             SetLastSeq(payload.S.Value);
@@ -400,7 +403,9 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
                 _logger.LogInformation("首次收到 GROUP_AT_MESSAGE_CREATE：@ 机器人事件正常下发");
             try
             {
-                DispatchReceived?.Invoke(this, dispatch);
+                if (DispatchReceived is { } handlers)
+                    foreach (var subscriber in handlers.GetInvocationList().Cast<Func<QqDispatch, CancellationToken, Task>>())
+                        await subscriber(dispatch, ct);
             }
             catch (Exception ex)
             {
@@ -621,6 +626,11 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
             }
         }
 
+        if (_connectionTask is not null)
+        {
+            try { await _connectionTask.WaitAsync(ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        }
         _identified = false;
         IsConnected = false;
         _logger.LogInformation("QQ Gateway 已断开");

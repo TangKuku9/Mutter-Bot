@@ -6,6 +6,10 @@ namespace Mutter.Infrastructure.Data;
 
 public class AppDbContext : DbContext
 {
+    public AppDbContext() { }
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+    public DbSet<OutgoingReply> OutgoingReplies => Set<OutgoingReply>();
+    public DbSet<ActiveMessageAttempt> ActiveMessageAttempts => Set<ActiveMessageAttempt>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<GroupInfo> GroupInfos => Set<GroupInfo>();
     public DbSet<GroupConfigEntity> GroupConfigs => Set<GroupConfigEntity>();
@@ -28,11 +32,22 @@ public class AppDbContext : DbContext
     protected override void OnConfiguring(DbContextOptionsBuilder options)
     {
         var dbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mutter-bot.db");
-        options.UseSqlite($"Data Source={dbPath}");
+        if (!options.IsConfigured) options.UseSqlite($"Data Source={dbPath}");
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<OutgoingReply>(e =>
+        {
+            e.HasKey(r => r.Id);
+            e.HasIndex(r => new { r.IsProactive, r.GroupId, r.CreatedAt });
+        });
+        modelBuilder.Entity<ActiveMessageAttempt>(e =>
+        {
+            e.HasKey(r => r.Id);
+            e.HasIndex(r => new { r.Scope, r.Key, r.AttemptedAt });
+            e.HasIndex(r => r.AttemptedAt);
+        });
         modelBuilder.Entity<ChatMessage>(e =>
         {
             e.HasKey(x => x.Id);
@@ -110,6 +125,7 @@ public class AppDbContext : DbContext
 
     public async Task EnsureSchemaUpgradedAsync(CancellationToken ct = default)
     {
+        await EnsureRuntimeSchemaAsync(ct);
         // 历史遗留修复：GroupConfigs / PrivateChatConfigs 是从 Windows 版带过来的，主键建成了
         // INTEGER AUTOINCREMENT（那时的群号是纯数字）。QQ 官方现在下发的是十六进制 openid，
         // 而 EF 按 string 映射这两个键 → 任何新群/新好友的配置写入都会 "datatype mismatch" 500。
@@ -614,6 +630,41 @@ public class AppDbContext : DbContext
         }
 
         await BackfillFacePlaceholdersAsync(ct);
+    }
+
+    /// <summary>新增表和预算列，保留所有既有业务表与数据。</summary>
+    private async Task EnsureRuntimeSchemaAsync(CancellationToken ct)
+    {
+        await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "OutgoingReplies" (
+                "Id" TEXT NOT NULL PRIMARY KEY,
+                "GroupId" TEXT, "PeerUserId" TEXT, "BotId" TEXT NOT NULL,
+                "ReplyToMessageId" TEXT, "Content" TEXT NOT NULL, "IsProactive" INTEGER NOT NULL,
+                "Model" TEXT, "PromptTokens" INTEGER NOT NULL, "CompletionTokens" INTEGER NOT NULL,
+                "State" TEXT NOT NULL, "PlatformMessageId" TEXT, "Channel" TEXT, "Detail" TEXT,
+                "CreatedAt" TEXT NOT NULL, "CompletedAt" TEXT
+            );
+            CREATE INDEX IF NOT EXISTS "IX_OutgoingReplies_Proactive_Group_Time"
+                ON "OutgoingReplies" ("IsProactive", "GroupId", "CreatedAt");
+            CREATE TABLE IF NOT EXISTS "ActiveMessageAttempts" (
+                "Id" TEXT NOT NULL PRIMARY KEY, "Key" TEXT NOT NULL,
+                "Scope" TEXT NOT NULL, "AttemptedAt" TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS "IX_ActiveMessageAttempts_Subject_Time"
+                ON "ActiveMessageAttempts" ("Scope", "Key", "AttemptedAt");
+            CREATE INDEX IF NOT EXISTS "IX_ActiveMessageAttempts_Time"
+                ON "ActiveMessageAttempts" ("AttemptedAt");
+            """, ct);
+        foreach (var sql in new[]
+        {
+            "ALTER TABLE \"AiConfigs\" ADD COLUMN \"ContextWindowTokens\" INTEGER NOT NULL DEFAULT 32768",
+            "ALTER TABLE \"AiConfigs\" ADD COLUMN \"MaxInputTokens\" INTEGER NOT NULL DEFAULT 16384"
+        })
+        {
+            try { await Database.ExecuteSqlRawAsync(sql, ct); }
+            catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 1
+                && ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }
+        }
     }
 
     /// <summary>
