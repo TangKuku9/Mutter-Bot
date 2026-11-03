@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
+using Mutter.Infrastructure.Repositories;
 
 namespace Mutter.Web.Controllers;
 
@@ -24,11 +25,11 @@ public class GroupsController : ControllerBase
     public async Task<IActionResult> GetGroups(CancellationToken ct)
     {
         var groups = await _db.KnownGroups.AsNoTracking().ToListAsync(ct);
-        var configs = await _db.GroupConfigs.AsNoTracking().ToListAsync(ct);
+        var configs = await _db.GroupConfigs.AsNoTracking().ToDictionaryAsync(c => c.GroupId, ct);
 
         var result = groups.Select(g =>
         {
-            var cfg = configs.FirstOrDefault(c => c.GroupId == g.GroupOpenId);
+            configs.TryGetValue(g.GroupOpenId, out var cfg);
             return new
             {
                 g.GroupOpenId,
@@ -66,6 +67,8 @@ public class GroupsController : ControllerBase
 
         /// <summary>群级群记忆注入覆盖：null = 跟随全局。</summary>
         public bool? MemoryInjectionEnabled { get; set; }
+        public bool UpdateMemory { get; set; }
+        public string? GroupMemory { get; set; }
     }
 
     /// <summary>更新指定群的配置（不存在则创建）。</summary>
@@ -80,11 +83,12 @@ public class GroupsController : ControllerBase
         }
 
         entity.IsEnabled = dto.IsEnabled;
-        entity.TriggerMode = dto.TriggerMode;
+        entity.TriggerMode = dto.TriggerMode == 2 ? 2 : 0;
         entity.AiProactiveEnabled = dto.AiProactiveEnabled;
         entity.BotMentionOpenId = string.IsNullOrWhiteSpace(dto.BotMentionOpenId) ? null : dto.BotMentionOpenId.Trim();
         entity.ActiveCharacter = dto.ActiveCharacter;
-        entity.CustomTemperature = dto.CustomTemperature;
+        entity.CustomTemperature = dto.CustomTemperature is { } temperature && double.IsFinite(temperature)
+            ? Math.Clamp(temperature, 0, 2) : null;
         entity.CustomSystemPrompt = dto.CustomSystemPrompt;
         entity.MemoryInjectionEnabled = dto.MemoryInjectionEnabled;
 
@@ -96,6 +100,20 @@ public class GroupsController : ControllerBase
             _db.KnownGroups.Add(knownGroup);
         }
         knownGroup.Name = string.IsNullOrWhiteSpace(dto.Name) ? null : dto.Name.Trim();
+
+        // 群设置、名称和记忆共用一次 SaveChanges 的事务，任何一步失败都不落库。
+        if (dto.UpdateMemory)
+        {
+            var memory = await _db.GroupMemories.SingleOrDefaultAsync(m => m.GroupId == groupId, ct);
+            if (memory is null)
+            {
+                memory = new GroupMemoryEntity { GroupId = groupId };
+                _db.GroupMemories.Add(memory);
+            }
+            memory.Summary = GroupMemoryRepository.NormalizeSummary(dto.GroupMemory);
+            memory.Version++;
+            memory.UpdatedAt = DateTime.UtcNow;
+        }
 
         await _db.SaveChangesAsync(ct);
         return Ok(new { message = "群配置已保存" });

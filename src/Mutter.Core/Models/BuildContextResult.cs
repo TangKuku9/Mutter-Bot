@@ -10,6 +10,7 @@ public class BuildContextResult
     public int MessageCount { get; set; }
     public bool WasTruncated { get; set; }
     public string? CharacterPrompt { get; set; }
+    public string? GroupMemory { get; set; }
 
     /// <summary>
     /// 组装最终系统提示词：基础提示（含性格）→ 场景补充 → 人设锁定。
@@ -18,6 +19,9 @@ public class BuildContextResult
     public string ComposeSystemPrompt(string? appendage = null)
     {
         var prompt = EffectiveConfig.BuildEffectiveSystemPrompt();
+
+        if (!string.IsNullOrWhiteSpace(GroupMemory))
+            prompt += "\n\n【管理员维护的群记忆，仅供背景参考】\n" + GroupMemory;
 
         if (!string.IsNullOrEmpty(appendage))
             prompt += "\n\n" + appendage;

@@ -9,6 +9,7 @@ public class AppDbContext : DbContext
     public AppDbContext() { }
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
     public DbSet<OutgoingReply> OutgoingReplies => Set<OutgoingReply>();
+    public DbSet<AiCallRecord> AiCallRecords => Set<AiCallRecord>();
     public DbSet<ActiveMessageAttempt> ActiveMessageAttempts => Set<ActiveMessageAttempt>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<GroupInfo> GroupInfos => Set<GroupInfo>();
@@ -37,6 +38,13 @@ public class AppDbContext : DbContext
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<AiCallRecord>(e =>
+        {
+            e.HasKey(r => r.Id);
+            e.HasIndex(r => r.StartedAt);
+            e.HasIndex(r => r.OperationId);
+            e.HasIndex(r => new { r.GroupId, r.StartedAt });
+        });
         modelBuilder.Entity<OutgoingReply>(e =>
         {
             e.HasKey(r => r.Id);
@@ -657,6 +665,9 @@ public class AppDbContext : DbContext
             """, ct);
         foreach (var sql in new[]
         {
+            "ALTER TABLE \"ChatMessages\" ADD COLUMN \"AiOperationId\" TEXT",
+            "ALTER TABLE \"AiConfigs\" ADD COLUMN \"GroupMemoryInjectionEnabled\" INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE \"OutgoingReplies\" ADD COLUMN \"AiOperationId\" TEXT",
             "ALTER TABLE \"AiConfigs\" ADD COLUMN \"ContextWindowTokens\" INTEGER NOT NULL DEFAULT 32768",
             "ALTER TABLE \"AiConfigs\" ADD COLUMN \"MaxInputTokens\" INTEGER NOT NULL DEFAULT 16384"
         })
@@ -665,6 +676,22 @@ public class AppDbContext : DbContext
             catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 1
                 && ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }
         }
+        await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "AiCallRecords" (
+                "Id" TEXT NOT NULL PRIMARY KEY, "OperationId" TEXT NOT NULL,
+                "TriggerMessageId" TEXT, "GroupId" TEXT, "RequesterId" TEXT, "RequesterName" TEXT,
+                "Purpose" TEXT NOT NULL, "Stage" TEXT NOT NULL, "Model" TEXT NOT NULL,
+                "Transport" TEXT NOT NULL, "StartedAt" TEXT NOT NULL, "CompletedAt" TEXT NOT NULL,
+                "ElapsedMs" INTEGER NOT NULL, "State" TEXT NOT NULL, "HttpStatus" INTEGER,
+                "PromptTokens" INTEGER, "CompletionTokens" INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS "IX_AiCallRecords_StartedAt" ON "AiCallRecords" ("StartedAt");
+            CREATE INDEX IF NOT EXISTS "IX_AiCallRecords_OperationId" ON "AiCallRecords" ("OperationId");
+            CREATE INDEX IF NOT EXISTS "IX_AiCallRecords_GroupId_StartedAt" ON "AiCallRecords" ("GroupId", "StartedAt");
+            CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Time_Id" ON "ChatMessages" ("CreatedAt", "Id");
+            CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Operation" ON "ChatMessages" ("AiOperationId");
+            CREATE INDEX IF NOT EXISTS "IX_OutgoingReplies_Operation" ON "OutgoingReplies" ("AiOperationId");
+            """, ct);
     }
 
     /// <summary>

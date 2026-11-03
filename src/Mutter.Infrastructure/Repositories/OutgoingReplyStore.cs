@@ -92,6 +92,7 @@ public sealed class OutgoingReplyStore(IServiceScopeFactory scopes, TimeProvider
                     GroupId = reply.GroupId, PeerUserId = reply.PeerUserId,
                     UserId = reply.BotId, UserName = "Bot", PlainText = reply.Content,
                     IsBotMessage = true, IsProactive = reply.IsProactive, AiModelUsed = reply.Model,
+                    AiOperationId = reply.AiOperationId,
                     PromptTokens = reply.Model is null ? null : reply.PromptTokens,
                     CompletionTokens = reply.Model is null ? null : reply.CompletionTokens,
                     CreatedAt = entity.CompletedAt.Value

@@ -204,7 +204,7 @@ dotnet build Mutter.sln
 项目提供了专用的回归自检工具：
 
 ```bash
-# 运行纯逻辑回归段（1~3 段，无任何数据库依赖，CI 必跑项）
+# 运行逻辑与运行时回归（仅使用合成临时库与假 HTTP，CI 必跑项）
 dotnet run --project tools/ProactiveCheck -- --logic-only
 
 # 全量自检（额外测试 SQLite 迁移幂等与 DI 装配，需传入指定测试库路径）
@@ -219,6 +219,7 @@ dotnet run --project tools/ProactiveCheck -- <sqlite-db-path>
 
 ```bash
 cd web
+npm test
 npm run build
 ```
 
@@ -226,7 +227,7 @@ npm run build
 
 - [ ] `dotnet build Mutter.sln` 报告 **0 warning / 0 error**
 - [ ] `dotnet run --project tools/ProactiveCheck -- --logic-only` 运行全绿通过
-- [ ] 若修改了 `web/` 前端，`npm run build` 打包通过
+- [ ] 若修改了 `web/` 前端，`npm test` 与 `npm run build` 通过
 - [ ] `git status` 检查：没有误加入 `wwwroot/`、`*.db`、`appsettings.json` 等生成物或敏感文件
 - [ ] 提交历史干净，没有混杂无意义的代码格式化或与本 PR 目标无关的改动
 
@@ -319,7 +320,7 @@ npm run build
 
 每个向本仓库发起的 PR 及推送均会自动执行 GitHub Actions [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：
 1. **构建与自检 (.NET)**：在 Linux 环境下验证 `dotnet restore` + `dotnet build`（含警告即错误）+ `ProactiveCheck --logic-only`。
-2. **面板前端构建**：在 Node 20 环境下执行 `npm ci && npm run build`，并校验 `.NET` 与前端版本号一致。
+2. **面板前端构建**：在 Node 20 环境下执行 `npm ci && npm test && npm run build`，并校验 `.NET` 与前端版本号一致。
 3. **Release**：推送 `v*` 标签时执行 [`.github/workflows/release.yml`](.github/workflows/release.yml)，流程见 7.6。
 
 ### 7.6 版本号与 Release（维护者）

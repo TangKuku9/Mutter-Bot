@@ -4,13 +4,15 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Mutter.Core.Models;
+using Mutter.Core.Interfaces;
 using Mutter.Core.Models.Config;
 using Mutter.Core.Services;
 
 namespace Mutter.Infrastructure.Ai;
 
 /// <summary>现有兼容协议的 HTTP 实现；不拥有搜索决策或工作流重试。</summary>
-public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelTransport> logger)
+public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelTransport> logger,
+    IAiCallStore? callStore = null, TimeProvider? clock = null)
 {
     private readonly HttpClient _httpClient = httpClient;
     private readonly ILogger _logger = logger;
@@ -32,7 +34,7 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
         try
         {
             AiCallScope.Current?.BeginAttempt();
-            response = await _httpClient.SendAsync(httpRequest, ct);
+            response = await SendRecordedAsync(httpRequest, config, "openai", searchShape is not null, ct);
         }
         catch (HttpRequestException ex)
         {
@@ -115,7 +117,7 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
             try
             {
                 AiCallScope.Current?.BeginAttempt();
-            response = await _httpClient.SendAsync(httpRequest, ct);
+                response = await SendRecordedAsync(httpRequest, config, "gemini", requestBody.ContainsKey("tools"), ct);
             }
             catch (HttpRequestException ex)
             {
@@ -180,6 +182,11 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
 
         throw new AiRequestException(404, $"未找到 Gemini 原生端点：{lastError}");
     }
+
+    private Task<HttpResponseMessage> SendRecordedAsync(HttpRequestMessage request, AiConfig config,
+        string transport, bool search, CancellationToken ct) =>
+        AiHttpAudit.SendAsync(_httpClient, request, config.ModelName, transport, ct, callStore, logger, clock,
+            stage: search ? "search" : null);
 
     private static string? ReadFinishReason(JsonElement json)
     {

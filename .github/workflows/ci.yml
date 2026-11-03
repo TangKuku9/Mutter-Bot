@@ -29,8 +29,8 @@ jobs:
       - name: Build
         run: dotnet build Mutter.sln -c Release --no-restore
 
-      # 第 1~3 段是纯逻辑，不需要数据库；第 4~6 段需要真实库，CI 里跑不了。
-      - name: 自检（不依赖数据库的逻辑段）
+      # 逻辑与运行时回归只使用合成临时库及假 HTTP；第 4~6 段仍需指定测试库。
+      - name: 自检（逻辑与合成运行时）
         run: dotnet run --project tools/ProactiveCheck -c Release --no-build -- --logic-only
 
   web:
@@ -58,6 +58,10 @@ jobs:
           test "$dotnet_version" = "$web_version"
 
       # 构建产物 wwwroot 不入库，这里只验证 web/ 源码能构建通过。
+      - name: 面板交互逻辑自检
+        working-directory: web
+        run: npm test
+
       - name: Build
         working-directory: web
         run: npm run build

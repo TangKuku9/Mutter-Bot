@@ -113,6 +113,12 @@ public class ContextBuilder : IContextBuilder
             effectiveConfig, groupConfig?.ActiveCharacter,
             await configRepo.GetCustomCharactersAsync(ct));
 
+        // 主动工作流传入 overrideConfig，并自行按它的独立开关注入，避免重复拼接。
+        var memory = overrideConfig is null && effectiveConfig.GroupMemoryInjectionEnabled
+            && groupConfig?.MemoryInjectionEnabled != false
+            ? await scope.ServiceProvider.GetRequiredService<IGroupMemoryRepository>().GetAsync(groupId, ct)
+            : null;
+
         return new BuildContextResult
         {
             Messages = truncatedConversation,
@@ -120,6 +126,7 @@ public class ContextBuilder : IContextBuilder
             EstimatedTokens = estimatedTokens,
             MessageCount = truncatedConversation.Count,
             WasTruncated = wasTruncated,
+            GroupMemory = memory?.Summary,
             CharacterPrompt = characterPrompt
         };
     }

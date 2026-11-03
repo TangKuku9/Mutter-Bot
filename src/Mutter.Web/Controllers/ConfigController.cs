@@ -78,6 +78,7 @@ public class ConfigController : ControllerBase
             MaxContextMessages = entity.MaxContextMessages,
             ContextWindowTokens = entity.ContextWindowTokens,
             MaxInputTokens = entity.MaxInputTokens,
+            GroupMemoryInjectionEnabled = entity.GroupMemoryInjectionEnabled,
             MaxAttachedImages = entity.MaxAttachedImages,
             WebSearchEnabled = entity.WebSearchEnabled,
             WebSearchEndpoint = entity.WebSearchEndpoint,
@@ -362,6 +363,7 @@ public class ConfigController : ControllerBase
         entity.MaxContextMessages = dto.MaxContextMessages;
         entity.ContextWindowTokens = dto.ContextWindowTokens;
         entity.MaxInputTokens = dto.MaxInputTokens;
+        entity.GroupMemoryInjectionEnabled = dto.GroupMemoryInjectionEnabled;
         entity.MaxAttachedImages = dto.MaxAttachedImages;
         entity.WebSearchEnabled = dto.WebSearchEnabled;
         entity.WebSearchImageMode = dto.WebSearchImageMode;
@@ -440,6 +442,7 @@ public class ConfigController : ControllerBase
             MaxContextMessages = entity.MaxContextMessages,
             ContextWindowTokens = entity.ContextWindowTokens,
             MaxInputTokens = entity.MaxInputTokens,
+            GroupMemoryInjectionEnabled = entity.GroupMemoryInjectionEnabled,
             MaxAttachedImages = entity.MaxAttachedImages,
             WebSearchEnabled = entity.WebSearchEnabled,
             WebSearchEndpoint = entity.WebSearchEndpoint,
@@ -462,6 +465,7 @@ public class ConfigController : ControllerBase
         MaxContextMessages = input.MaxContextMessages,
         ContextWindowTokens = input.ContextWindowTokens,
         MaxInputTokens = input.MaxInputTokens,
+        GroupMemoryInjectionEnabled = input.GroupMemoryInjectionEnabled,
         MaxAttachedImages = input.MaxAttachedImages,
         WebSearchEnabled = input.WebSearchEnabled,
         WebSearchEndpoint = input.WebSearchEndpoint,

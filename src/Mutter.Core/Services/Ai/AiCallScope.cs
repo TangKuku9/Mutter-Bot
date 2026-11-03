@@ -16,12 +16,14 @@ public sealed class AiCallScope : IDisposable
     private readonly int _startPromptTokens;
     private readonly int _startCompletionTokens;
 
-    private AiCallScope(CancellationToken ct, string? purpose)
+    private AiCallScope(CancellationToken ct, string? purpose, AiCallMetadata? metadata)
     {
         _parent = Ambient.Value;
         _root = _parent?._root ?? this;
         _hostToken = _parent?._root._hostToken ?? ct;
         Purpose = purpose ?? _parent?.Purpose ?? "chat";
+        OperationId = _parent?.OperationId ?? RuntimeActivity.Current?.Id ?? Guid.NewGuid().ToString("N");
+        Metadata = metadata ?? _parent?.Metadata ?? new();
         if (_parent is null)
         {
             _deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -33,12 +35,15 @@ public sealed class AiCallScope : IDisposable
         Ambient.Value = this;
     }
 
-    public static AiCallScope Begin(CancellationToken ct, string? purpose = null) => new(ct, purpose);
+    public static AiCallScope Begin(CancellationToken ct, string? purpose = null, AiCallMetadata? metadata = null) => new(ct, purpose, metadata);
     public static AiCallScope? Current => Ambient.Value?._root;
     public CancellationToken Token { get; }
     /// <summary>宿主/队列传入的原始令牌；与 120 秒期限取消区分开。</summary>
     public CancellationToken HostToken => _root._hostToken;
     public string Purpose { get; }
+    public string OperationId { get; }
+    public AiCallMetadata Metadata { get; }
+    public string Stage { get; set; } = "generate";
     public int Attempts => _root._attempts;
 
     public void BeginAttempt()

@@ -69,7 +69,8 @@ public sealed class ProactiveWorkflow
         }
         try
         {
-            using var operation = Mutter.Core.Services.AiCallScope.Begin(ct, "proactive");
+            using var operation = AiCallScope.Begin(ct, "proactive", new(GroupId: window.GroupId));
+            operation.Stage = "judge";
             await SpeakIfAllowedAsync(window, config, ct, operation.Token);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -181,6 +182,7 @@ public sealed class ProactiveWorkflow
 
         if (ProactiveSpeech.ShouldSearch(config, context.EffectiveConfig, line, searchQuery))
         {
+            if (AiCallScope.Current is { } operation) operation.Stage = "rewrite";
             searchUsed = true;
             var speech = await RewriteWithSearchAsync(
                 window, context, data, line, searchQuery!, nowUtc, aiToken);
@@ -336,6 +338,7 @@ public sealed class ProactiveWorkflow
 
     private async Task WriteLogAsync(ProactiveWindow window, LogNote note, CancellationToken ct)
     {
+        RuntimeActivity.Current?.Outcome(note.Outcome);
         try
         {
             using var scope = _scopeFactory.CreateScope();

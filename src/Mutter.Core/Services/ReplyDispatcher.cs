@@ -22,6 +22,8 @@ public sealed class ReplyDispatcher(
     {
         if (ct.IsCancellationRequested)
             return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedCancelled);
+        reply.AiOperationId ??= AiCallScope.Current?.OperationId ?? RuntimeActivity.Current?.Id;
+        RuntimeActivity.Current?.Mark("delivery_policy");
         ProactiveChatConfig? limits = null;
         if (reply.IsProactive)
         {
@@ -71,6 +73,7 @@ public sealed class ReplyDispatcher(
             logger.LogError(ex, "Delivery receipt could not be persisted id={Id} state={State}", reply.Id, result.State);
             result = result with { Detail = $"{result.Detail}；投递回执暂未写入，待发送记录保留供核查" };
         }
+        RuntimeActivity.Current?.Outcome(result.State, result.Detail);
         return result;
     }
 
@@ -82,6 +85,7 @@ public sealed class ReplyDispatcher(
         try
         {
             ct.ThrowIfCancellationRequested();
+            RuntimeActivity.Current?.Mark("sending");
             if (reply.ReplyToMessageId is not null)
             {
                 try

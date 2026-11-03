@@ -33,6 +33,8 @@ public record AiConfig
     public int ContextWindowTokens { get; set; } = 32768;
     /// <summary>本地输入预算，独立于输出 MaxTokens。</summary>
     public int MaxInputTokens { get; set; } = 24576;
+    /// <summary>普通群聊回复使用管理员维护的群记忆；与主动发言的全局开关独立。</summary>
+    public bool GroupMemoryInjectionEnabled { get; set; } = true;
 
     /// <summary>
     /// @ 回复 / 私聊时最多附带给 AI 的图片张数，0=不带图。

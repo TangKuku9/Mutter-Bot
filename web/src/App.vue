@@ -1,4 +1,5 @@
 <template>
+  <el-config-provider :locale="zhCn">
   <el-container class="layout">
     <el-aside width="200px" class="aside">
       <div class="logo">
@@ -27,8 +28,8 @@
     <el-container>
       <el-header class="header">
         <span>{{ route.meta.title }}</span>
-        <el-tag :type="connected ? 'success' : 'danger'" size="small" effect="plain">
-          {{ connected ? 'Bot 在线' : 'Bot 离线' }}
+        <el-tag :type="botStatus.stale ? 'info' : connected ? 'success' : 'danger'" size="small" effect="plain">
+          {{ botStatus.stale ? '状态待更新' : connected ? 'Bot 在线' : 'Bot 离线' }}
         </el-tag>
       </el-header>
       <el-main class="main">
@@ -36,10 +37,15 @@
       </el-main>
     </el-container>
   </el-container>
+  </el-config-provider>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import { botStatus } from './botStatus'
+import { useVisiblePolling } from './useVisiblePolling'
+import { subscribeRealtime } from './realtime'
 import { useRoute } from 'vue-router'
 import {
   Odometer, ChatDotRound, DataLine, Setting, User,
@@ -48,18 +54,24 @@ import {
 import api from './api'
 
 const route = useRoute()
-const connected = ref(false)
-let timer = null
+const connected = computed(() => !!botStatus.data.isConnected)
+let unsubscribe = null
+let pushRevision = 0
 
-const poll = async () => {
+const poll = async (signal) => {
+  const revision = pushRevision
   try {
-    const { data } = await api.get('/status')
-    connected.value = !!data.isConnected
-  } catch { /* 401 由拦截器处理 */ }
+    const { data } = await api.get('/status', { signal, skipErrorMessage: true })
+    if (revision === pushRevision) { botStatus.data = data; botStatus.stale = false }
+  } catch { if (!signal.aborted) botStatus.stale = true }
 }
 
-onMounted(() => { poll(); timer = setInterval(poll, 10000) })
-onUnmounted(() => clearInterval(timer))
+const refreshStatus = useVisiblePolling(poll, 10000)
+onMounted(() => { unsubscribe = subscribeRealtime({
+  ConnectionStatusChanged: (connected) => { pushRevision++; botStatus.data.isConnected = connected; botStatus.stale = false },
+  Resync: refreshStatus
+}) })
+onUnmounted(() => unsubscribe?.())
 </script>
 
 <style>

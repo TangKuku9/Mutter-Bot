@@ -45,7 +45,7 @@
       </el-table>
     </el-card>
 
-    <el-dialog v-model="dialog" width="560px">
+    <el-dialog v-model="dialog" :before-close="closeEditor" width="560px">
       <template #header>
         <div class="dialog-head">
           <b>群配置</b>
@@ -88,7 +88,7 @@
         <el-form-item label="群记忆摘要">
           <el-input v-model="form.groupMemory" type="textarea" :rows="5" maxlength="4000" show-word-limit
             :disabled="memoryLoading || memoryUnavailable" v-loading="memoryLoading"
-            placeholder="人工维护的群背景摘要，仅用于择机发言参考" />
+            placeholder="人工维护的群背景摘要，供普通 @ 回复和择机发言参考" />
           <ParamHelpButton :label="helpLabel('groupMemory')" @click="openHelp('groupMemory')" />
           <!-- 下面几行是当前状态，不是参数说明，留在原地 -->
           <div class="sub-hint" v-if="memoryLoading">正在读取已有摘要，请稍候……</div>
@@ -122,7 +122,7 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="dialog = false">取消</el-button>
+        <el-button @click="closeEditor()">取消</el-button>
         <el-button type="primary" :loading="saving || memoryLoading" :disabled="memoryLoading" @click="save">保存</el-button>
       </template>
     </el-dialog>
@@ -153,9 +153,10 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../api'
+import { useUnsavedChanges } from '../useUnsavedChanges'
 import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
@@ -172,6 +173,12 @@ const memoryUnavailable = ref(false)
 const memoryLoading = ref(false)
 const memoryUpdatedAt = ref(null)
 const clearingMemory = ref(false)
+const originalForm = ref(null)
+const groupDirty = computed(() => dialog.value && originalForm.value != null && JSON.stringify(form.value) !== JSON.stringify(originalForm.value))
+const confirmDiscard = useUnsavedChanges(groupDirty)
+const closeEditor = async (done) => {
+  if (await confirmDiscard()) { if (typeof done === 'function') done(); else dialog.value = false }
+}
 
 const fmt = (s) => s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '-'
 const triggerText = (m) => m === 2 ? '围观全部' : '仅被 @'
@@ -237,8 +244,8 @@ const HELP = {
     title: '群记忆摘要',
     value: (f) => (f.groupMemory ? `${f.groupMemory.length} 字` : '空'),
     lines: [
-      '人工维护的群背景，只在择机发言判定时作为参考带上。',
-      '不会自动摘要或更新，也不会用于普通 @ 回复。',
+      '人工维护的群背景，可供普通 @ 回复和择机发言参考。',
+      '不会自动摘要或更新；两种场景分别受各自全局开关与本群设置控制。',
       '最多 4000 字。删除用下方「清空记忆」按钮，有确认且立即生效。'
     ]
   },
@@ -246,7 +253,7 @@ const HELP = {
     title: '本群记忆注入',
     value: (f) => (f.memoryInjectionEnabled === true ? '开启' : f.memoryInjectionEnabled === false ? '关闭' : '跟随全局'),
     lines: [
-      '留空 = 跟随「择机发言」页的全局开关。',
+      '留空或开启时，分别跟随「AI 设置」与「择机发言」各自的全局记忆开关。',
       '关闭只停本群的注入，上面的摘要仍原样保留。'
     ]
   },
@@ -304,6 +311,7 @@ const edit = async (row) => {
     customSystemPrompt: row.config?.customSystemPrompt ?? '',
     customTemperature: row.config?.customTemperature ?? null
   }
+  originalForm.value = JSON.parse(JSON.stringify(form.value))
   dialog.value = true
   // 摘要回来前禁止保存：此刻 groupMemory 还是空串，点了保存等于把已有摘要清空
   memoryLoading.value = true
@@ -311,6 +319,7 @@ const edit = async (row) => {
     const { data } = await api.get(`/proactive/groups/${encodeURIComponent(id)}/memory`)
     if (editingId.value !== id) return
     form.value.groupMemory = data.summary ?? ''
+    originalForm.value.groupMemory = form.value.groupMemory
     // 空摘要回的是 DateTime.MinValue，显示成"上次更新 0001 年"没有意义
     memoryUpdatedAt.value = data.summary ? (data.updatedAt ?? null) : null
   } catch {
@@ -326,6 +335,7 @@ const clearMemory = async () => {
   try {
     await api.delete(`/proactive/groups/${encodeURIComponent(editingId.value)}/memory`)
     form.value.groupMemory = ''
+    originalForm.value.groupMemory = ''
     memoryUpdatedAt.value = null
     ElMessage.success('群记忆已清空')
   } finally { clearingMemory.value = false }
@@ -340,11 +350,9 @@ const save = async () => {
       config.memoryInjectionEnabled === '' || config.memoryInjectionEnabled == null
         ? null
         : config.memoryInjectionEnabled
-    const { data } = await api.put(`/groups/${editingId.value}/config`, config)
-    // 读取失败时跳过，避免拿空串把已有摘要误清空；空串交给服务端当清空处理
-    if (!memoryUnavailable.value) {
-      await api.put(`/proactive/groups/${encodeURIComponent(editingId.value)}/memory`, { summary: groupMemory })
-    }
+    const { data } = await api.put(`/groups/${editingId.value}/config`, {
+      ...config, updateMemory: !memoryUnavailable.value, groupMemory
+    })
     ElMessage.success(data.message)
     dialog.value = false
     load()

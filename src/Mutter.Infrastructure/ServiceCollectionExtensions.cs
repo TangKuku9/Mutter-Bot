@@ -22,6 +22,7 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient<HttpModelTransport>(c => c.Timeout = TimeSpan.FromSeconds(120));
         services.AddSingleton<IAiModelExecutor, AiModelExecutor>();
         services.AddSingleton<IOutgoingReplyStore, OutgoingReplyStore>();
+        services.AddSingleton<IAiCallStore, AiCallStore>();
         services.AddSingleton<ConversationWorkQueue>();
         services.AddSingleton<IConversationWorkQueue>(sp => sp.GetRequiredService<ConversationWorkQueue>());
 

@@ -33,6 +33,7 @@ public class ConfigRepository : IConfigRepository
             MaxContextMessages = entity.MaxContextMessages,
             ContextWindowTokens = entity.ContextWindowTokens,
             MaxInputTokens = entity.MaxInputTokens,
+            GroupMemoryInjectionEnabled = entity.GroupMemoryInjectionEnabled,
             MaxAttachedImages = entity.MaxAttachedImages,
             WebSearchEnabled = entity.WebSearchEnabled,
             WebSearchEndpoint = entity.WebSearchEndpoint,
@@ -81,6 +82,7 @@ public class ConfigRepository : IConfigRepository
                 MaxContextMessages = config.MaxContextMessages,
                 ContextWindowTokens = config.ContextWindowTokens,
                 MaxInputTokens = config.MaxInputTokens,
+                GroupMemoryInjectionEnabled = config.GroupMemoryInjectionEnabled,
                 MaxAttachedImages = config.MaxAttachedImages,
                 WebSearchEnabled = config.WebSearchEnabled,
                 WebSearchEndpoint = config.WebSearchEndpoint,
@@ -104,6 +106,7 @@ public class ConfigRepository : IConfigRepository
             entity.MaxContextMessages = config.MaxContextMessages;
             entity.ContextWindowTokens = config.ContextWindowTokens;
             entity.MaxInputTokens = config.MaxInputTokens;
+            entity.GroupMemoryInjectionEnabled = config.GroupMemoryInjectionEnabled;
             entity.MaxAttachedImages = config.MaxAttachedImages;
             entity.WebSearchEnabled = config.WebSearchEnabled;
             entity.WebSearchEndpoint = config.WebSearchEndpoint;
