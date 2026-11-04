@@ -46,6 +46,8 @@ test('发送前取消使用独立结果标签', () => {
 
 test('容量同时预留输出与安全余量，切换小模型时能发现不相容的输入预算', () => {
   assert.equal(tokenBudget({}).error, '')
+  assert.equal(tokenBudget({}).input, 24576)
+  assert.equal(tokenBudget({ maxInputTokens: 16384 }).input, 16384)
   const invalid = tokenBudget({ contextWindowTokens: 4096, maxTokens: 2048, maxInputTokens: 2048 })
   assert.equal(invalid.availableInput, 1024)
   assert.notEqual(invalid.error, '')

@@ -2,7 +2,6 @@ using System.Net.Http.Json;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Mutter.Core.Configuration;
@@ -123,22 +122,19 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
 
     private async Task ConnectWithRetryAsync(CancellationToken ct)
     {
+        // 连接令牌只控制收包；已接纳的事件由独立队列按序交接，重连不能取消或重建它。
+        await using var dispatches = new GatewayDispatchQueue(DispatchAsync, _logger);
+        await MaintainConnectionAsync(ct, dispatches);
+    }
+
+    private async Task MaintainConnectionAsync(CancellationToken ct, GatewayDispatchQueue dispatches)
+    {
         while (!ct.IsCancellationRequested)
         {
             CancellationTokenSource? iterCts = null;
-            Channel<QqDispatch>? dispatches = null;
-            Task? dispatchLoop = null;
             try
             {
                 iterCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                // 事件处理（落库、SignalR、互动 ACK）不能阻塞 WebSocket 收包：
-                // 单个按钮回调最多等 1.5 秒，串行处理会把后续消息和心跳 ACK 一起拖住。
-                dispatches = Channel.CreateBounded<QqDispatch>(new BoundedChannelOptions(1024)
-                {
-                    SingleReader = true,
-                    FullMode = BoundedChannelFullMode.Wait
-                });
-                dispatchLoop = Task.Run(() => DispatchLoopAsync(dispatches.Reader, iterCts.Token));
                 _identified = false;
 
                 _ws?.Dispose();
@@ -172,7 +168,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
                 _heartbeatAckReceived = true;
                 _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(iterCts.Token));
 
-                await ReceiveLoopAsync(iterCts.Token, dispatches.Writer);
+                await ReceiveLoopAsync(iterCts.Token, dispatches);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -197,13 +193,6 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
             finally
             {
                 iterCts?.Cancel();
-                dispatches?.Writer.TryComplete();
-                if (dispatchLoop is not null)
-                {
-                    try { await dispatchLoop.WaitAsync(TimeSpan.FromSeconds(5)); }
-                    catch (OperationCanceledException) { }
-                    catch (TimeoutException) { _logger.LogWarning("事件派发队列未在停机期限内排空"); }
-                }
                 if (_heartbeatTask is not null)
                 {
                     try { await _heartbeatTask; }
@@ -262,7 +251,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
             ?? throw new InvalidOperationException("Hello 消息反序列化失败");
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken ct, ChannelWriter<QqDispatch> dispatches)
+    private async Task ReceiveLoopAsync(CancellationToken ct, GatewayDispatchQueue dispatches)
     {
         var buffer = new byte[8192];
         using var messageBuffer = new MemoryStream();
@@ -313,7 +302,7 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
         }
     }
 
-    private async Task ProcessPayloadAsync(string json, CancellationToken ct, ChannelWriter<QqDispatch> dispatches)
+    private async Task ProcessPayloadAsync(string json, CancellationToken ct, GatewayDispatchQueue dispatches)
     {
         GatewayPayload? payload;
         try
@@ -373,11 +362,8 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
     }
 
     private async Task HandleDispatchAsync(GatewayPayload payload, CancellationToken ct,
-        ChannelWriter<QqDispatch> dispatches)
+        GatewayDispatchQueue dispatches)
     {
-        if (payload.S.HasValue)
-            SetLastSeq(payload.S.Value);
-
         if (payload.T == "READY")
         {
             if (payload.D is not null)
@@ -420,28 +406,17 @@ public class QqGatewayWebSocketClient : IQqGatewayConnection, IDisposable
                 _logger.LogInformation("首次收到 GROUP_MESSAGE_CREATE：群全量消息下发已打通，围观与择机发言有数据可用");
             if (payload.T == "GROUP_AT_MESSAGE_CREATE" && arrived == 1)
                 _logger.LogInformation("首次收到 GROUP_AT_MESSAGE_CREATE：@ 机器人事件正常下发");
-            try { await dispatches.WriteAsync(dispatch, ct); }
-            catch (ChannelClosedException) { _logger.LogDebug("连接关闭，事件未再派发 eventType={EventType}", payload.T); }
+            // 只有成功交给跨连接队列后才推进 Resume 序号；满队列等待被取消时由平台补发。
+            await dispatches.EnqueueAsync(dispatch, ct);
         }
+        if (payload.S.HasValue) SetLastSeq(payload.S.Value);
     }
 
-    /// <summary>单消费者按到达顺序处理事件；WebSocket 接收循环只负责解析与入队。</summary>
-    private async Task DispatchLoopAsync(ChannelReader<QqDispatch> reader, CancellationToken ct)
+    private async Task DispatchAsync(QqDispatch dispatch, CancellationToken ct)
     {
-        await foreach (var dispatch in reader.ReadAllAsync(ct))
-        {
-            try
-            {
-                if (DispatchReceived is { } handlers)
-                    foreach (var subscriber in handlers.GetInvocationList().Cast<Func<QqDispatch, CancellationToken, Task>>())
-                        await subscriber(dispatch, ct);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Dispatch 处理异常，eventType={EventType}", dispatch.EventType);
-            }
-        }
+        if (DispatchReceived is { } handlers)
+            foreach (var subscriber in handlers.GetInvocationList().Cast<Func<QqDispatch, CancellationToken, Task>>())
+                await subscriber(dispatch, ct);
     }
 
     private void HandleInvalidSession(GatewayPayload payload)
