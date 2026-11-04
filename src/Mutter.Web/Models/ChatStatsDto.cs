@@ -6,4 +6,6 @@ public class ChatStatsDto
     public long TodayMessages { get; set; }
     public long AiCallCount { get; set; }
     public long TotalTokensUsed { get; set; }
+    public long LegacyReplyCount { get; set; }
+    public long UnknownUsageCount { get; set; }
 }

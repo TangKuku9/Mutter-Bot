@@ -70,9 +70,29 @@
         <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" show-input style="max-width: 420px" />
         <ParamHelpButton :label="helpLabel('temperature')" @click="openHelp('temperature')" />
       </el-form-item>
-      <el-form-item label="最大 Tokens">
+      <el-form-item label="回复输出上限">
         <el-input-number v-model="form.maxTokens" :min="64" :max="32768" :step="256" />
         <ParamHelpButton :label="helpLabel('maxTokens')" @click="openHelp('maxTokens')" />
+      </el-form-item>
+      <el-form-item label="模型上下文容量">
+        <el-input-number v-model="form.contextWindowTokens" :min="4096" :max="1048576" :step="4096" />
+        <ParamHelpButton :label="helpLabel('contextWindowTokens')" @click="openHelp('contextWindowTokens')" />
+      </el-form-item>
+      <el-form-item label="输入预算">
+        <el-input-number v-model="form.maxInputTokens" :min="512" :max="Math.max(512, budget.availableInput)" :step="512" />
+        <ParamHelpButton :label="helpLabel('maxInputTokens')" @click="openHelp('maxInputTokens')" />
+      </el-form-item>
+      <el-form-item label="容量分配">
+        <div style="width: 100%">
+          <el-progress :percentage="budget.percent" :status="budget.error ? 'exception' : undefined" />
+          <div class="hint">输入 {{ budget.input }} + 输出 {{ budget.output }} + 预留 {{ budget.reserve }} / 容量 {{ budget.context }}</div>
+          <el-alert v-if="budget.error" :title="budget.error" type="error" :closable="false" style="margin-top: 6px" />
+        </div>
+      </el-form-item>
+      <el-form-item label="群记忆用于回复">
+        <el-switch v-model="form.groupMemoryInjectionEnabled" />
+        <ParamHelpButton :label="helpLabel('groupMemoryInjectionEnabled')" @click="openHelp('groupMemoryInjectionEnabled')" />
+        <div class="hint">普通 @ 回复参考群管理中维护的记忆；与择机发言的全局开关独立。私聊不使用群记忆。</div>
       </el-form-item>
       <el-form-item label="上下文条数">
         <el-input-number v-model="form.maxContextMessages" :min="2" :max="100" />
@@ -105,8 +125,8 @@
         </div>
       </el-form-item>
       <el-form-item>
-        <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
-        <el-button @click="load">重新加载</el-button>
+        <el-button type="primary" :loading="saving" :disabled="!!budget.error" @click="save()">保存配置</el-button>
+        <el-button @click="reloadConfig">重新加载</el-button>
       </el-form-item>
     </el-form>
 
@@ -371,6 +391,8 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading, CircleCheck } from '@element-plus/icons-vue'
 import api from '../api'
+import { tokenBudget } from '../tokenBudget'
+import { useUnsavedChanges } from '../useUnsavedChanges'
 import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
@@ -404,6 +426,9 @@ const configPayload = () => ({
   temperature: form.value.temperature ?? 0.7,
   maxTokens: form.value.maxTokens ?? 2048,
   maxContextMessages: form.value.maxContextMessages ?? 20,
+  contextWindowTokens: form.value.contextWindowTokens ?? 32768,
+  maxInputTokens: form.value.maxInputTokens ?? 16384,
+  groupMemoryInjectionEnabled: form.value.groupMemoryInjectionEnabled ?? true,
   maxAttachedImages: form.value.maxAttachedImages ?? 3,
   webSearchEnabled: !!form.value.webSearchEnabled,
   webSearchEndpoint: form.value.webSearchEndpoint || '',
@@ -413,6 +438,10 @@ const configPayload = () => ({
 
 const isDirty = computed(() =>
   !!baseline.value && JSON.stringify(configPayload()) !== baseline.value)
+const budget = computed(() => tokenBudget(form.value))
+const confirmDiscard = useUnsavedChanges(isDirty)
+const reloadConfig = async () => { if (await confirmDiscard()) await load() }
+
 const selectedPreset = computed(() =>
   presets.value.find((p) => p.id === selectedPresetId.value) || null)
 
@@ -612,7 +641,7 @@ const presetHelp = computed(() => {
 
 const HELP_ORDER = [
   'configPreset', 'presetId', 'apiBaseUrl', 'apiKey', 'modelName', 'personality', 'systemPrompt',
-  'temperature', 'maxTokens', 'maxContextMessages', 'maxAttachedImages',
+  'temperature', 'maxTokens', 'contextWindowTokens', 'maxInputTokens', 'groupMemoryInjectionEnabled', 'maxContextMessages', 'maxAttachedImages',
   'webSearchEnabled', 'webSearchImageMode'
 ]
 
@@ -686,12 +715,27 @@ const HELP = {
     ]
   },
   maxTokens: {
-    title: '最大 Tokens',
+    title: '回复输出上限',
     value: (f) => `${f.maxTokens}`,
     lines: [
       '单次回复的输出上限，默认 2048。',
       '与「择机发言」的「判定输出上限」互不影响，各管各的。'
     ]
+  },
+  contextWindowTokens: {
+    title: '模型上下文容量',
+    value: (f) => `${f.contextWindowTokens ?? 32768}`,
+    lines: ['按服务商公布的模型上下文容量填写，默认 32768。', '输入、输出和安全余量共同占用这段容量；切换模型时请核对。']
+  },
+  maxInputTokens: {
+    title: '输入预算',
+    value: (f) => `${f.maxInputTokens ?? 16384}`,
+    lines: ['历史、当前消息、系统提示与图片共用的本地输入预算，默认 16384。', '文本和图片使用保守估算，并额外预留输出和安全余量；超过预算时先裁掉旧历史。', '当前消息或附件本身过大时会提示缩短内容，不会静默删掉当前问题。']
+  },
+  groupMemoryInjectionEnabled: {
+    title: '群记忆用于回复',
+    value: (f) => f.groupMemoryInjectionEnabled ? '开启' : '关闭',
+    lines: ['普通 @ 回复使用管理员维护的群记忆，避免主动说话与被询问时记忆不一致。', '本群设置为关闭时不注入；择机发言仍受它自己的全局开关控制。']
   },
   maxContextMessages: {
     title: '上下文条数',
@@ -929,6 +973,7 @@ const removeCharacter = async (row) => {
 }
 
 const save = async (successMessage = 'AI 配置已保存') => {
+  if (budget.value.error) { ElMessage.warning(budget.value.error); return false }
   saving.value = true
   try {
     await api.put('/config/ai', configPayload())

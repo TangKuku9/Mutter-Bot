@@ -5,6 +5,8 @@ using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
+using Mutter.Core.Services;
+using Mutter.Core.Proactive;
 
 namespace Mutter.Infrastructure.Services;
 
@@ -68,21 +70,35 @@ public class StructuredAiService : IStructuredAiService
         AiConfig config,
         CancellationToken ct = default) where T : class
     {
+        using var operation = AiCallScope.Begin(ct, "structured");
+        ct = operation.Token;
+        config = config with { };
         // ① 优先 json_object 模式
         var first = await CallAsync(systemPrompt, userPrompt, imageUrls, config, "json_object", ct);
         if (first.Response is not null)
         {
-            var parsed = first.Response.FinishReason == "length" ? null : Deserialize<T>(first.Response.Content);
+            if (first.Response.FinishReason == "length")
+                return Failure<T>(StructuredAiFailureKind.Truncated, first.Response);
+            var parsed = Deserialize<T>(first.Response.Content);
             if (parsed is not null)
                 return Success(parsed, first.Response);
             _logger.LogWarning("json_object 模式解析失败或输出被截断，降级 prompt 引导。raw={Raw}", Truncate(first.Response.Content, 200));
         }
 
-        // ② prompt 引导 + 正则提取 {...}
+        // 鉴权、超时、网络错误和 5xx 无法通过取消 JSON mode 修复，禁止再次生成。
+        if (first.Response is null && !first.FormatRejected)
+            return new StructuredOutcome<T>(null, StructuredAiFailureKind.ApiError, first.ErrorMessage);
+
+        // ② 仅格式不支持或内容无法解析时降级，保留所有已知用量。
+        var firstPrompt = first.Response?.PromptTokens ?? 0;
+        var firstCompletion = first.Response?.CompletionTokens ?? 0;
+
         var fallbackPrompt = systemPrompt + "\n\n注意：只输出一个合法的 JSON 对象，不要 Markdown、不要多余文字。";
         var second = await CallAsync(fallbackPrompt, userPrompt, imageUrls, config, null, ct);
         if (second.Response is not null)
         {
+            second.Response.PromptTokens += firstPrompt;
+            second.Response.CompletionTokens += firstCompletion;
             var parsed = second.Response.FinishReason == "length" ? null : Deserialize<T>(second.Response.Content);
             if (parsed is not null)
                 return Success(parsed, second.Response);
@@ -99,10 +115,11 @@ public class StructuredAiService : IStructuredAiService
         }
 
         _logger.LogWarning("结构化 AI 调用失败 type={Type} error={Error}", typeof(T).Name, second.ErrorMessage);
-        return new StructuredOutcome<T>(null, StructuredAiFailureKind.ApiError, second.ErrorMessage);
+        return new StructuredOutcome<T>(null, StructuredAiFailureKind.ApiError, second.ErrorMessage,
+            PromptTokens: firstPrompt, CompletionTokens: firstCompletion);
     }
 
-    private async Task<(AiChatResponse? Response, string? ErrorMessage)> CallAsync(
+    private async Task<(AiChatResponse? Response, string? ErrorMessage, bool FormatRejected)> CallAsync(
         string systemPrompt, string userPrompt, IReadOnlyList<string> imageUrls,
         AiConfig config, string? responseFormat, CancellationToken ct)
     {
@@ -112,7 +129,7 @@ public class StructuredAiService : IStructuredAiService
                 ? await _ai.ChatWithImagesAsync(systemPrompt, userPrompt, imageUrls, config, responseFormat, ct)
                 : await _ai.ChatAsync(systemPrompt,
                     new List<(string Role, string Content)> { ("user", userPrompt) }, config, responseFormat, ct);
-            return (resp, null);
+            return (resp, null, false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -122,7 +139,11 @@ public class StructuredAiService : IStructuredAiService
         {
             _logger.LogWarning(ex, "AI 结构化调用失败 responseFormat={Fmt} images={Images}",
                 responseFormat ?? "null", imageUrls.Count);
-            return (null, ex.Message);
+            var formatRejected = ex is AiRequestException { IsDeterministicRejection: true }
+                && (ex.Message.Contains("response_format", StringComparison.OrdinalIgnoreCase)
+                    || ex.Message.Contains("json_object", StringComparison.OrdinalIgnoreCase)
+                    || ex.Message.Contains("json mode", StringComparison.OrdinalIgnoreCase));
+            return (null, ex.Message, formatRejected);
         }
     }
 
@@ -140,7 +161,10 @@ public class StructuredAiService : IStructuredAiService
     private T? Deserialize<T>(string? raw) where T : class
     {
         var candidate = ExtractRepairableJson(raw);
-        return candidate is null ? null : TryParse<T>(candidate, out _);
+        var parsed = candidate is null ? null : TryParse<T>(candidate, out _);
+        if (parsed is ProactiveVerdict verdict && verdict.Line is null && string.IsNullOrWhiteSpace(verdict.Reason))
+            return null;
+        return parsed;
     }
 
     /// <summary>

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Mutter.Core.Interfaces;
 using Mutter.Web.Models;
+using Mutter.Web.Services;
 
 namespace Mutter.Web.Controllers;
 
@@ -10,11 +11,13 @@ public class ChatController : ControllerBase
 {
     private readonly IMessageRepository _messageRepository;
     private readonly IConfigRepository _configRepository;
+    private readonly PanelStatisticsService _statistics;
 
-    public ChatController(IMessageRepository messageRepository, IConfigRepository configRepository)
+    public ChatController(IMessageRepository messageRepository, IConfigRepository configRepository, PanelStatisticsService statistics)
     {
         _messageRepository = messageRepository;
         _configRepository = configRepository;
+        _statistics = statistics;
     }
 
     [HttpGet("history")]
@@ -22,14 +25,14 @@ public class ChatController : ControllerBase
         [FromQuery] string? groupId = null,
         [FromQuery] string? source = null,
         [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 50)
+        [FromQuery] int pageSize = 50, CancellationToken ct = default)
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 1, 100);
 
-        var (items, totalCount) = await _messageRepository.GetPagedMessagesAsync(groupId, page, pageSize, source);
+        var (items, totalCount) = await _messageRepository.GetPagedMessagesAsync(groupId, page, pageSize, source, ct);
 
-        var groupNames = (await _configRepository.GetKnownGroupsAsync()).ToDictionary(g => g.GroupId, g => g.GroupName);
+        var groupNames = (await _configRepository.GetKnownGroupsAsync(ct)).ToDictionary(g => g.GroupId, g => g.GroupName);
         string? NameOf(string? id) => id is not null && groupNames.TryGetValue(id, out var n) && !string.IsNullOrEmpty(n) ? n : null;
 
         var dtos = items.Select(m => new ChatMessageDto
@@ -58,50 +61,38 @@ public class ChatController : ControllerBase
     }
 
     [HttpGet("stats")]
-    public async Task<ActionResult<ChatStatsDto>> GetStats()
+    public async Task<ActionResult<ChatStatsDto>> GetStats(CancellationToken ct)
     {
-        // Use UTC+8 (China Standard Time) for "today" boundary
-        var cstZone = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
-        var todayLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, cstZone).Date;
-        var todayUtc = TimeZoneInfo.ConvertTimeToUtc(todayLocal, cstZone);
-
-        var totalMessages = await _messageRepository.CountMessagesAsync();
-        var todayMessages = await _messageRepository.CountMessagesAsync(todayUtc);
-        var aiCallCount = await _messageRepository.CountAiCallsAsync();
-        var totalTokens = await _messageRepository.SumTokensAsync();
-
-        return Ok(new ChatStatsDto
-        {
-            TotalMessages = totalMessages,
-            TodayMessages = todayMessages,
-            AiCallCount = aiCallCount,
-            TotalTokensUsed = totalTokens
-        });
+        return Ok(await _statistics.OverviewAsync(ct));
     }
 
+    [HttpGet("usage")]
+    public async Task<IActionResult> GetUsage([FromQuery] int days = 7, CancellationToken ct = default) =>
+        Ok(await _statistics.UsageAsync(days, ct));
+
     [HttpGet("token-stats")]
-    public async Task<IActionResult> GetTokenStats([FromQuery] int days = 7)
+    public async Task<IActionResult> GetTokenStats([FromQuery] int days = 7, CancellationToken ct = default)
     {
         days = Math.Clamp(days, 1, 90);
-        var stats = await _messageRepository.GetDailyTokenStatsAsync(days);
+        var stats = (await _statistics.UsageAsync(days, ct)).Daily;
         return Ok(stats);
     }
 
     [HttpGet("token-stats/groups")]
-    public async Task<IActionResult> GetGroupTokenStats([FromQuery] int days = 7, [FromQuery] int top = 10)
+    public async Task<IActionResult> GetGroupTokenStats([FromQuery] int days = 7, [FromQuery] int top = 10, CancellationToken ct = default)
     {
         days = Math.Clamp(days, 1, 90);
         top = Math.Clamp(top, 1, 50);
-        var stats = await _messageRepository.GetGroupTokenStatsAsync(days, top);
+        var stats = (await _statistics.UsageAsync(days, ct)).Groups.Take(top);
         return Ok(stats);
     }
 
     [HttpGet("token-stats/users")]
-    public async Task<IActionResult> GetUserTokenStats([FromQuery] int days = 7, [FromQuery] int top = 10)
+    public async Task<IActionResult> GetUserTokenStats([FromQuery] int days = 7, [FromQuery] int top = 10, CancellationToken ct = default)
     {
         days = Math.Clamp(days, 1, 90);
         top = Math.Clamp(top, 1, 50);
-        var stats = await _messageRepository.GetUserTokenStatsAsync(days, top);
+        var stats = (await _statistics.UsageAsync(days, ct)).Users.Take(top);
         return Ok(stats);
     }
 }

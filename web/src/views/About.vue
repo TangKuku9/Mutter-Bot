@@ -321,6 +321,7 @@ import { ArrowRight, ChatDotRound, Download, Opportunity, Picture, User, Search,
 import { appVersion as version } from '../version'
 import { panelSettings, colorPresets, resetPanelSettings } from '../panelSettings'
 import api from '../api'
+import { botStatus } from '../botStatus'
 
 const repoUrl = 'https://github.com/TangKuku9/Mutter-Bot'
 const readmeUrl = `${repoUrl}/blob/main/README.md`
@@ -356,13 +357,13 @@ const features = [
 
 const isActiveColor = (value) => panelSettings.primaryColor.toLowerCase() === value.toLowerCase()
 
-const status = ref({})
-let timer = null
+const status = computed(() => botStatus.data)
 
 const loadStatus = async () => {
   try {
     const { data } = await api.get('/status')
-    status.value = data
+    botStatus.data = data
+    botStatus.stale = false
   } catch {
     // 网络异常时保留占位符，不打断关于页展示
   }
@@ -853,14 +854,11 @@ const saveUpdateSettings = async () => {
 }
 
 onMounted(() => {
-  loadStatus()
   hydrateProgress()
   checkUpdate()
-  timer = setInterval(loadStatus, 10000)
   updateTimer = setInterval(checkUpdate, 30 * 60 * 1000)
 })
 onUnmounted(() => {
-  clearInterval(timer)
   clearInterval(updateTimer)
   stopProgressPolling()
 })

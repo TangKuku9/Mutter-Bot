@@ -31,6 +31,8 @@ public sealed class LiveLogBus
 /// <summary>日志条目</summary>
 public sealed class LogEntry
 {
+    private static long _nextId;
+    public long Id { get; init; } = Interlocked.Increment(ref _nextId);
     public DateTime Timestamp { get; init; }
     public string Level { get; init; } = string.Empty;
     public string Category { get; init; } = string.Empty;

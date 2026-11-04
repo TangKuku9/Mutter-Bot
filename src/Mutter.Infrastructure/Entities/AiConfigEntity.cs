@@ -11,6 +11,9 @@ public class AiConfigEntity
     public double Temperature { get; set; } = 0.7;
     public int MaxTokens { get; set; } = 2048;
     public int MaxContextMessages { get; set; } = 20;
+    public int ContextWindowTokens { get; set; } = 32768;
+    public int MaxInputTokens { get; set; } = 16384;
+    public bool GroupMemoryInjectionEnabled { get; set; } = true;
 
     /// <summary>@ 回复 / 私聊最多附带几张图，0=不带图。</summary>
     public int MaxAttachedImages { get; set; } = Mutter.Core.Models.Config.AiConfig.DefaultMaxAttachedImages;

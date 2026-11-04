@@ -159,6 +159,11 @@ public class ProactiveController : ControllerBase
             MemoryInjectionEnabled = dto.MemoryInjectionEnabled
         };
 
+        // 判定输出上限不能吃掉整个上下文：与当前模型窗口交叉校验后再落库。
+        var contextWindow = (await _configRepo.GetAiConfigAsync(ct))?.ContextWindowTokens
+            ?? AiRequestBudget.DefaultContextWindow;
+        config.EvalMaxTokens = AiRequestBudget.ClampOutputTokens(config.EvalMaxTokens, contextWindow);
+
         await _configRepo.SaveProactiveConfigAsync(config, ct);
         var saved = await _configRepo.GetProactiveConfigAsync(ct);
 

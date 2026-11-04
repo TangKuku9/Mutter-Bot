@@ -7,7 +7,7 @@
       <el-input v-model="keyword" placeholder="关键词过滤" clearable style="width: 220px" />
       <el-switch v-model="autoScroll" active-text="自动滚动" style="margin-left: 8px" />
       <el-button @click="exportLogs">导出</el-button>
-      <el-button @click="logs = []">清空视图</el-button>
+      <el-button @click="clearView">清空视图</el-button>
       <el-tag size="small" :type="connOk ? 'success' : 'danger'" style="margin-left: auto">
         {{ connOk ? '实时流已连接' : '实时流未连接' }}
       </el-tag>
@@ -27,17 +27,20 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { HubConnectionBuilder, LogLevel } from '@microsoft/signalr'
+import { subscribeRealtime, realtimeState } from '../realtime'
 
 const levels = ['Trace', 'Debug', 'Information', 'Warning', 'Error', 'Critical']
 const logs = ref([])
 const levelFilter = ref('')
 const keyword = ref('')
 const autoScroll = ref(true)
-const connOk = ref(false)
+const connOk = computed(() => realtimeState.connected)
 const boxRef = ref(null)
-let conn = null
+let unsubscribe = null
+let flushTimer = null
+let pending = []
 const MAX = 800
+const clearView = () => { pending = []; logs.value = [] }
 
 const filtered = computed(() => logs.value.filter((l) => {
   if (levelFilter.value && l.level !== levelFilter.value) return false
@@ -48,9 +51,20 @@ const filtered = computed(() => logs.value.filter((l) => {
 const fmt = (s) => s ? new Date(s).toLocaleTimeString('zh-CN', { hour12: false }) : ''
 
 const push = (entries) => {
-  logs.value.push(...entries)
-  if (logs.value.length > MAX) logs.value.splice(0, logs.value.length - MAX)
-  if (autoScroll.value) nextTick(() => { boxRef.value?.scrollTo(0, boxRef.value.scrollHeight) })
+  pending.push(...entries)
+  if (pending.length > MAX) pending = pending.slice(-MAX)
+  if (flushTimer) return
+  flushTimer = setTimeout(() => {
+    flushTimer = null
+    const seen = new Set()
+    logs.value = [...logs.value, ...pending].filter((entry) => {
+      const key = `${entry.id ?? ''}:${entry.timestamp}:${entry.category}:${entry.message}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    }).slice(-MAX)
+    pending = []
+  }, 80)
 }
 
 const exportLogs = () => {
@@ -65,26 +79,14 @@ const exportLogs = () => {
   URL.revokeObjectURL(a.href)
 }
 
-onMounted(async () => {
-  conn = new HubConnectionBuilder()
-    .withUrl('/hub/botstatus')
-    .configureLogging(LogLevel.Warning)
-    .withAutomaticReconnect()
-    .build()
-
-  conn.on('ReceiveLogs', (entries) => push(entries))
-  conn.on('ReceiveLog', (entry) => push([entry]))
-  conn.onreconnecting(() => { connOk.value = false })
-  conn.onreconnected(async () => { connOk.value = true; await conn.invoke('SubscribeLogs') })
-
-  try {
-    await conn.start()
-    connOk.value = true
-    await conn.invoke('SubscribeLogs')
-  } catch { connOk.value = false }
+onMounted(() => {
+  unsubscribe = subscribeRealtime({ ReceiveLogs: push, ReceiveLog: (entry) => push([entry]) }, { logs: true })
 })
-
-onUnmounted(() => { conn?.stop().catch(() => {}) })
+onUnmounted(() => {
+  unsubscribe?.()
+  clearTimeout(flushTimer)
+  pending = []
+})
 watch(filtered, () => {
   if (autoScroll.value) nextTick(() => { boxRef.value?.scrollTo(0, boxRef.value.scrollHeight) })
 })

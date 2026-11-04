@@ -6,7 +6,7 @@ public class ActiveMessageQuotaStatus
     /// <summary>自然月累计（历史口径，仅供面板展示）。</summary>
     public int UsedThisMonth { get; set; }
 
-    /// <summary>今日已发条数（内存计数器，进程重启后归零）。</summary>
+    /// <summary>今日发送尝试数（持久化，按北京时间日界）。</summary>
     public int UsedToday { get; set; }
 
     /// <summary>今日上限（自设，不超官方 1000 条/群/日）。</summary>

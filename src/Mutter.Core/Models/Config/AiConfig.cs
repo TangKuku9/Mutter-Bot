@@ -29,6 +29,12 @@ public record AiConfig
     public double Temperature { get; set; } = 0.7;
     public int MaxTokens { get; set; } = 2048;
     public int MaxContextMessages { get; set; } = 20;
+    /// <summary>模型上下文容量；未知模型使用保守默认值，可经 API 配置。</summary>
+    public int ContextWindowTokens { get; set; } = 32768;
+    /// <summary>本地输入预算，独立于输出 MaxTokens。</summary>
+    public int MaxInputTokens { get; set; } = 24576;
+    /// <summary>普通群聊回复使用管理员维护的群记忆；与主动发言的全局开关独立。</summary>
+    public bool GroupMemoryInjectionEnabled { get; set; } = true;
 
     /// <summary>
     /// @ 回复 / 私聊时最多附带给 AI 的图片张数，0=不带图。

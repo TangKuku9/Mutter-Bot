@@ -29,29 +29,32 @@ public interface IMessageRepository
     Task<List<DailyTokenStats>> GetDailyTokenStatsAsync(int days, CancellationToken ct = default);
     Task<List<GroupTokenStats>> GetGroupTokenStatsAsync(int days, int top, CancellationToken ct = default);
     Task<List<UserTokenStats>> GetUserTokenStatsAsync(int days, int top, CancellationToken ct = default);
+    Task<AiUsageSummary> GetAiUsageSummaryAsync(int? days = null, CancellationToken ct = default);
 }
 
 public class DailyTokenStats
 {
     public string Date { get; set; } = string.Empty;
-    public int PromptTokens { get; set; }
-    public int CompletionTokens { get; set; }
-    public int TotalTokens => PromptTokens + CompletionTokens;
-    public int CallCount { get; set; }
+    public long PromptTokens { get; set; }
+    public long CompletionTokens { get; set; }
+    public long TotalTokens => PromptTokens + CompletionTokens;
+    public long CallCount { get; set; }
+    public long LegacyCount { get; set; }
 }
 
 public class GroupTokenStats
 {
     public string GroupId { get; set; } = string.Empty;
     public string GroupName { get; set; } = string.Empty;
-    public int TotalTokens { get; set; }
-    public int CallCount { get; set; }
+    public long TotalTokens { get; set; }
+    public long CallCount { get; set; }
+    public long LegacyCount { get; set; }
 }
 
 public class UserTokenStats
 {
     public string UserId { get; set; } = string.Empty;
     public string UserName { get; set; } = string.Empty;
-    public int TotalTokens { get; set; }
-    public int CallCount { get; set; }
+    public long TotalTokens { get; set; }
+    public long CallCount { get; set; }
 }

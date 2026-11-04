@@ -13,12 +13,12 @@ public class BotStatusHub : Hub
         _liveLogBus = liveLogBus;
     }
 
-    public async Task SubscribeGroup(long groupId)
+    public async Task SubscribeGroup(string groupId)
     {
         await Groups.AddToGroupAsync(Context.ConnectionId, $"group-{groupId}");
     }
 
-    public async Task UnsubscribeGroup(long groupId)
+    public async Task UnsubscribeGroup(string groupId)
     {
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, $"group-{groupId}");
     }
@@ -28,6 +28,7 @@ public class BotStatusHub : Hub
     /// </summary>
     public async Task SubscribeLogs()
     {
+        await UnsubscribeLogs();
         // 先推送历史日志
         var recent = _liveLogBus.GetRecentLogs();
         if (recent.Count > 0)
@@ -43,6 +44,13 @@ public class BotStatusHub : Hub
 
         _liveLogBus.LogEmitted += OnLogEmitted;
         Context.Items["logHandler"] = (Action<LogEntry>)OnLogEmitted;
+    }
+
+    public Task UnsubscribeLogs()
+    {
+        if (Context.Items.Remove("logHandler", out var handler) && handler is Action<LogEntry> action)
+            _liveLogBus.LogEmitted -= action;
+        return Task.CompletedTask;
     }
 
     public override Task OnConnectedAsync()
