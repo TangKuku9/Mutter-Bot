@@ -13,17 +13,26 @@ public sealed class ProactiveSpeaker(ReplyDispatcher dispatcher, IQqBotApiServic
     public async Task<ProactiveSendResult> SpeakAsync(ProactiveWindow window, string line,
         ProactiveChatConfig config, CancellationToken ct = default, AiChatResponse? usage = null)
     {
-        var result = await dispatcher.SendAsync(new OutgoingReply
+        DeliveryResult result;
+        try
         {
-            GroupId = window.GroupId, BotId = api.BotId, IsProactive = true,
-            ReplyToMessageId = window.PassiveSlotAlive(clock.GetUtcNow().UtcDateTime) ? window.LastMessageId : null,
-            Content = line, Model = usage?.Model,
-            PromptTokens = usage?.PromptTokens ?? 0, CompletionTokens = usage?.CompletionTokens ?? 0
-        }, config.AllowActiveChannel, ct);
+            result = await dispatcher.SendAsync(new OutgoingReply
+            {
+                GroupId = window.GroupId, BotId = api.BotId, IsProactive = true,
+                ReplyToMessageId = window.PassiveSlotAlive(clock.GetUtcNow().UtcDateTime) ? window.LastMessageId : null,
+                Content = line, Model = usage?.Model,
+                PromptTokens = usage?.PromptTokens ?? 0, CompletionTokens = usage?.CompletionTokens ?? 0
+            }, config.AllowActiveChannel, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 预占/回执阶段被取消，平台还没有收到发送请求。
+            return new ProactiveSendResult(ProactiveOutcomes.SkippedCancelled, Detail: "发送前已取消");
+        }
         var outcome = result.Sent
             ? result.Channel == "active" ? ProactiveOutcomes.SentActive : ProactiveOutcomes.SentPassive
             : result.State == DeliveryStates.Unknown ? ProactiveOutcomes.DeliveryUnknown
-            : result.Detail ?? ProactiveOutcomes.FailedApiError;
+            : ProactiveOutcomes.FromDeliveryDetail(result.Detail);
         return new ProactiveSendResult(outcome, result.MessageId, result.Detail);
     }
 }

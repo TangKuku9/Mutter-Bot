@@ -23,10 +23,30 @@ public static class ProactiveOutcomes
     public const string SkippedAiUnparsable = "skipped_ai_unparsable";
     public const string SkippedAiBusy = "skipped_ai_busy";
     public const string SkippedDisabled = "skipped_disabled";
+    public const string SkippedDuplicate = "skipped_duplicate";
+    /// <summary>发送前被取消（停机或投递期限到达），平台尚未收到请求。</summary>
+    public const string SkippedCancelled = "skipped_cancelled";
 
     public const string FailedReceiverRejected = "failed_rejected";
     public const string FailedRateLimited = "failed_rate_limited";
     public const string FailedNoChannel = "failed_no_channel";
     public const string FailedApiError = "failed_api_error";
     public const string DeliveryUnknown = "delivery_unknown";
+
+    /// <summary>允许落库的结果码。平台返回的原始错误文本只能进 Detail，不能当 Outcome。</summary>
+    private static readonly HashSet<string> Known = new(StringComparer.Ordinal)
+    {
+        SentPassive, SentActive,
+        SkippedQuietHours, SkippedCooldown, SkippedGroupCap, SkippedGlobalCap,
+        SkippedAiDeclined, SkippedAfterSearch, SkippedAiUnavailable, SkippedAiTruncated,
+        SkippedAiUnparsable, SkippedAiBusy, SkippedDisabled, SkippedDuplicate, SkippedCancelled,
+        FailedAiCall, FailedReceiverRejected, FailedRateLimited, FailedNoChannel, FailedApiError,
+        DeliveryUnknown
+    };
+
+    public static bool IsKnown(string? value) => value is not null && Known.Contains(value);
+
+    /// <summary>投递细节是已知结果码时直接沿用，否则归为平台发送失败。</summary>
+    public static string FromDeliveryDetail(string? detail) =>
+        IsKnown(detail) ? detail! : FailedApiError;
 }

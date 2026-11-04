@@ -18,12 +18,19 @@ public sealed class ProactiveChatHostedService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10), clock);
-        do
+        while (true)
         {
             try { await TickAsync(stoppingToken); }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex) { logger.LogError(ex, "择机调度失败"); }
-        } while (await timer.WaitForNextTickAsync(stoppingToken));
+
+            // 等待本身也必须包在停机分支里；放在 do-while 条件中会把退出异常抛到 ExecuteAsync 外。
+            try
+            {
+                if (!await timer.WaitForNextTickAsync(stoppingToken)) break;
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+        }
     }
 
     private async Task TickAsync(CancellationToken ct)

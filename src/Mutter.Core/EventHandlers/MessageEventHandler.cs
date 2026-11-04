@@ -512,6 +512,9 @@ public class MessageEventHandler
     private async Task ProcessAiReplyAsync(string? groupOpenId, string? userOpenId, string senderId,
         string senderName, ParsedMessage parsed, string msgId, CancellationToken ct)
     {
+        // 队列令牌只负责“宿主是否还在跑”；120 秒生成期限只覆盖模型调用。
+        // 生成成功后必须用一个独立的投递期限，否则截止时间一到，已经写好的回复会被丢掉。
+        var hostToken = ct;
         using var operation = AiCallScope.Begin(ct, "reply");
         ct = operation.Token;
         AiChatResponse response;
@@ -567,17 +570,30 @@ public class MessageEventHandler
         {
             _logger.LogError(ex, "AI generation failed");
             var error = ex is AiInputTooLargeException ? ex.Message : "AI 处理失败，请稍后再试。";
-            // 此时尚未生成成功；发送阶段失败不会再回到这里补发错误消息。
-            await SendReplyAsync(groupOpenId, userOpenId, msgId, error, ct);
+            // 生成已经失败，不能再让生成期限决定错误提示发不发得出去。
+            using var errorDeadline = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
+            errorDeadline.CancelAfter(TimeSpan.FromSeconds(10));
+            await SendReplyAsync(groupOpenId, userOpenId, msgId, error, errorDeadline.Token);
             return;
         }
 
-        var delivery = await _dispatcher.SendAsync(new OutgoingReply
+        using var deliveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
+        deliveryDeadline.CancelAfter(TimeSpan.FromSeconds(30));
+        DeliveryResult delivery;
+        try
         {
-            GroupId = groupOpenId, PeerUserId = userOpenId, BotId = _botId,
-            ReplyToMessageId = msgId, Content = response.Content, Model = response.Model,
-            PromptTokens = response.PromptTokens, CompletionTokens = response.CompletionTokens
-        }, allowActive: true, ct);
+            delivery = await _dispatcher.SendAsync(new OutgoingReply
+            {
+                GroupId = groupOpenId, PeerUserId = userOpenId, BotId = _botId,
+                ReplyToMessageId = msgId, Content = response.Content, Model = response.Model,
+                PromptTokens = response.PromptTokens, CompletionTokens = response.CompletionTokens
+            }, allowActive: true, deliveryDeadline.Token);
+        }
+        catch (OperationCanceledException) when (!hostToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("AI reply delivery deadline reached msg={Message}", msgId);
+            return;
+        }
         if (!delivery.Sent)
         {
             _logger.LogWarning("AI reply not confirmed msg={Message} state={State}", msgId, delivery.State);

@@ -21,6 +21,8 @@ public sealed class ConversationWorkQueue(
         AllowSynchronousContinuations = false
     });
     private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    /// <summary>工作令牌由队列自己持有。宿主 ApplicationStopping 只关闭入口，不能把在途工作一起取消。</summary>
+    private readonly CancellationTokenSource _workCts = new();
     private bool _accepting = true;
     private int _outstanding;
     private int _backgroundInFlight;
@@ -49,8 +51,26 @@ public sealed class ConversationWorkQueue(
         }
     }
 
-    protected override Task ExecuteAsync(CancellationToken stoppingToken) =>
-        Task.WhenAll(Enumerable.Range(0, parallelism).Select(_ => WorkerAsync(stoppingToken)));
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // 宿主停机时 ApplicationStopping 早于 StopAsync 触发。这里只停止接纳新工作，
+        // worker 继续使用队列自己的令牌，把已接纳的任务排空。
+        using var registration = stoppingToken.Register(StopAccepting);
+        await Task.WhenAll(Enumerable.Range(0, parallelism).Select(_ => WorkerAsync(_workCts.Token)));
+    }
+
+    private void StopAccepting()
+    {
+        lock (_gate)
+        {
+            _accepting = false;
+            if (_outstanding == 0)
+            {
+                _ready.Writer.TryComplete();
+                _drained.TrySetResult();
+            }
+        }
+    }
 
     private async Task WorkerAsync(CancellationToken ct)
     {
@@ -109,26 +129,35 @@ public sealed class ConversationWorkQueue(
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        lock (_gate)
+        StopAccepting();
+        var drained = false;
+        try
         {
-            _accepting = false;
-            if (_outstanding == 0)
-            {
-                _ready.Writer.TryComplete();
-                _drained.TrySetResult();
-            }
+            await _drained.Task.WaitAsync(cancellationToken);
+            drained = true;
         }
-        try { await _drained.Task.WaitAsync(cancellationToken); }
         catch (OperationCanceledException) { logger.LogWarning("Conversation drain deadline reached"); }
         finally
         {
+            // 只有排空期限已到才取消剩余工作；正常停机时让已接纳的任务跑完。
+            if (!drained) _workCts.Cancel();
             await base.StopAsync(cancellationToken);
             if (ExecuteTask is not null)
             {
                 try { await ExecuteTask.WaitAsync(TimeSpan.FromSeconds(12)); }
                 catch (OperationCanceledException) { }
-                catch (TimeoutException) { logger.LogWarning("Conversation cancellation deadline reached"); }
+                catch (TimeoutException)
+                {
+                    _workCts.Cancel();
+                    logger.LogWarning("Conversation cancellation deadline reached");
+                }
             }
         }
+    }
+
+    public override void Dispose()
+    {
+        _workCts.Cancel();
+        base.Dispose();
     }
 }

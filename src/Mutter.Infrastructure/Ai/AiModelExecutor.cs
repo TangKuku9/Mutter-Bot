@@ -15,7 +15,24 @@ public sealed class AiModelExecutor(HttpModelTransport transport, ILogger<AiMode
         AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct)
     {
         config = config with { };
-        request = AiRequestBudget.Fit(request, config);
+        try
+        {
+            request = AiRequestBudget.Fit(request, config);
+        }
+        catch (AiInputTooLargeException) when (request.HasImages)
+        {
+            // 图片按固定额度占预算，超大时先降级为纯文本重试一次；正文仍超限才失败。
+            var dropped = request.Messages.Sum(m => m.Images.Count);
+            logger.LogWarning("输入预算超限，已移除 {Count} 张图片后重试 purpose={Purpose}",
+                dropped, AiCallScope.Current?.Purpose);
+            request = request with
+            {
+                Messages = request.Messages
+                    .Select(m => m.Images.Count == 0 ? m : m with { Images = Array.Empty<AiResolvedImage>() })
+                    .ToList()
+            };
+            request = AiRequestBudget.Fit(request, config);
+        }
         try
         {
             return await InvokeAsync(request, config, strategy, ct);

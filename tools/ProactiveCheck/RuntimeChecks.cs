@@ -124,6 +124,37 @@ internal static class RuntimeChecks
             await queue.StopAsync(stop.Token);
             Require(cancelled.Task.IsCompleted && queue.ExecuteTask!.IsCompleted, "stop must await cancelled workers");
         }
+        using (var queue = new ConversationWorkQueue(NullLogger<ConversationWorkQueue>.Instance, clock, 10, 1))
+        {
+            using var host = new CancellationTokenSource();
+            var started = Signal(); var release = Signal();
+            var inFlightCancelled = false; var queuedCancelled = false; var queuedRan = false;
+            queue.TryEnqueue("a", async ct =>
+            {
+                started.SetResult();
+                await release.Task;
+                inFlightCancelled = ct.IsCancellationRequested;
+            });
+            queue.TryEnqueue("a", ct =>
+            {
+                queuedCancelled = ct.IsCancellationRequested;
+                queuedRan = true;
+                return Task.CompletedTask;
+            });
+            await queue.StartAsync(host.Token);
+            await started.Task;
+
+            // 宿主停机先触发 ApplicationStopping，然后才调用 StopAsync。
+            host.Cancel();
+            await Task.Delay(50);
+            Require(!queue.TryEnqueue("late", _ => Task.CompletedTask), "host stop must close admission");
+            release.SetResult();
+
+            using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await queue.StopAsync(stop.Token);
+            Require(queuedRan && !inFlightCancelled && !queuedCancelled,
+                "accepted work must drain with the queue-owned token");
+        }
     }
 
     private static async Task ModelContractsAsync()
@@ -254,6 +285,20 @@ internal static class RuntimeChecks
         }
         Require(env.Http.Requests.Count == before, "oversize must fail before paid model invocation");
         Require(ContextBuilder.InputTokenBudget(512) == ContextBuilder.InputTokenBudget(2048), "input and output budgets independent");
+
+        // 小窗口模型下，择机输出上限必须给输入留空间，不能把预算压成 0。
+        var evalTokens = AiRequestBudget.ClampOutputTokens(8192, 4096);
+        Require(evalTokens == 2560 && AiRequestBudget.InputBudget(evalTokens, 4096) >= AiRequestBudget.MinInputTokens,
+            "output ceiling must preserve the minimum input budget");
+
+        // 图片超限时先降级为纯文本重试，正文能放下就不该整轮失败。
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("看到了"));
+        var imageCount = env.Http.Requests.Count;
+        var imageConfig = config with { ContextWindowTokens = 4096, MaxInputTokens = 2048, MaxTokens = 512 };
+        var downgraded = await ai.ChatWithImagesAsync("system", "看图", ["synthetic://image"], imageConfig);
+        Require(downgraded.Content == "看到了" && env.Http.Requests.Count == imageCount + 1,
+            "oversize images must retry once without images");
+        Require(!env.Http.Requests.Last().Body.Contains("image_url"), "retry must actually drop image payloads");
     }
 
     private static OutgoingReply Reply(string group = "GROUP", bool proactive = false) => new()
@@ -275,6 +320,20 @@ internal static class RuntimeChecks
             Require(!await db.ChatMessages.AnyAsync(), "unsent content must not enter history");
             Require(await scope.ServiceProvider.GetRequiredService<IMessageRepository>().SumTokensAsync() == 18, "failed delivery usage retained");
         }
+        using (var cancelled = new CancellationTokenSource())
+        {
+            cancelled.Cancel();
+            var beforeCalls = env.Api.PassiveCalls;
+            var skipped = await dispatcher.SendAsync(Reply(), true, cancelled.Token);
+            Require(skipped.State == DeliveryStates.Skipped
+                && skipped.Detail == ProactiveOutcomes.SkippedCancelled
+                && env.Api.PassiveCalls == beforeCalls,
+                "pre-send cancellation must be skipped, not unknown");
+        }
+        Require(ProactiveOutcomes.FromDeliveryDetail(ProactiveOutcomes.SkippedCancelled)
+            == ProactiveOutcomes.SkippedCancelled, "known outcome must survive");
+        Require(ProactiveOutcomes.FromDeliveryDetail("raw platform error")
+            == ProactiveOutcomes.FailedApiError, "raw platform text must not become an outcome code");
         env.Api.Passive = null;
         var outgoing = Reply();
         var sent = await dispatcher.SendAsync(outgoing, true);

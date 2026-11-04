@@ -20,7 +20,8 @@ public sealed class ReplyDispatcher(
 
     public async Task<DeliveryResult> SendAsync(OutgoingReply reply, bool allowActive, CancellationToken ct = default)
     {
-        ct.ThrowIfCancellationRequested();
+        if (ct.IsCancellationRequested)
+            return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedCancelled);
         ProactiveChatConfig? limits = null;
         if (reply.IsProactive)
         {
@@ -36,14 +37,19 @@ public sealed class ReplyDispatcher(
         }
 
         reply.CreatedAt = clock.GetUtcNow().UtcDateTime;
-        var blocked = await store.PrepareAsync(reply, limits, ct);
+        string? blocked;
+        try { blocked = await store.PrepareAsync(reply, limits, ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedCancelled);
+        }
         if (blocked is not null) return new DeliveryResult(DeliveryStates.Skipped, Detail: blocked);
         var conversation = reply.GroupId is null ? $"u:{reply.PeerUserId}" : $"g:{reply.GroupId}";
         var fingerprint = $"{conversation}:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(reply.Content)))}";
         DeliveryResult result;
         if (!reply.IsProactive && _recent.TryGetValue(fingerprint, out var last)
             && clock.GetUtcNow() - last < TimeSpan.FromSeconds(8))
-            result = new DeliveryResult(DeliveryStates.Skipped, Detail: "skipped_duplicate");
+            result = new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedDuplicate);
         else
         {
             result = await SendCoreAsync(reply, allowActive, ct);
@@ -70,6 +76,9 @@ public sealed class ReplyDispatcher(
 
     private async Task<DeliveryResult> SendCoreAsync(OutgoingReply reply, bool allowActive, CancellationToken ct)
     {
+        // 只有真正开始调用平台接口之后的取消才算“结果未知”。发送前取消没有副作用，
+        // 记为 skipped 才能和网络中断区分开，也不会白占主动发言配额。
+        var sendStarted = false;
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -78,6 +87,7 @@ public sealed class ReplyDispatcher(
                 try
                 {
                     var seq = sequences.Next(reply.ReplyToMessageId);
+                    sendStarted = true;
                     var id = reply.GroupId is not null
                         ? await api.SendGroupMessageAsync(reply.GroupId, reply.Content, reply.ReplyToMessageId, seq, ct)
                         : await api.SendPrivateMessageAsync(reply.PeerUserId!, reply.Content, reply.ReplyToMessageId, seq, ct);
@@ -87,12 +97,15 @@ public sealed class ReplyDispatcher(
                 {
                     if (ex.ErrCode is >= 500 and <= 599)
                         return new DeliveryResult(DeliveryStates.Unknown, Detail: ex.Message);
+                    // 平台明确拒收，本条没有发出去；后续改走主动通道仍属发送前。
+                    sendStarted = false;
                     logger.LogWarning("Passive reply rejected id={Id} code={Code}", reply.Id, ex.ErrCode);
                     if (!allowActive) return new DeliveryResult(DeliveryStates.Failed, Detail: ProactiveOutcomes.FailedNoChannel);
                 }
             }
             if (!allowActive) return new DeliveryResult(DeliveryStates.Failed, Detail: ProactiveOutcomes.FailedNoChannel);
             ct.ThrowIfCancellationRequested();
+            sendStarted = true;
             var activeResult = reply.GroupId is not null
                 ? await active.SendGroupActiveAsync(reply.GroupId, reply.Content, ct)
                 : await active.SendPrivateActiveAsync(reply.PeerUserId!, reply.Content, ct);
@@ -102,6 +115,11 @@ public sealed class ReplyDispatcher(
                     Detail: activeResult.Reason is "rejected" ? ProactiveOutcomes.FailedReceiverRejected
                         : activeResult.Reason is "quota_exhausted" or "rate_limited" ? ProactiveOutcomes.FailedRateLimited
                         : activeResult.ErrorMessage ?? ProactiveOutcomes.FailedApiError);
+        }
+        catch (OperationCanceledException) when (!sendStarted)
+        {
+            logger.LogInformation("Delivery cancelled before platform call id={Id}", reply.Id);
+            return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedCancelled);
         }
         catch (Exception ex)
         {

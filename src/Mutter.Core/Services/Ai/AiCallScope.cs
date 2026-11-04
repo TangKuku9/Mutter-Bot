@@ -8,6 +8,7 @@ public sealed class AiCallScope : IDisposable
     private static readonly AsyncLocal<AiCallScope?> Ambient = new();
     private readonly AiCallScope? _parent;
     private readonly CancellationTokenSource? _deadline;
+    private readonly CancellationToken _hostToken;
     private readonly AiCallScope _root;
     private int _attempts;
     private int _promptTokens;
@@ -19,6 +20,7 @@ public sealed class AiCallScope : IDisposable
     {
         _parent = Ambient.Value;
         _root = _parent?._root ?? this;
+        _hostToken = _parent?._root._hostToken ?? ct;
         Purpose = purpose ?? _parent?.Purpose ?? "chat";
         if (_parent is null)
         {
@@ -34,6 +36,8 @@ public sealed class AiCallScope : IDisposable
     public static AiCallScope Begin(CancellationToken ct, string? purpose = null) => new(ct, purpose);
     public static AiCallScope? Current => Ambient.Value?._root;
     public CancellationToken Token { get; }
+    /// <summary>宿主/队列传入的原始令牌；与 120 秒期限取消区分开。</summary>
+    public CancellationToken HostToken => _root._hostToken;
     public string Purpose { get; }
     public int Attempts => _root._attempts;
 

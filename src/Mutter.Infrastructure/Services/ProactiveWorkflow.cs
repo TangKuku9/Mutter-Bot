@@ -4,6 +4,7 @@ using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
 using Mutter.Core.Proactive;
+using Mutter.Core.Services;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
 
@@ -69,9 +70,15 @@ public sealed class ProactiveWorkflow
         try
         {
             using var operation = Mutter.Core.Services.AiCallScope.Begin(ct, "proactive");
-            await SpeakIfAllowedAsync(window, config, operation.Token);
+            await SpeakIfAllowedAsync(window, config, ct, operation.Token);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException ex)
+        {
+            // 队列令牌仍在，说明是模型 120 秒期限到了；这不是发送取消。
+            _logger.LogWarning(ex, "择机发言评估超时 group={GroupId}", window.GroupId);
+            await WriteLogAsync(window, new LogNote(ProactiveOutcomes.FailedAiCall, Detail: "AI 调用超时"), ct);
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "择机发言评估失败 group={GroupId}", window.GroupId);
@@ -79,9 +86,10 @@ public sealed class ProactiveWorkflow
         }
     }
 
-    private async Task SpeakIfAllowedAsync(ProactiveWindow window, ProactiveChatConfig config, CancellationToken ct)
+    private async Task SpeakIfAllowedAsync(ProactiveWindow window, ProactiveChatConfig config,
+        CancellationToken ct, CancellationToken aiToken)
     {
-        if (!await _structuredAi.IsAiConfiguredAsync(ct))
+        if (!await _structuredAi.IsAiConfiguredAsync(aiToken))
         {
             await WriteLogAsync(window, new LogNote(ProactiveOutcomes.SkippedAiUnavailable, Detail: "AI 未配置"), ct);
             return;
@@ -98,8 +106,9 @@ public sealed class ProactiveWorkflow
             ai => ai with
             {
                 MaxContextMessages = config.HistoryMaxMessages,
-                MaxTokens = config.EvalMaxTokens
-            }, ct);
+                // 择机输出上限独立配置，但仍须给上下文留出输入空间；否则小窗口模型会得到 0 预算。
+                MaxTokens = AiRequestBudget.ClampOutputTokens(config.EvalMaxTokens, ai.ContextWindowTokens)
+            }, aiToken);
 
         // 窗口消息同时也躺在上下文历史里，渲染出来是同一行「[昵称]: 正文」。
         // 不剔除就会在同一份 prompt 里被喂两遍（背景一次、当前窗口一次），
@@ -109,11 +118,11 @@ public sealed class ProactiveWorkflow
         // 窗口里的图片直接交给判定这一调用来读，不另起一次"先描述图片再判断"的调用。
         // 先筛再拼提示词：动图和失效链不附，"附了几张"才不会跟实际发出的对不上。
         var images = await _ai.AttachableImagesAsync(
-            window.CollectImages(config.MaxAttachedImages), ct);
+            window.CollectImages(config.MaxAttachedImages), aiToken);
         var startedAt = nowUtc;
 
         // 群记忆：全局开关关了连库都不查；群级覆盖 false 表示这个群单独停用注入（摘要仍保留）
-        var memory = await LoadGroupMemoryAsync(window.GroupId, config, ct);
+        var memory = await LoadGroupMemoryAsync(window.GroupId, config, aiToken);
         // 记的就是真正喂进去的那段：与 BuildUserPrompt 共用同一个字符串，留痕不会和实际对不上
         var memoryText = memory?.Summary?.Trim();
         var memoryCount = string.IsNullOrWhiteSpace(memoryText) ? 0 : 1;
@@ -127,7 +136,7 @@ public sealed class ProactiveWorkflow
             BuildJudgePrompt(context, config.Liveliness),
             ProactivePrompts.BuildUserPrompt(window, history, images.Count, memoryText, nowUtc),
             images,
-            judgeConfig, ct);
+            judgeConfig, aiToken);
 
         if (outcome.Result is null)
         {
@@ -174,7 +183,7 @@ public sealed class ProactiveWorkflow
         {
             searchUsed = true;
             var speech = await RewriteWithSearchAsync(
-                window, context, data, line, searchQuery!, nowUtc, ct);
+                window, context, data, line, searchQuery!, nowUtc, aiToken);
             speechPromptTokens = speech.PromptTokens;
             speechCompletionTokens = speech.CompletionTokens;
 
@@ -200,7 +209,10 @@ public sealed class ProactiveWorkflow
             PromptTokens = outcome.PromptTokens + speechPromptTokens,
             CompletionTokens = outcome.CompletionTokens + speechCompletionTokens
         };
-        var result = await _speaker.SpeakAsync(window, line, config, ct, usage);
+        // 判定/改写成功后，投递不能再受模型 120 秒期限约束；给平台发送独立的 30 秒窗口。
+        using var deliveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deliveryDeadline.CancelAfter(TimeSpan.FromSeconds(30));
+        var result = await _speaker.SpeakAsync(window, line, config, deliveryDeadline.Token, usage);
         if (result.Outcome is ProactiveOutcomes.SentPassive or ProactiveOutcomes.SentActive)
             _observe.MarkSent(window.GroupId, _clock.GetUtcNow().UtcDateTime);
         var logDetail = string.IsNullOrWhiteSpace(searchDetail)

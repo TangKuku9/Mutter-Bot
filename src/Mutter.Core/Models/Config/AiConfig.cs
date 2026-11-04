@@ -32,7 +32,7 @@ public record AiConfig
     /// <summary>模型上下文容量；未知模型使用保守默认值，可经 API 配置。</summary>
     public int ContextWindowTokens { get; set; } = 32768;
     /// <summary>本地输入预算，独立于输出 MaxTokens。</summary>
-    public int MaxInputTokens { get; set; } = 16384;
+    public int MaxInputTokens { get; set; } = 24576;
 
     /// <summary>
     /// @ 回复 / 私聊时最多附带给 AI 的图片张数，0=不带图。

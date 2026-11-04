@@ -97,11 +97,25 @@ public sealed class HostedServiceManager
 
     public async Task StopAllAsync()
     {
-        if (_webApp != null)
+        var app = _webApp;
+        if (app != null)
         {
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-            await _webApp.StopAsync(deadline.Token);
-            await _webApp.DisposeAsync();
+            try
+            {
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                await app.StopAsync(deadline.Token);
+            }
+            catch (Exception ex)
+            {
+                // 停机超时/取消不能阻断后续释放与 Linux 更新替换。
+                Console.Error.WriteLine($"[Host] 停止服务时出错：{ex.Message}");
+            }
+            finally
+            {
+                try { await app.DisposeAsync(); }
+                catch (Exception ex) { Console.Error.WriteLine($"[Host] 释放服务时出错：{ex.Message}"); }
+                _webApp = null;
+            }
         }
 
         Console.WriteLine("[Host] All services stopped");

@@ -9,13 +9,21 @@ namespace Mutter.Core.Services;
 public static class AiRequestBudget
 {
     public const int DefaultContextWindow = 32768;
-    public const int DefaultInputBudget = 16384;
+    public const int DefaultInputBudget = 24576;
     public const int SafetyTokens = 1024;
     public const int ImageTokens = 4096;
+    public const int MinInputTokens = 512;
 
     public static int InputBudget(int outputTokens, int contextWindow = DefaultContextWindow,
         int maxInputTokens = DefaultInputBudget) =>
         Math.Max(0, Math.Min(maxInputTokens, contextWindow - Math.Max(0, outputTokens) - SafetyTokens));
+
+    /// <summary>
+    /// 输出上限必须给上下文留出最小输入空间。配置可能来自旧版本或更小窗口的模型，
+    /// 直接采用会得到 0 输入预算，请求在本地就被判超限。
+    /// </summary>
+    public static int ClampOutputTokens(int requested, int contextWindow) =>
+        Math.Clamp(requested, 64, Math.Max(64, contextWindow - SafetyTokens - MinInputTokens));
 
     public static int EstimateText(string text) => text.Length; // 对中英文均取保守估算
 
