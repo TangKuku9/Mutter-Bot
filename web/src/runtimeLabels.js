@@ -9,7 +9,8 @@ const labels = {
   skipped_cooldown: '仍在冷却', skipped_group_cap: '达到本群日限', skipped_global_cap: '达到全局日限',
   failed_ai_call: '模型调用失败', skipped_ai_unparsable: '判定格式异常', skipped_ai_truncated: '判定输出被截断',
   skipped_ai_unavailable: 'AI 尚未配置', skipped_ai_busy: '模型调用繁忙', skipped_after_search: '检索后决定不发言',
-  skipped_duplicate: '近期已发过相同内容', sent_passive: '已回复消息', sent_active: '已主动发送',
+  skipped_duplicate: '近期已发过相同内容', skipped_cancelled: '发送前已取消',
+  sent_passive: '已回复消息', sent_active: '已主动发送',
   failed_rejected: '接收方拒收', failed_rate_limited: '触发发送频控', failed_no_channel: '没有可用发送方式',
   delivery_unknown: '发送结果未确认', failed_api_error: '平台发送失败'
 }

@@ -37,6 +37,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ProactiveWorkflow>();
         // 择机主动发言评估循环（全局开关关闭时只做空转，不调 AI）
         services.AddHostedService<ProactiveChatHostedService>();
+        // 运行账本保留策略：终态记录超过 90 天后清理，pending 意图保留供核查
+        services.AddHostedService<DataRetentionService>();
 
         // Mutter 官方开放平台 access_token
         services.AddOptions<MutterOptions>().Configure<IConfiguration>((o, cfg) => cfg.GetSection("Mutter").Bind(o));

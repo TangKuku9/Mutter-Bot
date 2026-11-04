@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { LatestRequest, matchesChatMessage } from '../src/latestRequest.js'
+import { runtimeLabel } from '../src/runtimeLabels.js'
 import { tokenBudget } from '../src/tokenBudget.js'
 
 test('旧请求即使忽略取消、最后返回，也不能覆盖新筛选结果', async () => {
@@ -36,6 +37,11 @@ test('群筛选、围观、被 @、Bot 回复和插话使用相同过滤条件',
   assert.equal(matchesChatMessage({ ...observed, hasAtBot: true }, { source: 'at' }), true)
   assert.equal(matchesChatMessage({ ...observed, isBotMessage: true, isProactive: true }, { source: 'bot' }), false)
   assert.equal(matchesChatMessage({ ...observed, isBotMessage: true, isProactive: true }, { source: 'proactive' }), true)
+})
+
+test('发送前取消使用独立结果标签', () => {
+  assert.equal(runtimeLabel('skipped_cancelled'), '发送前已取消')
+  assert.equal(runtimeLabel('delivery_unknown'), '发送结果未确认')
 })
 
 test('容量同时预留输出与安全余量，切换小模型时能发现不相容的输入预算', () => {

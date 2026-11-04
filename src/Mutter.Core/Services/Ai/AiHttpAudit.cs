@@ -54,7 +54,11 @@ public static class AiHttpAudit
         catch (OperationCanceledException)
         {
             response?.Dispose();
-            call.State = ct.IsCancellationRequested ? "cancelled" : "timeout";
+            // ct 通常是 AiCallScope 的 120 秒链接令牌；只有宿主/队列令牌取消才算用户取消，
+            // 否则是生成期限到达，应记为 timeout。
+            call.State = operation is not null
+                ? operation.HostToken.IsCancellationRequested ? "cancelled" : "timeout"
+                : ct.IsCancellationRequested ? "cancelled" : "timeout";
             throw;
         }
         catch

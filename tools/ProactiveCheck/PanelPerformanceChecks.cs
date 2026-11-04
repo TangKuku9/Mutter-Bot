@@ -10,6 +10,7 @@ using Mutter.Core.Services;
 using Mutter.Core.Models.Config;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
+using Mutter.Infrastructure.Services;
 using Mutter.Web.Controllers;
 using Mutter.Web.Services;
 
@@ -213,6 +214,47 @@ internal static partial class RuntimeChecks
             await new GroupsController(db).UpdateGroupConfig("GROUP", update, default);
             Require((await db.GroupMemories.SingleAsync()).Summary == "新合成记忆", "legacy client and unavailable memory do not overwrite summary");
         }
+    }
+
+    private static async Task RetentionAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        var now = env.Clock.GetUtcNow().UtcDateTime;
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.AiCallRecords.AddRange(Call("old-call", now.AddDays(-91)), Call("recent-call", now.AddDays(-89)));
+            db.ActiveMessageAttempts.AddRange(
+                new ActiveMessageAttempt { Key = "old", Scope = "group", AttemptedAt = now.AddDays(-91) },
+                new ActiveMessageAttempt { Key = "recent", Scope = "group", AttemptedAt = now.AddDays(-89) });
+            db.OutgoingReplies.AddRange(
+                Reply("old-reply", DeliveryStates.Sent, now.AddDays(-91)),
+                Reply("recent-reply", DeliveryStates.Sent, now.AddDays(-89)),
+                Reply("old-pending", DeliveryStates.Pending, now.AddDays(-91)));
+            await db.SaveChangesAsync();
+        }
+
+        var retention = new DataRetentionService(env.Services.GetRequiredService<IServiceScopeFactory>(),
+            env.Clock, NullLogger<DataRetentionService>.Instance);
+        await retention.CleanupAsync(default);
+
+        using var read = env.Services.CreateScope();
+        var check = read.ServiceProvider.GetRequiredService<AppDbContext>();
+        Require(await check.AiCallRecords.CountAsync() == 1
+            && await check.ActiveMessageAttempts.CountAsync() == 1
+            && await check.OutgoingReplies.CountAsync() == 2
+            && await check.OutgoingReplies.AnyAsync(r => r.Id == "old-pending"),
+            "retention must remove only expired terminal records");
+
+        static AiCallRecord Call(string id, DateTime at) => new()
+        {
+            Id = id, OperationId = id, Model = "synthetic", Transport = "openai",
+            StartedAt = at, CompletedAt = at, ElapsedMs = 1, State = "success"
+        };
+        static OutgoingReply Reply(string id, string state, DateTime at) => new()
+        {
+            Id = id, BotId = "BOT", Content = "synthetic", State = state, CreatedAt = at
+        };
     }
 
     private static async Task RuntimeSnapshotAsync()

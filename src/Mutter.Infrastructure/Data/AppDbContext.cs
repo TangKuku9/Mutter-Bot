@@ -690,7 +690,13 @@ public class AppDbContext : DbContext
             CREATE INDEX IF NOT EXISTS "IX_AiCallRecords_GroupId_StartedAt" ON "AiCallRecords" ("GroupId", "StartedAt");
             CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Time_Id" ON "ChatMessages" ("CreatedAt", "Id");
             CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Operation" ON "ChatMessages" ("AiOperationId");
+            CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Proactive_Group_Time"
+                ON "ChatMessages" ("IsProactive", "GroupId", "CreatedAt");
+            CREATE INDEX IF NOT EXISTS "IX_ChatMessages_AiModel_Time"
+                ON "ChatMessages" ("AiModelUsed", "CreatedAt") WHERE "AiModelUsed" IS NOT NULL;
             CREATE INDEX IF NOT EXISTS "IX_OutgoingReplies_Operation" ON "OutgoingReplies" ("AiOperationId");
+            CREATE INDEX IF NOT EXISTS "IX_OutgoingReplies_Model_Operation"
+                ON "OutgoingReplies" ("Model", "AiOperationId");
             """, ct);
     }
 

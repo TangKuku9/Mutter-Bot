@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Mutter.Core.Interfaces;
+using Mutter.Core.Models;
 using Mutter.Core.Services;
 using Mutter.Infrastructure.Data;
 
@@ -17,9 +18,16 @@ public sealed class RuntimeController(IConversationWorkQueue queue, AppDbContext
             .ThenByDescending(c => c.Id).Take(100).ToListAsync(ct);
         var successful = calls.Where(c => c.State == "success").Select(c => c.ElapsedMs).Order().ToArray();
         var names = await db.KnownGroups.AsNoTracking().ToDictionaryAsync(g => g.GroupOpenId, g => g.Name, ct);
+        var snapshot = queue.Snapshot();
+        // 列表只需要状态摘要；步骤只随 /operations/{id} 返回，避免每 5 秒轮询重复搬运过程明细。
+        var queueView = snapshot with
+        {
+            Tasks = snapshot.Tasks.Take(60)
+                .Select(t => t with { Steps = Array.Empty<RuntimeStep>() }).ToArray()
+        };
         return Ok(new
         {
-            Queue = queue.Snapshot(), Calls = calls.Take(20), GroupNames = names, ImageCache = images.Snapshot(),
+            Queue = queueView, Calls = calls.Take(20), GroupNames = names, ImageCache = images.Snapshot(),
             SampleCount = calls.Count, FailureCount = calls.Count(c => c.State != "success"),
             AverageMs = successful.Length == 0 ? 0 : (long)successful.Average(),
             P95Ms = successful.Length == 0 ? 0 : successful[(int)Math.Ceiling(successful.Length * .95) - 1]

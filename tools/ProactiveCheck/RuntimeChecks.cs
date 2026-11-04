@@ -48,7 +48,8 @@ internal static partial class RuntimeChecks
             ("图片缓存容量、下载并发与取消隔离", ImageLimitsAsync),
             ("普通回复群记忆与各层开关", SharedMemoryAsync),
             ("群设置与记忆保存事务", AtomicGroupSettingsAsync),
-            ("运行队列快照与调用过程关联", RuntimeSnapshotAsync)
+            ("运行队列快照与调用过程关联", RuntimeSnapshotAsync),
+            ("运行账本保留策略只清理过期终态", RetentionAsync)
         })
         {
             try { await run().WaitAsync(TimeSpan.FromSeconds(30)); Console.WriteLine($"PASS  {name}"); }

@@ -85,8 +85,9 @@ const loadDetail = async () => {
   detailLoading.value = true
   const id = operationId.value
   try {
-    await detailRequest.run((signal) => api.get(`/runtime/operations/${encodeURIComponent(id)}`, { signal }),
-      ({ data }) => { detail.value = data })
+    await detailRequest.run((signal) => api.get(`/runtime/operations/${encodeURIComponent(id)}`, {
+      signal, skipErrorMessage: true
+    }), ({ data }) => { detail.value = data })
   } catch { /* 统一错误提示 */ }
   finally { if (!detailRequest.pending) detailLoading.value = false }
 }
