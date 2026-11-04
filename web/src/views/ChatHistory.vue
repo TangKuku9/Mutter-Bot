@@ -15,6 +15,7 @@
 
       <el-switch v-model="live" active-text="实时" style="margin-left: 4px" @change="toggleLive" />
       <el-tag size="small" :type="connOk ? 'success' : 'info'">{{ connOk ? '流已连' : '流未连' }}</el-tag>
+      <el-button v-if="hasNew" size="small" type="primary" plain @click="reload">有新消息，回到最新</el-button>
       <span class="count">共 {{ total }} 条</span>
       <el-button size="small" @click="reload">刷新</el-button>
     </div>
@@ -57,8 +58,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
-import { HubConnectionBuilder, LogLevel } from '@microsoft/signalr'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { subscribeRealtime, realtimeState } from '../realtime'
+import { LatestRequest, matchesChatMessage } from '../latestRequest'
 import api from '../api'
 
 const items = ref([])
@@ -70,8 +72,11 @@ const groupId = ref('')
 const source = ref('')
 const groupOptions = ref([])
 const live = ref(true)
-const connOk = ref(false)
-let conn = null
+const connOk = computed(() => live.value && realtimeState.connected)
+const hasNew = ref(false)
+const request = new LatestRequest()
+let unsubscribe = null
+let disposed = false
 
 // 库里存的是 UTC 且序列化不带时区标记，直接 new Date() 会被当成本地时间，
 // 于是刚发的消息会显示成 8 小时前——看起来就像“记录里查不到”。
@@ -98,24 +103,19 @@ const rowClass = ({ row }) => {
   return ''
 }
 
-const matches = (m) => {
-  if (groupId.value && m.groupId !== groupId.value) return false
-  if (source.value === 'at') return !m.isBotMessage && m.hasAtBot
-  if (source.value === 'observe') return !m.isBotMessage && !m.hasAtBot && m.chatType !== 1
-  if (source.value === 'bot') return m.isBotMessage && !m.isProactive
-  if (source.value === 'proactive') return m.isProactive
-  return true
-}
+const matches = (m) => matchesChatMessage(m, { groupId: groupId.value, source: source.value })
 
 const load = async () => {
   loading.value = true
+  const params = { page: page.value, pageSize, groupId: groupId.value || undefined, source: source.value || undefined }
   try {
-    const { data } = await api.get('/chat/history', {
-      params: { page: page.value, pageSize, groupId: groupId.value || undefined, source: source.value || undefined }
+    await request.run((signal) => api.get('/chat/history', { params, signal }), ({ data }) => {
+      items.value = data.items
+      total.value = data.totalCount
+      if (params.page === 1) hasNew.value = false
     })
-    items.value = data.items
-    total.value = data.totalCount
-  } finally { loading.value = false }
+  } catch { /* 请求错误由统一提示显示 */ }
+  finally { if (!request.pending) loading.value = false }
 }
 
 const reload = () => { page.value = 1; load() }
@@ -135,41 +135,38 @@ const refreshSoon = () => {
   throttle = setTimeout(() => { throttle = null; if (page.value === 1) load() }, 1500)
 }
 
-const connect = async () => {
-  conn = new HubConnectionBuilder()
-    .withUrl('/hub/botstatus')
-    .configureLogging(LogLevel.None)
-    .withAutomaticReconnect()
-    .build()
-
-  conn.on('ReceiveMessage', (m) => {
-    total.value += 1
-    if (page.value === 1 && matches(m)) items.value = [m, ...items.value].slice(0, pageSize)
+const connect = () => {
+  if (unsubscribe || disposed) return
+  unsubscribe = subscribeRealtime({
+    ReceiveMessage: (m) => {
+      if (!matches(m)) return
+      if (page.value === 1) refreshSoon()
+      else hasNew.value = true
+    },
+    AiResponseCompleted: (m) => {
+      if (groupId.value && m.groupId !== groupId.value) return
+      if (source.value === 'at' || source.value === 'observe') return
+      if (page.value === 1) refreshSoon()
+      else hasNew.value = true
+    },
+    Resync: () => { if (page.value === 1) refreshSoon(); else hasNew.value = true }
   })
-  // Bot 的应答与择机插话不走 ReceiveMessage，靠 AI 完成事件回推整页
-  conn.on('AiResponseCompleted', refreshSoon)
-  conn.on('ConnectionStatusChanged', () => { connOk.value = conn.state === 'Connected' })
-  conn.onreconnected(() => { connOk.value = true })
-  conn.onclose(() => { connOk.value = false })
-
-  try { await conn.start(); connOk.value = true } catch { connOk.value = false }
 }
-
-const disconnect = async () => {
-  if (conn) { await conn.stop().catch(() => {}); conn = null }
-  connOk.value = false
+const disconnect = () => {
+  unsubscribe?.()
+  unsubscribe = null
+  if (throttle) { clearTimeout(throttle); throttle = null }
 }
-
-const toggleLive = async (on) => { on ? await connect() : await disconnect() }
+const toggleLive = (on) => { on ? connect() : disconnect() }
 
 onMounted(async () => {
-  await Promise.all([load(), loadGroups()])
-  if (live.value) await connect()
+  if (live.value) connect()
+  await Promise.all([load(), loadGroups()]).catch(() => {})
 })
-
 onUnmounted(() => {
-  if (throttle) clearTimeout(throttle)
+  disposed = true
   disconnect()
+  request.cancel()
 })
 </script>
 

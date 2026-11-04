@@ -2,6 +2,8 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
+using Mutter.Core.Models;
+using Mutter.Core.Services;
 
 namespace Mutter.Infrastructure.Services;
 
@@ -11,7 +13,7 @@ public sealed class ConversationWorkQueue(
     int capacity = 256, int parallelism = 3) : BackgroundService, IConversationWorkQueue
 {
     private sealed record Work(Func<CancellationToken, Task> Run, bool Background, DateTimeOffset ExpiresAt,
-        Func<CancellationToken, Task>? OnExpired);
+        Func<CancellationToken, Task>? OnExpired, ConversationTaskTrace Trace);
     private readonly object _gate = new();
     private readonly Dictionary<string, Queue<Work>> _sessions = new();
     private readonly Queue<string> _foreground = new();
@@ -26,15 +28,19 @@ public sealed class ConversationWorkQueue(
     private bool _accepting = true;
     private int _outstanding;
     private int _backgroundInFlight;
+    private int _running;
+    private long _rejected;
+    private long _expired;
+    private readonly Queue<ConversationTaskTrace> _recent = new();
 
     public bool TryEnqueue(string conversationId, Func<CancellationToken, Task> work,
         bool background = false, TimeSpan? maxQueueAge = null,
-        Func<CancellationToken, Task>? onExpired = null)
+        Func<CancellationToken, Task>? onExpired = null, string? description = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
         lock (_gate)
         {
-            if (!_accepting || _outstanding >= capacity) return false;
+            if (!_accepting || _outstanding >= capacity) { _rejected++; return false; }
             if (!_sessions.TryGetValue(conversationId, out var queue))
             {
                 queue = new Queue<Work>();
@@ -43,12 +49,20 @@ public sealed class ConversationWorkQueue(
                 _ready.Writer.TryWrite(true);
             }
             // 防止一个会话占满全局队列；包含正在执行的一项。
-            if (queue.Count >= 16) return false;
+            if (queue.Count >= 16) { _rejected++; return false; }
             queue.Enqueue(new Work(work, background,
-                clock.GetUtcNow() + (maxQueueAge ?? TimeSpan.FromMinutes(2)), onExpired));
+                clock.GetUtcNow() + (maxQueueAge ?? TimeSpan.FromMinutes(2)), onExpired,
+                new(conversationId, description ?? (background ? "主动评估" : "会话任务"), background, clock.GetUtcNow(), clock)));
             _outstanding++;
             return true;
         }
+    }
+
+    public ConversationQueueSnapshot Snapshot()
+    {
+        lock (_gate) return new(capacity, parallelism, _outstanding - _running, _running, _rejected, _expired,
+            _accepting, _sessions.Values.SelectMany(q => q).Select(w => w.Trace.Snapshot())
+                .Concat(_recent.Reverse().Select(t => t.Snapshot())).ToArray());
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -84,28 +98,48 @@ public sealed class ConversationWorkQueue(
                 if (_foreground.Count == 0 && (_background.Count == 0 || _backgroundInFlight >= 1)) continue;
                 id = (_foreground.Count > 0 ? _foreground : _background).Dequeue();
                 work = _sessions[id].Peek();
+                _running++;
                 if (work.Background) _backgroundInFlight++;
             }
+            using var activity = new RuntimeActivity(work.Trace);
+            var state = "completed";
             try
             {
                 if (clock.GetUtcNow() >= work.ExpiresAt)
                 {
+                    state = "expired";
+                    lock (_gate) _expired++;
                     logger.LogWarning("Conversation work expired conversation={Conversation}", id);
                     if (work.OnExpired is not null) await work.OnExpired(ct);
+                    work.Trace.Outcome("expired");
                 }
                 else
                 {
+                    work.Trace.Start();
                     using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     deadline.CancelAfter(TimeSpan.FromMinutes(3));
                     await work.Run(deadline.Token);
                 }
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-            catch (Exception ex) { logger.LogError(ex, "Conversation work failed conversation={Conversation}", id); }
+            catch (OperationCanceledException)
+            {
+                state = ct.IsCancellationRequested ? "cancelled" : "timeout";
+                work.Trace.Outcome(state);
+            }
+            catch (Exception ex)
+            {
+                state = "failed";
+                work.Trace.Outcome("failed", ex.GetType().Name);
+                logger.LogError(ex, "Conversation work failed conversation={Conversation}", id);
+            }
             finally
             {
+                work.Trace.Finish(state);
                 lock (_gate)
                 {
+                    _running--;
+                    _recent.Enqueue(work.Trace);
+                    while (_recent.Count > 100) _recent.Dequeue();
                     var queue = _sessions[id];
                     queue.Dequeue();
                     _outstanding--;

@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
 // 版本号唯一来源是仓库根目录的 Directory.Build.props，避免前端与程序集各写一份
 const buildProps = readFileSync(
@@ -13,7 +15,7 @@ if (!appVersion) throw new Error('Directory.Build.props 缺少 <Version>')
 
 // 构建产物输出到后端静态资源目录，随 dotnet publish 一起分发
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), Components({ dts: false, resolvers: [ElementPlusResolver()] })],
   define: {
     __APP_VERSION__: JSON.stringify(appVersion)
   },

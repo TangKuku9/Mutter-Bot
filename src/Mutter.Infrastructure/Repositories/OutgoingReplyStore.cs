@@ -22,7 +22,7 @@ public sealed class OutgoingReplyStore(IServiceScopeFactory scopes, TimeProvider
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             await using var tx = await db.Database.BeginTransactionAsync(ct);
             if (await db.OutgoingReplies.AnyAsync(r => r.Id == reply.Id, ct))
-                return "skipped_duplicate";
+                return ProactiveOutcomes.SkippedDuplicate;
             if (reply.IsProactive && limits is not null)
             {
                 var blocked = await BlockReasonAsync(db, reply.GroupId!, limits, ct);
@@ -92,6 +92,7 @@ public sealed class OutgoingReplyStore(IServiceScopeFactory scopes, TimeProvider
                     GroupId = reply.GroupId, PeerUserId = reply.PeerUserId,
                     UserId = reply.BotId, UserName = "Bot", PlainText = reply.Content,
                     IsBotMessage = true, IsProactive = reply.IsProactive, AiModelUsed = reply.Model,
+                    AiOperationId = reply.AiOperationId,
                     PromptTokens = reply.Model is null ? null : reply.PromptTokens,
                     CompletionTokens = reply.Model is null ? null : reply.CompletionTokens,
                     CreatedAt = entity.CompletedAt.Value

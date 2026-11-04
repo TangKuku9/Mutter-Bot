@@ -251,7 +251,9 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { HubConnectionBuilder, LogLevel } from '@microsoft/signalr'
+import { subscribeRealtime } from '../realtime'
+import { LatestRequest } from '../latestRequest'
+import { useUnsavedChanges } from '../useUnsavedChanges'
 import api from '../api'
 import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
@@ -488,6 +490,9 @@ const fmt = (s) => (s ? new Date(s + (s.endsWith('Z') ? '' : 'Z')).toLocaleStrin
 const outcomeLabel = (o) => outcomeMap[o]?.[0] || o
 const outcomeType = (o) => outcomeMap[o]?.[1] || 'info'
 const markDirty = () => { dirty.value = true }
+useUnsavedChanges(dirty)
+const logRequest = new LatestRequest()
+const statusRequest = new LatestRequest()
 
 const loadConfig = async () => {
   const { data } = await api.get('/proactive/config')
@@ -504,8 +509,7 @@ const loadConfig = async () => {
 }
 
 const loadStatus = async () => {
-  const { data } = await api.get('/proactive/status')
-  status.value = data
+  await statusRequest.run((signal) => api.get('/proactive/status', { signal }), ({ data }) => { status.value = data })
 }
 
 const loadLogs = async () => {
@@ -513,11 +517,12 @@ const loadLogs = async () => {
   try {
     const params = { page: page.value, pageSize }
     if (filterOutcome.value) params.outcome = filterOutcome.value
-    const { data } = await api.get('/proactive/logs', { params })
-    logs.value = data.items
-    logTotal.value = data.totalCount
+    await logRequest.run((signal) => api.get('/proactive/logs', { params, signal }), ({ data }) => {
+      logs.value = data.items
+      logTotal.value = data.totalCount
+    })
   } finally {
-    logsLoading.value = false
+    if (!logRequest.pending) logsLoading.value = false
   }
 }
 
@@ -543,35 +548,35 @@ const loadAll = async () => {
 
 // 后端每写一行决策留痕（说与不说都算）就推一次 ProactiveEvaluated，
 // 这里节流刷新：不翻页时留痕与今日统计自动跟上，翻页查看不被打断
-let conn = null
+let unsubscribe = null
+let disposed = false
 let refreshTimer = null
 const refreshSoon = () => {
-  if (refreshTimer) return
+  if (disposed || refreshTimer) return
   refreshTimer = setTimeout(async () => {
     refreshTimer = null
-    await loadStatus()
-    if (page.value === 1) await loadLogs()
+    try {
+      await loadStatus()
+      if (!disposed && page.value === 1) await loadLogs()
+    } catch { /* 统一错误提示 */ }
   }, 1500)
 }
 
-const connectHub = async () => {
-  conn = new HubConnectionBuilder()
-    .withUrl('/hub/botstatus')
-    .configureLogging(LogLevel.None)
-    .withAutomaticReconnect()
-    .build()
-  conn.on('ProactiveEvaluated', refreshSoon)
-  try { await conn.start() } catch { /* 面板离线时退回手动刷新 */ }
+const connectHub = () => {
+  if (disposed) return
+  unsubscribe = subscribeRealtime({ ProactiveEvaluated: refreshSoon, Resync: refreshSoon })
 }
-
-const disconnectHub = async () => {
+const disconnectHub = () => {
+  disposed = true
   if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null }
-  if (conn) { await conn.stop().catch(() => {}); conn = null }
+  unsubscribe?.()
+  logRequest.cancel()
+  statusRequest.cancel()
 }
 
 onMounted(async () => {
-  await loadAll()
-  await connectHub()
+  connectHub()
+  await loadAll().catch(() => {})
 })
 
 onUnmounted(disconnectHub)

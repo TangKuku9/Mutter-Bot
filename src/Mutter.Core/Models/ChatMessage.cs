@@ -23,6 +23,7 @@ public class ChatMessage
     /// </summary>
     public string? PeerUserId { get; set; }
     public string? AiModelUsed { get; set; }
+    public string? AiOperationId { get; set; }
     public int? PromptTokens { get; set; }
     public int? CompletionTokens { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

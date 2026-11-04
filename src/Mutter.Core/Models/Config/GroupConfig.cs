@@ -22,7 +22,7 @@ public class GroupConfig
     public string? ActiveCharacter { get; set; }
 
     /// <summary>
-    /// 本群是否允许把群记忆注入择机判定。null = 跟随全局。
+    /// 本群是否允许把群记忆用于普通回复和择机判定。null/true 均受各自全局开关控制。
     /// 只控制"用不用"，不控制"存不存"：设成 false 后摘要仍在，随时能改回来。
     /// </summary>
     public bool? MemoryInjectionEnabled { get; set; }

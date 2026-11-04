@@ -16,6 +16,7 @@ public class AiConfigInputDto
     public int MaxContextMessages { get; set; }
     public int ContextWindowTokens { get; set; } = 32768;
     public int MaxInputTokens { get; set; } = 16384;
+    public bool GroupMemoryInjectionEnabled { get; set; } = true;
 
     /// <summary>@ 回复 / 私聊最多附带几张图，0=不带图。</summary>
     public int MaxAttachedImages { get; set; }

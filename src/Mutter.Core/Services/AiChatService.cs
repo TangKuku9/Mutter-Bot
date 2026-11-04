@@ -116,9 +116,12 @@ public class AiChatService : IAiChatService
     {
         var keep = new List<(string, AiResolvedImage)>(imageUrls.Count);
         long total = 0;
-        foreach (var url in imageUrls)
+        RuntimeActivity.Current?.Mark("images", $"{imageUrls.Count} 张");
+        var images = await Task.WhenAll(imageUrls.Select(url => _imageResolver.ResolveAsync(url, ct)));
+        for (var index = 0; index < imageUrls.Count; index++)
         {
-            var image = await _imageResolver.ResolveAsync(url, ct);
+            var url = imageUrls[index];
+            var image = images[index];
             if (image is null) continue;
 
             if (total + image.Data.Length > AiImageResolver.MaxRequestImageBytes)

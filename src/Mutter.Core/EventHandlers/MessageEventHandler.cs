@@ -504,7 +504,7 @@ public class MessageEventHandler
                 incoming.Id > 0 ? incoming.Id : null);
             await work(token);
         }, onExpired: token => SendReplyAsync(incoming.GroupId, incoming.GroupId is null ? incoming.UserId : null,
-            incoming.MessageId, "等待回复超时，请稍后再试。", token))) return;
+            incoming.MessageId, "等待回复超时，请稍后再试。", token), description: incoming.UserName)) return;
         await SendReplyAsync(incoming.GroupId, incoming.GroupId is null ? incoming.UserId : null,
             incoming.MessageId, "AI 繁忙，请稍后再试。", ct);
     }
@@ -515,7 +515,8 @@ public class MessageEventHandler
         // 队列令牌只负责“宿主是否还在跑”；120 秒生成期限只覆盖模型调用。
         // 生成成功后必须用一个独立的投递期限，否则截止时间一到，已经写好的回复会被丢掉。
         var hostToken = ct;
-        using var operation = AiCallScope.Begin(ct, "reply");
+        using var operation = AiCallScope.Begin(ct, "reply", new(groupOpenId, senderId, senderName, msgId));
+        RuntimeActivity.Current?.Mark("context");
         ct = operation.Token;
         AiChatResponse response;
         try
@@ -564,6 +565,14 @@ public class MessageEventHandler
         catch (OperationCanceledException)
         {
             _logger.LogInformation("AI reply cancelled msg={Message}", msgId);
+            RuntimeActivity.Current?.Outcome(hostToken.IsCancellationRequested ? "cancelled" : "timeout");
+            if (!hostToken.IsCancellationRequested)
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
+                deadline.CancelAfter(TimeSpan.FromSeconds(10));
+                await SendReplyAsync(groupOpenId, userOpenId, msgId, "AI 处理超时，请稍后再试。", deadline.Token);
+                RuntimeActivity.Current?.Outcome("timeout");
+            }
             return;
         }
         catch (Exception ex)
@@ -574,6 +583,7 @@ public class MessageEventHandler
             using var errorDeadline = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
             errorDeadline.CancelAfter(TimeSpan.FromSeconds(10));
             await SendReplyAsync(groupOpenId, userOpenId, msgId, error, errorDeadline.Token);
+            RuntimeActivity.Current?.Outcome("failed", ex is AiInputTooLargeException ? ex.Message : "模型生成失败");
             return;
         }
 

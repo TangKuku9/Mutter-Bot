@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div v-loading="loading">
     <el-card shadow="never">
       <div class="toolbar">
         <span>统计范围：</span>
@@ -12,6 +12,15 @@
       </div>
     </el-card>
 
+    <el-card shadow="never" style="margin-top: 16px">
+      <el-descriptions :column="3" border>
+        <el-descriptions-item label="实际模型请求">{{ summary.callCount ?? 0 }}</el-descriptions-item>
+        <el-descriptions-item label="失败 / 取消">{{ summary.failedCount ?? 0 }}</el-descriptions-item>
+        <el-descriptions-item label="未返回完整用量">{{ summary.unknownUsageCount ?? 0 }}</el-descriptions-item>
+      </el-descriptions>
+      <p class="stat-note">用量为上游已返回的 Token；未返回的部分不按零费用推算。包含主动评估、搜索、重试、决定不发言的调用和管理员手动探测。</p>
+      <p v-if="summary.legacyCount" class="stat-note">另有 {{ summary.legacyCount }} 条历史回复用量已保留；旧记录无法还原实际请求次数和使用者，不计入实际请求数与用户排行。</p>
+    </el-card>
     <el-row :gutter="16" style="margin-top: 16px">
       <el-col :span="12">
         <el-card shadow="never">
@@ -26,7 +35,7 @@
             <el-table-column label="群" show-overflow-tooltip>
               <template #default="{ row }">{{ row.groupName || row.groupId }}</template>
             </el-table-column>
-            <el-table-column prop="callCount" label="调用" width="80" />
+            <el-table-column prop="callCount" label="实际请求" width="90" />
             <el-table-column label="Token" width="120">
               <template #default="{ row }">{{ (row.totalTokens ?? 0).toLocaleString() }}</template>
             </el-table-column>
@@ -36,11 +45,11 @@
     </el-row>
 
     <el-card shadow="never" style="margin-top: 16px">
-      <template #header><b>用户 Token 排行（Top {{ users.length }}）</b></template>
+      <template #header><b>提问用户 Token 排行（Top {{ users.length }}）</b></template>
       <el-table :data="users" size="small">
         <el-table-column prop="userName" label="用户" width="180" />
         <el-table-column prop="userId" label="OpenId" show-overflow-tooltip />
-        <el-table-column prop="callCount" label="调用" width="80" />
+        <el-table-column prop="callCount" label="实际请求" width="90" />
         <el-table-column label="Token" width="120">
           <template #default="{ row }">{{ (row.totalTokens ?? 0).toLocaleString() }}</template>
         </el-table-column>
@@ -56,6 +65,7 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent, GraphicComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import api from '../api'
+import { LatestRequest } from '../latestRequest'
 import { panelSettings } from '../panelSettings'
 
 echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, GraphicComponent, CanvasRenderer])
@@ -64,6 +74,9 @@ const days = ref(7)
 const daily = ref([])
 const groups = ref([])
 const users = ref([])
+const summary = ref({})
+const loading = ref(false)
+const request = new LatestRequest()
 const trendEl = ref(null)
 
 let chart = null
@@ -186,14 +199,17 @@ const renderChart = () => {
 }
 
 const load = async () => {
-  const [d, g, u] = await Promise.all([
-    api.get('/chat/token-stats', { params: { days: days.value } }),
-    api.get('/chat/token-stats/groups', { params: { days: days.value, top: 10 } }),
-    api.get('/chat/token-stats/users', { params: { days: days.value, top: 10 } })
-  ])
-  daily.value = d.data || []
-  groups.value = g.data || []
-  users.value = u.data || []
+  loading.value = true
+  const range = days.value
+  try {
+    await request.run((signal) => api.get('/chat/usage', { params: { days: range }, signal }), ({ data }) => {
+      daily.value = data.daily || []
+      groups.value = (data.groups || []).slice(0, 10)
+      users.value = (data.users || []).slice(0, 10)
+      summary.value = data.summary || {}
+    })
+  } catch { /* 统一错误提示 */ }
+  finally { if (!request.pending) loading.value = false }
 }
 
 onMounted(() => {
@@ -207,6 +223,7 @@ onMounted(() => {
 watch([daily, () => panelSettings.primaryColor, () => panelSettings.darkMode], renderChart, { deep: true })
 
 onBeforeUnmount(() => {
+  request.cancel()
   resizeObserver?.disconnect()
   chart?.dispose()
   chart = null
@@ -214,6 +231,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.stat-note { color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
 .toolbar { display: flex; align-items: center; gap: 10px; }
 .trend-chart { width: 100%; height: 420px; }
 </style>

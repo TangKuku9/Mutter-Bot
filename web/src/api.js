@@ -7,6 +7,7 @@ const api = axios.create({ baseURL: '/api', timeout: 30000 })
 api.interceptors.response.use(
   (res) => res,
   (err) => {
+    if (axios.isCancel(err)) return Promise.reject(err)
     if (err.response?.status === 401 && !location.pathname.includes('login')) {
       location.href = `/login.html?return=${encodeURIComponent(location.pathname + location.hash)}`
     }

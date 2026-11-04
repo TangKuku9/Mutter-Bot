@@ -23,7 +23,7 @@ using Mutter.Infrastructure.Repositories;
 using Mutter.Infrastructure.Services;
 
 /// <summary>只使用合成标识符、临时 SQLite 和假 HTTP，不读取部署数据或访问外部服务。</summary>
-internal static class RuntimeChecks
+internal static partial class RuntimeChecks
 {
     public static async Task<bool> RunAsync()
     {
@@ -42,7 +42,14 @@ internal static class RuntimeChecks
             ("排队消息历史边界与上一轮回复", TurnHistoryAsync),
             ("完整消息管线串行回复与持久化", MessagePipelineAsync),
             ("跨群主动日限的原子预占", ProactiveReservationAsync),
-            ("旧模型升级幂等与数据保留", SchemaAsync)
+            ("旧模型升级幂等与数据保留", SchemaAsync),
+            ("实际调用账本、用户归属、失败和历史用量", UsageLedgerAsync),
+            ("统计 SQL 聚合、缓存与大记录集", StatisticsPerformanceAsync),
+            ("图片缓存容量、下载并发与取消隔离", ImageLimitsAsync),
+            ("普通回复群记忆与各层开关", SharedMemoryAsync),
+            ("群设置与记忆保存事务", AtomicGroupSettingsAsync),
+            ("运行队列快照与调用过程关联", RuntimeSnapshotAsync),
+            ("运行账本保留策略只清理过期终态", RetentionAsync)
         })
         {
             try { await run().WaitAsync(TimeSpan.FromSeconds(30)); Console.WriteLine($"PASS  {name}"); }
@@ -344,7 +351,8 @@ internal static class RuntimeChecks
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             Require(await db.ChatMessages.CountAsync() == 1, "receipt completion idempotent");
             var repo = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
-            Require(await repo.SumTokensAsync() == 36 && await repo.CountAiCallsAsync() == 2, "ledger and sent history not double counted");
+            Require(await repo.SumTokensAsync() == 36 && (await repo.GetAiUsageSummaryAsync()).LegacyCount == 2
+                && await repo.CountAiCallsAsync() == 0, "legacy reply usage is preserved without inventing physical call counts");
             Require((await repo.GetDailyTokenStatsAsync(3650)).Sum(s => s.TotalTokens) == 36, "usage chart includes failed delivery");
         }
     }
@@ -566,14 +574,17 @@ internal static class RuntimeChecks
                 {
                     var script = db.Database.GenerateCreateScript();
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts)\" \\([\\s\\S]*?\\);", "");
+                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords)\" \\([\\s\\S]*?\\);", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts)\"[^;]*;", "");
+                        "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords)\"[^;]*;", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "^.*\"(?:ContextWindowTokens|MaxInputTokens)\" INTEGER NOT NULL,?\\r?\\n", "", System.Text.RegularExpressions.RegexOptions.Multiline);
+                        "^.*\"(?:ContextWindowTokens|MaxInputTokens|GroupMemoryInjectionEnabled|AiOperationId)\" [^\\r\\n]*\\r?\\n", "", System.Text.RegularExpressions.RegexOptions.Multiline);
                     await db.Database.ExecuteSqlRawAsync(script);
-                    db.ChatMessages.Add(new ChatMessage { MessageId = "legacy-row", PlainText = "合成旧数据" });
-                    await db.SaveChangesAsync();
+                    await db.Database.ExecuteSqlRawAsync("""
+                        INSERT INTO "ChatMessages" ("MessageId", "ChatType", "UserId", "UserName", "PlainText",
+                            "RawSegmentsJson", "HasImage", "HasAtBot", "IsBotMessage", "IsProactive", "CreatedAt")
+                        VALUES ('legacy-row', 0, '', '', '合成旧数据', '', 0, 0, 0, 0, '2026-11-03 04:00:00');
+                        """);
                 }
                 else await db.Database.EnsureCreatedAsync();
                 await db.EnsureSchemaUpgradedAsync();
@@ -665,6 +676,17 @@ internal static class RuntimeChecks
     private sealed class MonthlyReceiptFault : DbCommandInterceptor
     {
         public bool FailMonthlyReceipt { get; set; }
+        public bool FailGroupMemoryWrite { get; set; }
+        public List<string> Commands { get; } = new();
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            if (FailGroupMemoryWrite && (command.CommandText.Contains("UPDATE \"GroupMemories\"")
+                || command.CommandText.Contains("INSERT INTO \"GroupMemories\"")))
+                throw new InvalidOperationException("synthetic group memory write failure");
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
         public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command,
             CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {

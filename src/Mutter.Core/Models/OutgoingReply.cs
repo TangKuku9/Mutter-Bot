@@ -20,6 +20,7 @@ public sealed class OutgoingReply
     public string Content { get; set; } = string.Empty;
     public bool IsProactive { get; set; }
     public string? Model { get; set; }
+    public string? AiOperationId { get; set; }
     public int PromptTokens { get; set; }
     public int CompletionTokens { get; set; }
     public string State { get; set; } = DeliveryStates.Pending;
