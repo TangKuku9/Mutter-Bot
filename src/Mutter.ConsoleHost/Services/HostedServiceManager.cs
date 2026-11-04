@@ -26,7 +26,6 @@ namespace Mutter.ConsoleHost.Services;
 public sealed class HostedServiceManager
 {
     private WebApplication? _webApp;
-    private CancellationTokenSource? _webCts;
     private LiveLogBus? _liveLogBus;
     private UpdateApplier? _updateApplier;
 
@@ -49,13 +48,10 @@ public sealed class HostedServiceManager
     public async Task StartAllAsync()
     {
         await StartWebHostAsync();
-        await StartQqGatewayAsync();
     }
 
     private async Task StartWebHostAsync()
     {
-        _webCts = new CancellationTokenSource();
-
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = AppContext.BaseDirectory
@@ -95,100 +91,32 @@ public sealed class HostedServiceManager
             await db.EnsureSchemaUpgradedAsync();
         }
 
-        _ = _webApp.RunAsync(_webCts.Token);
+        await _webApp.StartAsync();
         Console.WriteLine("[Host] Web host started on http://0.0.0.0:5188");
-    }
-
-    private async Task StartQqGatewayAsync()
-    {
-        try
-        {
-            var tokenManager = _webApp!.Services.GetRequiredService<AccessTokenManager>();
-            var connection = _webApp!.Services.GetRequiredService<IQqGatewayConnection>();
-            var handler = _webApp!.Services.GetRequiredService<MessageEventHandler>();
-            _ = _webApp!.Services.GetRequiredService<INotificationService>();
-
-            connection.ConnectionStateChanged += OnConnectionStateChanged;
-
-            connection.DispatchReceived += async (sender, dispatch) =>
-            {
-                try
-                {
-                    await handler.HandleDispatchAsync(dispatch);
-                }
-                catch (Exception ex)
-                {
-                    var logger = _webApp?.Services.GetService<ILogger<HostedServiceManager>>();
-                    logger?.LogError(ex, "处理 QQ 事件异常");
-                }
-            };
-
-            await tokenManager.InitializeAsync();
-            await connection.ConnectAsync();
-            await InitializeBotInfoAsync();
-        }
-        catch (Exception ex)
-        {
-            var logger = _webApp?.Services.GetService<ILogger<HostedServiceManager>>();
-            logger?.LogError(ex, "Failed to start QQ gateway connection");
-            Console.WriteLine($"[Host] QQ Gateway 启动失败: {ex.Message}");
-        }
-    }
-
-    private async Task InitializeBotInfoAsync()
-    {
-        try
-        {
-            var apiService = _webApp!.Services.GetRequiredService<IQqBotApiService>();
-            await apiService.InitializeAsync();
-            var handler = _webApp!.Services.GetRequiredService<MessageEventHandler>();
-            handler.SetBotId(apiService.BotId);
-
-            var logger = _webApp?.Services.GetService<ILogger<HostedServiceManager>>();
-            logger?.LogInformation("Bot 信息已获取: Id={BotId}, Name={BotName}", apiService.BotId, apiService.BotName);
-        }
-        catch (Exception ex)
-        {
-            var logger = _webApp?.Services.GetService<ILogger<HostedServiceManager>>();
-            logger?.LogError(ex, "初始化 Bot 信息失败");
-        }
-    }
-
-    private void OnConnectionStateChanged(object? sender, bool isConnected)
-    {
-        var logger = _webApp?.Services.GetService<ILogger<HostedServiceManager>>();
-        logger?.LogInformation("QQ gateway connection state changed: {IsConnected}", isConnected);
-
-        if (isConnected)
-        {
-            _ = InitializeBotInfoAsync();
-        }
-
-        try
-        {
-            var notificationService = _webApp?.Services.GetService<INotificationService>();
-            notificationService?.NotifyConnectionStatusAsync(isConnected,
-                isConnected ? "已连接" : "已断开");
-        }
-        catch (Exception ex)
-        {
-            logger?.LogError(ex, "推送连接状态失败");
-        }
     }
 
     public async Task StopAllAsync()
     {
-        try
+        var app = _webApp;
+        if (app != null)
         {
-            var connection = _webApp?.Services.GetRequiredService<IQqGatewayConnection>();
-            if (connection != null)
-                await connection.DisconnectAsync();
+            try
+            {
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                await app.StopAsync(deadline.Token);
+            }
+            catch (Exception ex)
+            {
+                // 停机超时/取消不能阻断后续释放与 Linux 更新替换。
+                Console.Error.WriteLine($"[Host] 停止服务时出错：{ex.Message}");
+            }
+            finally
+            {
+                try { await app.DisposeAsync(); }
+                catch (Exception ex) { Console.Error.WriteLine($"[Host] 释放服务时出错：{ex.Message}"); }
+                _webApp = null;
+            }
         }
-        catch { }
-
-        _webCts?.Cancel();
-        if (_webApp != null)
-            await _webApp.DisposeAsync();
 
         Console.WriteLine("[Host] All services stopped");
     }

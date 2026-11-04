@@ -29,8 +29,9 @@ using Mutter.Web.Services;
 // 用法：
 //   dotnet run --project tools/ProactiveCheck -- [源库路径]
 //   dotnet run --project tools/ProactiveCheck -- --logic-only
-// --logic-only 只跑不依赖数据库的第 1~3 段，供 CI 使用（第 4~6 段需要真实库）。
+// --logic-only 跑第 1~3 段及合成临时库运行时回归，供 CI 使用（第 4~6 段需要源库副本）。
 var logicOnly = args.Contains("--logic-only");
+if (args.Contains("--runtime-only")) return await RuntimeChecks.RunAsync() ? 0 : 1;
 var sourceDb = args.FirstOrDefault(a => !a.StartsWith("--")) ?? "mutter-bot.db";
 if (!logicOnly && !File.Exists(sourceDb))
 {
@@ -311,8 +312,8 @@ using (var testServices = new ServiceCollection().AddLogging().BuildServiceProvi
     var apiErrorOutcome = await apiErrorService.GetStructuredOutcomeAsync<ProactiveVerdict>(
         "system", "user", new AiConfig());
     Check(apiErrorOutcome.FailureKind == StructuredAiFailureKind.ApiError
-        && apiErrorOutcome.ErrorMessage == "第二轮 API 错误摘要",
-        "API 调用失败返回末次异常摘要");
+        && apiErrorOutcome.ErrorMessage == "第一轮错误",
+        "API 调用失败保留首次错误，不盲目重试");
 }
 
 Console.WriteLine("== 3c. 表情贴纸文案归一化 ==");
@@ -862,6 +863,8 @@ else
     }
 }
 
+ok &= await RuntimeChecks.RunAsync();
+
 if (logicOnly)
 {
     Console.WriteLine("\n--logic-only：跳过依赖数据库的第 4~6 段。");
@@ -1234,10 +1237,10 @@ Check(ContextBuilder.CandidateFetchLadder(1000, 40).Last() == 200,
 Check(ContextBuilder.CandidateFetchLadder(20, 40).Distinct().Count()
         == ContextBuilder.CandidateFetchLadder(20, 40).Count,
     "阶梯是有界的：封顶后不会无限产出同一个值（否则调用方每轮都会白查一次库）");
-Check(ContextBuilder.InputTokenBudget(2048) == 1536 && ContextBuilder.InputTokenBudget(512) == 384,
-    "输入预算由「最大 Tokens」按 0.75 折算，仍是同一个旋钮在管（不新增第二个人看不懂的数字）");
-Check(ContextBuilder.InputTokenBudget(0) == 0,
-    "预算换算对 0 不抛异常（服务端已把提交值钳到 ≥64，这里只是防御）");
+Check(ContextBuilder.InputTokenBudget(2048) == 16384 && ContextBuilder.InputTokenBudget(512) == 16384,
+    "输入预算独立于输出上限");
+Check(ContextBuilder.InputTokenBudget(0) == 16384,
+    "输出上限为零不会清空输入预算");
 
 using (var scope = sp.CreateScope())
 {
@@ -1285,7 +1288,7 @@ using (var scope = sp.CreateScope())
     {
         MessageId = $"c-long-{i:D3}", ChatType = 0, GroupId = g3,
         UserId = "u1", UserName = "阿明",
-        PlainText = new string('长', 400),   // 400 字 ≈ 200 token，20 条 ≈ 4000 token
+        PlainText = new string('长', 2000),   // 400 字 ≈ 200 token，20 条 ≈ 4000 token
         CreatedAt = t.AddSeconds(i)
     }).ToList();
     await msgRepo3.SaveMessagesAsync(longRows);
@@ -1572,7 +1575,7 @@ file sealed class NoopGateway : IQqGatewayConnection
     public IReadOnlyDictionary<string, long> EventCounts => _counts;
     public bool IsConnected => true;
     public event EventHandler<bool>? ConnectionStateChanged { add { } remove { } }
-    public event EventHandler<Mutter.Core.Models.QQOfficial.QqDispatch>? DispatchReceived { add { } remove { } }
+    public event Func<Mutter.Core.Models.QQOfficial.QqDispatch, CancellationToken, Task>? DispatchReceived { add { } remove { } }
     public Task ConnectAsync(CancellationToken ct = default) => Task.CompletedTask;
     public Task DisconnectAsync(CancellationToken ct = default) => Task.CompletedTask;
 }

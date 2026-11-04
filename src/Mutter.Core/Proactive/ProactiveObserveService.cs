@@ -4,11 +4,12 @@ using Mutter.Core.Models.Config;
 namespace Mutter.Core.Proactive;
 
 /// <summary>
-/// 择机发言的观察窗口与门禁。纯内存：机器人单进程部署，重启丢失窗口只是少评估一次，
-/// 不值得为它建表；每日上限的重置按北京时间的日历日计数。
+/// 观察窗口与内存快速门禁。发送前另用持久化账本复核配额与冷却；重启只丢失观察窗口。
 /// </summary>
 public sealed class ProactiveObserveService
 {
+    private readonly TimeProvider _clock;
+    public ProactiveObserveService(TimeProvider? clock = null) => _clock = clock ?? TimeProvider.System;
     /// <summary>窗口硬上限。评估被关掉或长时间失败时防止内存无界增长。</summary>
     private const int MaxBufferedMessages = 64;
 
@@ -31,10 +32,10 @@ public sealed class ProactiveObserveService
         {
             var state = GetState(groupId);
             if (state.Buffer.Count == 0)
-                state.FirstBufferedAtUtc = DateTime.UtcNow;
+                state.FirstBufferedAtUtc = _clock.GetUtcNow().UtcDateTime;
 
             state.Buffer.Add(new ObservedMessage(
-                senderName, normalized, messageId, DateTime.UtcNow, imageUrls));
+                senderName, normalized, messageId, _clock.GetUtcNow().UtcDateTime, imageUrls));
 
             // 长期没人评估时窗口会一直涨，只保留最近的若干条，旧话题直接过期
             while (state.Buffer.Count > MaxBufferedMessages)

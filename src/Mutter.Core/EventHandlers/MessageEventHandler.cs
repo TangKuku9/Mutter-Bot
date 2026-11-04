@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
-using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Mutter.Core;
@@ -26,15 +25,13 @@ public class MessageEventHandler
     private readonly IActiveMessageService _activeMessage;
     private readonly INotificationService _notificationService;
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly ChannelWriter<ChatMessage> _messageWriter;
+    private readonly IConversationWorkQueue _workQueue;
+    private readonly ReplyDispatcher _dispatcher;
     private readonly RichUiCapability _richUi;
     private readonly ProactiveObserveService _observe;
-    private readonly ReplySeqTracker _seqTracker;
     private readonly GroupMessageGate _groupGate;
     private readonly ILogger<MessageEventHandler> _logger;
     private string _botId = string.Empty;
-
-    private readonly SemaphoreSlim _aiSemaphore = new(3, 3);
 
     private readonly ConcurrentDictionary<string, DateTime> _processedMsgIds = new();
 
@@ -44,15 +41,6 @@ public class MessageEventHandler
     /// </summary>
     private readonly ConcurrentDictionary<string, DateTime> _recentContentKeys = new();
     private const int ContentDedupWindowSeconds = 30;
-
-    /// <summary>
-    /// 机器人回复去重：防止短时间内对同一群/用户重复发送相同内容的回复。
-    /// 用于应对 QQ 服务端用不同 msgId/不同 @ 段格式重复投递同一条用户消息，
-    /// 导致前级去重失败时，作为最后一道防线避免用户看到重复回复。
-    /// Key = scope:contentHash，Value = 首次发送时间。
-    /// </summary>
-    private readonly ConcurrentDictionary<string, DateTime> _recentBotReplies = new();
-    private const int BotReplyDedupWindowSeconds = 8;
 
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
@@ -66,10 +54,10 @@ public class MessageEventHandler
         IActiveMessageService activeMessage,
         INotificationService notificationService,
         IServiceScopeFactory scopeFactory,
-        ChannelWriter<ChatMessage> messageWriter,
+        IConversationWorkQueue workQueue,
+        ReplyDispatcher dispatcher,
         RichUiCapability richUi,
         ProactiveObserveService observe,
-        ReplySeqTracker seqTracker,
         GroupMessageGate groupGate,
         ILogger<MessageEventHandler> logger)
     {
@@ -82,10 +70,10 @@ public class MessageEventHandler
         _activeMessage = activeMessage;
         _notificationService = notificationService;
         _scopeFactory = scopeFactory;
-        _messageWriter = messageWriter;
+        _workQueue = workQueue;
+        _dispatcher = dispatcher;
         _richUi = richUi;
         _observe = observe;
-        _seqTracker = seqTracker;
         _groupGate = groupGate;
         _logger = logger;
     }
@@ -206,42 +194,7 @@ public class MessageEventHandler
         return normalized.ToString();
     }
 
-    /// <summary>
-    /// 机器人回复去重检查：同群/同用户在窗口期内已发送过相同内容则跳过。
-    /// 这是最后一道防线，防止前级用户消息去重失败时用户看到重复回复。
-    /// </summary>
-    private bool ShouldSkipDuplicateReply(string scope, string content)
-    {
-        var contentFingerprint = content.Length > 100 ? content[..100] : content;
-        var key = $"{scope}:{contentFingerprint}";
-        var now = DateTime.UtcNow;
-
-        // 清理过期条目（低频执行）
-        if (_recentBotReplies.Count > 200)
-        {
-            var cutoff = now.AddSeconds(-BotReplyDedupWindowSeconds);
-            foreach (var kv in _recentBotReplies)
-            {
-                if (kv.Value < cutoff)
-                    _recentBotReplies.TryRemove(kv.Key, out _);
-            }
-        }
-
-        if (!_recentBotReplies.TryAdd(key, now))
-        {
-            if (_recentBotReplies.TryGetValue(key, out var firstSent))
-            {
-                if ((now - firstSent).TotalSeconds < BotReplyDedupWindowSeconds)
-                    return true; // 重复，跳过
-
-                _recentBotReplies[key] = now;
-            }
-        }
-
-        return false;
-    }
-
-    public async Task HandleDispatchAsync(QqDispatch dispatch)
+    public async Task HandleDispatchAsync(QqDispatch dispatch, CancellationToken ct = default)
     {
         switch (dispatch.EventType)
         {
@@ -250,14 +203,14 @@ public class MessageEventHandler
             {
                 var evt = dispatch.Data.Deserialize<GroupMessageEvent>(JsonOptions);
                 if (evt is null) return;
-                await HandleGroupMessageAsync(evt, isAtBot: dispatch.EventType == "GROUP_AT_MESSAGE_CREATE");
+                await HandleGroupMessageAsync(evt, isAtBot: dispatch.EventType == "GROUP_AT_MESSAGE_CREATE", ct);
                 break;
             }
             case "C2C_MESSAGE_CREATE":
             {
                 var evt = dispatch.Data.Deserialize<C2cMessageEvent>(JsonOptions);
                 if (evt is null) return;
-                await HandleC2cMessageAsync(evt);
+                await HandleC2cMessageAsync(evt, ct);
                 break;
             }
             case "GROUP_ADD_ROBOT":
@@ -360,7 +313,7 @@ public class MessageEventHandler
         }
     }
 
-    private async Task HandleGroupMessageAsync(GroupMessageEvent evt, bool isAtBot)
+    private async Task HandleGroupMessageAsync(GroupMessageEvent evt, bool isAtBot, CancellationToken ct)
     {
         if (evt.Author?.Bot == true) return;
         if (string.IsNullOrEmpty(evt.Id)) return;
@@ -373,7 +326,7 @@ public class MessageEventHandler
 
         // 先路由：全量模式下平台不再单独下发 @ 事件，"有没有被 @"只能靠群配置的识别码从
         // content 里认出来。认出来就按 @ 处理（必须回话），并且像官方那样把 at 段剥掉再喂模型。
-        var route = await _router.RouteGroupAsync(evt.GroupOpenid, isAtBot, evt.Content);
+        var route = await _router.RouteGroupAsync(evt.GroupOpenid, isAtBot, evt.Content, ct);
         var mention = isAtBot || route.BotMentionCode is not null;
         if (route.BotMentionCode is not null)
         {
@@ -426,12 +379,12 @@ public class MessageEventHandler
         {
             using var scope = _scopeFactory.CreateScope();
             var repo = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
-            try { await repo.MarkAtBotAsync(evt.Id); }
+            try { await repo.MarkAtBotAsync(evt.Id, ct); }
             catch (Exception ex) { _logger.LogWarning(ex, "补记 @ 标记失败 MsgId={MessageId}", evt.Id); }
         }
         else if (route.ShouldProcess)
         {
-            await _messageWriter.WriteAsync(chatMsg);
+            await SaveIncomingAsync(chatMsg, ct);
 
             try
             {
@@ -450,26 +403,18 @@ public class MessageEventHandler
 
         if (Services.BotCommandService.LooksLikeCommand(parsed.PlainText) && role is "owner" or "admin")
         {
-            _ = Task.Run(async () =>
+            await EnqueueAsync(chatMsg, async token =>
             {
-                try
-                {
-                    var reply = await _commandService.ExecuteGroupCommandAsync(senderId, parsed.PlainText, evt.GroupOpenid, role);
-                    await SendReplyAsync(evt.GroupOpenid, null, evt.Id, reply);
-                }
-                catch (Exception ex) { _logger.LogError(ex, "Group command failed"); }
-            });
+                var reply = await _commandService.ExecuteGroupCommandAsync(senderId, parsed.PlainText, evt.GroupOpenid, role, token);
+                await SendReplyAsync(evt.GroupOpenid, null, evt.Id, reply, token);
+            }, ct);
             return;
         }
 
         if (mention)
         {
-            // 被 @ 到 -> 走 AI 角色扮演
-            _ = Task.Run(async () =>
-            {
-                try { await ProcessAiReplyAsync(evt.GroupOpenid, null, senderId, senderName, parsed, evt.Id); }
-                catch (Exception ex) { _logger.LogError(ex, "AI reply failed"); }
-            });
+            await EnqueueAsync(chatMsg, token => ProcessAiReplyAsync(
+                evt.GroupOpenid, null, senderId, senderName, parsed, evt.Id, token), ct);
         }
         else if (route.ShouldObserve)
         {
@@ -477,14 +422,14 @@ public class MessageEventHandler
         }
     }
 
-    private async Task HandleC2cMessageAsync(C2cMessageEvent evt)
+    private async Task HandleC2cMessageAsync(C2cMessageEvent evt, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(evt.Id)) return;
         if (!MarkProcessed(evt.Id)) return;
 
         var parsed = _parser.Parse(evt.Content, evt.Attachments);
 
-        var shouldProcess = await _router.ShouldProcessPrivateAsync(evt.Author?.UserOpenid ?? string.Empty);
+        var shouldProcess = await _router.ShouldProcessPrivateAsync(evt.Author?.UserOpenid ?? string.Empty, ct);
         if (!shouldProcess) return;
 
         var senderId = evt.Author?.UserOpenid ?? string.Empty;
@@ -507,7 +452,7 @@ public class MessageEventHandler
             CreatedAt = DateTime.UtcNow
         };
 
-        await _messageWriter.WriteAsync(chatMsg);
+        await SaveIncomingAsync(chatMsg, ct);
 
         try
         {
@@ -529,57 +474,69 @@ public class MessageEventHandler
             var configRepo = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
             if (await configRepo.IsPrivateChatAdminAsync(senderId))
             {
-                _ = Task.Run(async () =>
+                await EnqueueAsync(chatMsg, async token =>
                 {
-                    try
-                    {
-                        var reply = await _commandService.ExecuteAsync(senderId, parsed.PlainText);
-                        await SendReplyAsync(null, senderId, evt.Id, reply);
-                    }
-                    catch (Exception ex) { _logger.LogError(ex, "Background task failed"); }
-                });
+                    var reply = await _commandService.ExecuteAsync(senderId, parsed.PlainText, token);
+                    await SendReplyAsync(null, senderId, evt.Id, reply, token);
+                }, ct);
                 return;
             }
         }
 
-        _ = Task.Run(async () =>
-        {
-            try { await ProcessAiReplyAsync(null, senderId, senderId, senderName, parsed, evt.Id); }
-            catch (Exception ex) { _logger.LogError(ex, "Background task failed"); }
-        });
+        await EnqueueAsync(chatMsg, token => ProcessAiReplyAsync(
+            null, senderId, senderId, senderName, parsed, evt.Id, token), ct);
     }
 
-    private async Task ProcessAiReplyAsync(string? groupOpenId, string? userOpenId, string senderId, string senderName, ParsedMessage parsed, string msgId)
+    private async Task SaveIncomingAsync(ChatMessage message, CancellationToken ct)
     {
-        // 排队窗口 15s：单次回复通常 3~8s，5s 会把突发消息直接拒掉；等待是异步的，不占线程。
-        // 主动接话那条路径仍用 5s——它被拒时可静默跳过，不该长时间占位。
-        if (!await _aiSemaphore.WaitAsync(TimeSpan.FromSeconds(15)))
-        {
-            await SendReplyAsync(groupOpenId, userOpenId, msgId, "AI 繁忙，请稍后再试。");
-            return;
-        }
+        using var scope = _scopeFactory.CreateScope();
+        var repo = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
+        if (!await repo.IsMessageIdExistsAsync(message.MessageId, ct))
+            await repo.SaveMessageAsync(message, ct);
+    }
 
+    private async Task EnqueueAsync(ChatMessage incoming, Func<CancellationToken, Task> work, CancellationToken ct)
+    {
+        var conversation = incoming.GroupId is not null ? $"g:{incoming.GroupId}" : $"u:{incoming.UserId}";
+        if (_workQueue.TryEnqueue(conversation, async token =>
+        {
+            using var turn = new ConversationTurnScope(incoming.MessageId, incoming.CreatedAt,
+                incoming.Id > 0 ? incoming.Id : null);
+            await work(token);
+        }, onExpired: token => SendReplyAsync(incoming.GroupId, incoming.GroupId is null ? incoming.UserId : null,
+            incoming.MessageId, "等待回复超时，请稍后再试。", token))) return;
+        await SendReplyAsync(incoming.GroupId, incoming.GroupId is null ? incoming.UserId : null,
+            incoming.MessageId, "AI 繁忙，请稍后再试。", ct);
+    }
+
+    private async Task ProcessAiReplyAsync(string? groupOpenId, string? userOpenId, string senderId,
+        string senderName, ParsedMessage parsed, string msgId, CancellationToken ct)
+    {
+        // 队列令牌只负责“宿主是否还在跑”；120 秒生成期限只覆盖模型调用。
+        // 生成成功后必须用一个独立的投递期限，否则截止时间一到，已经写好的回复会被丢掉。
+        var hostToken = ct;
+        using var operation = AiCallScope.Begin(ct, "reply");
+        ct = operation.Token;
+        AiChatResponse response;
         try
         {
             try { await _notificationService.NotifyAiResponseStartedAsync(groupOpenId, senderName); }
-            catch (Exception ex) { _logger.LogError(ex, "Notify AI start failed"); }
-
+            catch (Exception ex) { _logger.LogWarning(ex, "Notify AI start failed"); }
             BuildContextResult context;
             if (groupOpenId is not null)
-                context = await _contextBuilder.BuildGroupContextAsync(groupOpenId, parsed.PlainText, senderName);
+                context = await _contextBuilder.BuildGroupContextAsync(groupOpenId, parsed.PlainText, senderName, ct);
             else
-                context = await _contextBuilder.BuildPrivateContextAsync(senderId, parsed.PlainText, senderName);
+                context = await _contextBuilder.BuildPrivateContextAsync(senderId, parsed.PlainText, senderName, ct);
 
             var systemPrompt = context.ComposeSystemPrompt();
 
-            AiChatResponse response;
 
             if (parsed.ImageUrls.Count > 0)
             {
                 // 张数由 AI 面板控制，且先把动图/失效链筛掉——否则"面板选了 3 张"会名不副实。
                 // 旧写法直接取 ImageUrls[0]，群友一次发好几张时其余全丢。
                 var attachable = await _aiService.AttachableImagesAsync(
-                    context.EffectiveConfig.CapAttachedImages(parsed.ImageUrls));
+                    context.EffectiveConfig.CapAttachedImages(parsed.ImageUrls), ct);
 
                 if (attachable.Count > 0)
                 {
@@ -591,103 +548,76 @@ public class MessageEventHandler
                         var last = historyWithImages[^1];
                         historyWithImages[^1] = (last.Role, last.Content, attachable);
                     }
-                    response = await _aiService.ChatAsync(systemPrompt, historyWithImages, context.EffectiveConfig);
+                    response = await _aiService.ChatAsync(systemPrompt, historyWithImages, context.EffectiveConfig, ct);
                 }
                 else
                 {
-                    response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig);
+                    response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig, ct);
                 }
             }
             else
             {
-                response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig);
+                response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig, ct);
             }
 
-            var botMsg = new ChatMessage
-            {
-                MessageId = $"bot-{Guid.NewGuid():N}",
-                ChatType = groupOpenId is not null ? 0 : 1,
-                GroupId = groupOpenId,
-                UserId = _botId,
-                // 私聊上下文靠这个字段认领"这条回复是对谁说的"；不写就等于下次读不到自己上一轮的话
-                PeerUserId = groupOpenId is null ? userOpenId : null,
-                UserName = "Bot",
-                PlainText = response.Content,
-                IsBotMessage = true,
-                AiModelUsed = response.Model,
-                PromptTokens = response.PromptTokens,
-                CompletionTokens = response.CompletionTokens,
-                CreatedAt = DateTime.UtcNow
-            };
-
-            // 直接持久化 Bot 消息（而非走 channel 异步落库），确保推送通知前已写入数据库，
-            // 否则前端收到 AiResponseCompleted 后刷新会因竞态查不到该 Bot 消息。
-            using (var scope = _scopeFactory.CreateScope())
-            {
-                var repo = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
-                await repo.SaveMessageAsync(botMsg);
-            }
-
-            try
-            {
-                await _notificationService.NotifyAiResponseCompletedAsync(new
-                {
-                    GroupId = groupOpenId, Model = response.Model,
-                    TotalTokens = response.TotalTokens, Content = response.Content
-                });
-            }
-            catch (Exception ex) { _logger.LogError(ex, "Notify AI complete failed"); }
-
-            await SendReplyAsync(groupOpenId, userOpenId, msgId, response.Content);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("AI reply cancelled msg={Message}", msgId);
+            return;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "AI processing failed");
-            await SendReplyAsync(groupOpenId, userOpenId, msgId, "AI 处理失败，请稍后再试。");
+            _logger.LogError(ex, "AI generation failed");
+            var error = ex is AiInputTooLargeException ? ex.Message : "AI 处理失败，请稍后再试。";
+            // 生成已经失败，不能再让生成期限决定错误提示发不发得出去。
+            using var errorDeadline = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
+            errorDeadline.CancelAfter(TimeSpan.FromSeconds(10));
+            await SendReplyAsync(groupOpenId, userOpenId, msgId, error, errorDeadline.Token);
+            return;
         }
-        finally { _aiSemaphore.Release(); }
-    }
 
-    private async Task SendReplyAsync(string? groupOpenId, string? userOpenId, string? msgId, string content)
-    {
-        // 回复去重：同群/同用户在窗口期内已发送过相同内容则跳过，
-        // 防止 QQ 服务端用不同 msgId/不同 @ 段格式重复投递时用户看到重复回复。
-        // 注意：仅在 msgId 不为空（即被动回复场景）时启用，避免影响主动推送。
-        if (msgId is not null && ShouldSkipReply(groupOpenId, userOpenId, msgId, content)) return;
-
+        using var deliveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
+        deliveryDeadline.CancelAfter(TimeSpan.FromSeconds(30));
+        DeliveryResult delivery;
         try
         {
-            if (groupOpenId is not null)
+            delivery = await _dispatcher.SendAsync(new OutgoingReply
             {
-                await _apiService.SendGroupMessageAsync(groupOpenId, content, msgId, _seqTracker.Next(msgId));
-            }
-            else if (userOpenId is not null)
-                await _apiService.SendPrivateMessageAsync(userOpenId, content, msgId, _seqTracker.Next(msgId));
+                GroupId = groupOpenId, PeerUserId = userOpenId, BotId = _botId,
+                ReplyToMessageId = msgId, Content = response.Content, Model = response.Model,
+                PromptTokens = response.PromptTokens, CompletionTokens = response.CompletionTokens
+            }, allowActive: true, deliveryDeadline.Token);
         }
-        catch (QqApiException ex) when (msgId is not null && (groupOpenId is not null || userOpenId is not null))
+        catch (OperationCanceledException) when (!hostToken.IsCancellationRequested)
         {
-            _logger.LogWarning("被动回复失败，降级主动消息 err={ErrCode}", ex.ErrCode);
-            if (groupOpenId is not null)
-                await _activeMessage.SendGroupActiveAsync(groupOpenId, content);
-            else
-                await _activeMessage.SendPrivateActiveAsync(userOpenId!, content);
+            _logger.LogWarning("AI reply delivery deadline reached msg={Message}", msgId);
+            return;
         }
-        catch (Exception ex)
+        if (!delivery.Sent)
         {
-            _logger.LogError(ex, "Send reply failed");
+            _logger.LogWarning("AI reply not confirmed msg={Message} state={State}", msgId, delivery.State);
+            return;
         }
+        try
+        {
+            await _notificationService.NotifyAiResponseCompletedAsync(new
+            {
+                GroupId = groupOpenId, Model = response.Model,
+                TotalTokens = response.TotalTokens, Content = response.Content,
+                DeliveryState = delivery.State
+            });
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Notify AI complete failed"); }
     }
 
-    /// <summary>回复内容去重（仅被动回复场景）。返回 true 表示应跳过发送。</summary>
-    private bool ShouldSkipReply(string? groupOpenId, string? userOpenId, string? msgId, string content)
-    {
-        var scope = groupOpenId is not null ? $"g:{groupOpenId}" : $"u:{userOpenId}";
-        if (!ShouldSkipDuplicateReply(scope, content)) return false;
-
-        _logger.LogWarning("检测到重复回复，跳过发送: Scope={Scope}, MsgId={MsgId}, Content={Content}",
-            scope, msgId, content.Length > 50 ? content[..50] + "..." : content);
-        return true;
-    }
+    private Task<DeliveryResult> SendReplyAsync(string? groupOpenId, string? userOpenId,
+        string? msgId, string content, CancellationToken ct = default) =>
+        _dispatcher.SendAsync(new OutgoingReply
+        {
+            GroupId = groupOpenId, PeerUserId = userOpenId, BotId = _botId,
+            ReplyToMessageId = msgId, Content = content
+        }, allowActive: true, ct);
 
     /// <summary>
     /// 按钮回调。
@@ -716,30 +646,4 @@ public class MessageEventHandler
         }
     }
 
-    /// <summary>保存 Bot 回复到聊天历史（用于前端 Chat History + Dashboard 统计）。</summary>
-    private async Task SaveBotMessageAsync(string? groupOpenId, string content,
-        string? aiModel = null, int? promptTokens = null, int? completionTokens = null)
-    {
-        try
-        {
-            var botMsg = new ChatMessage
-            {
-                MessageId = $"bot-{Guid.NewGuid():N}",
-                ChatType = groupOpenId is not null ? 0 : 1,
-                GroupId = groupOpenId,
-                UserId = _botId,
-                UserName = "Bot",
-                PlainText = content,
-                IsBotMessage = true,
-                AiModelUsed = aiModel,
-                PromptTokens = promptTokens,
-                CompletionTokens = completionTokens,
-                CreatedAt = DateTime.UtcNow
-            };
-            using var scope = _scopeFactory.CreateScope();
-            var repo = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
-            await repo.SaveMessageAsync(botMsg);
-        }
-        catch (Exception ex) { _logger.LogError(ex, "Save bot message failed"); }
-    }
 }

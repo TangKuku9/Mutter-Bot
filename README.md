@@ -65,6 +65,7 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 - **群级与专属人设**：支持群聊独立提示词、个性化人设切换（`/char`）。
 - **多模态图文识别**：群消息图片自动下载转存并送入视觉模型，内置 GIF 动图嗅探剥离与张数上限保护。
 - **容错与修复机制**：内置 CJK 异常断行修复器与 JSON 结构化输出容错提取器。
+- **会话运行时**：同会话顺序执行、跨会话并行，使用有界队列与统一投递账本；模型调用通过 `IChatClient` 适配，设计与兼容边界见 [AI 与消息运行时](docs/ai-runtime.md)。
 
 ### 2. 择机主动发言 (Proactive Speak)
 - **群语境动态观察**：滑动窗口监听群聊消息，交由 AI 分析研判当前讨论焦点与接话价值。
@@ -325,6 +326,9 @@ sudo journalctl -u mutter-bot -f
 ```bash
 # 执行纯逻辑段回归自检（CI 流水线内置，脱离数据库运行）
 dotnet run --project tools/ProactiveCheck -- --logic-only
+
+# 单独执行运行时回归（合成临时库与假 HTTP，不访问真实服务）
+dotnet run --project tools/ProactiveCheck -- --runtime-only
 
 # 全量自检（验证特定版本历史数据库升级与 DI 状态）
 dotnet run --project tools/ProactiveCheck -- <sqlite-db-path>

@@ -1,7 +1,3 @@
-using System.Net;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
@@ -11,18 +7,18 @@ namespace Mutter.Core.Services;
 
 public class AiChatService : IAiChatService
 {
-    private readonly HttpClient _httpClient;
+    private readonly IAiModelExecutor _executor;
     private readonly IAiImageResolver _imageResolver;
     private readonly AiSearchCapabilityStore _capabilities;
     private readonly ILogger<AiChatService> _logger;
 
     public AiChatService(
-        HttpClient httpClient,
+        IAiModelExecutor executor,
         IAiImageResolver imageResolver,
         AiSearchCapabilityStore capabilities,
         ILogger<AiChatService> logger)
     {
-        _httpClient = httpClient;
+        _executor = executor;
         _imageResolver = imageResolver;
         _capabilities = capabilities;
         _logger = logger;
@@ -44,12 +40,15 @@ public class AiChatService : IAiChatService
         string? responseFormat,
         CancellationToken ct = default)
     {
+        using var operation = AiCallScope.Begin(ct);
+        ct = operation.Token;
+        config = config with { };
         var messages = conversationHistory
             .Select(m => AiMessage.Plain(m.Role, m.Content))
             .ToList();
 
-        return await SendAsync(
-            new AiChatRequest(systemPrompt, messages, responseFormat), config, ct);
+        return operation.WithUsage(await SendAsync(
+            new AiChatRequest(systemPrompt, messages, responseFormat), config, ct));
     }
 
     public async Task<AiChatResponse> ChatAsync(
@@ -58,6 +57,9 @@ public class AiChatService : IAiChatService
         AiConfig config,
         CancellationToken ct = default)
     {
+        using var operation = AiCallScope.Begin(ct);
+        ct = operation.Token;
+        config = config with { };
         var messages = new List<AiMessage>(conversationHistory.Count);
         foreach (var (role, text, imageUrls) in conversationHistory)
         {
@@ -67,7 +69,7 @@ public class AiChatService : IAiChatService
             messages.Add(AiMessage.WithImages(role, text, images));
         }
 
-        return await SendAsync(new AiChatRequest(systemPrompt, messages), config, ct);
+        return operation.WithUsage(await SendAsync(new AiChatRequest(systemPrompt, messages), config, ct));
     }
 
     public async Task<AiChatResponse> ChatWithImagesAsync(
@@ -78,14 +80,17 @@ public class AiChatService : IAiChatService
         string? responseFormat = null,
         CancellationToken ct = default)
     {
+        using var operation = AiCallScope.Begin(ct);
+        ct = operation.Token;
+        config = config with { };
         var images = await ResolveImagesAsync(imageUrls, ct);
         var messages = new List<AiMessage>
         {
             AiMessage.WithImages("user", userPrompt, images)
         };
 
-        return await SendAsync(
-            new AiChatRequest(systemPrompt, messages, responseFormat), config, ct);
+        return operation.WithUsage(await SendAsync(
+            new AiChatRequest(systemPrompt, messages, responseFormat), config, ct));
     }
 
     /// <summary>
@@ -207,199 +212,9 @@ public class AiChatService : IAiChatService
         }
     }
 
-    private async Task<AiChatResponse> SendSingleAsync(
-        AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct)
-    {
-        if (strategy.Endpoint == "gemini")
-        {
-            if (GeminiNativeRequestBuilder.TryBuild(
-                    request, config, strategy.WithSearch, out var body, out var reason))
-            {
-                try
-                {
-                    return await SendGeminiNativeBodyAsync(body, config, ct);
-                }
-                catch (AiRequestException ex) when (!strategy.WithSearch && ex.IsDeterministicRejection)
-                {
-                    _logger.LogWarning(ex,
-                        "Gemini 原生（无搜索）失败，退回兼容接口 url={Url}", config.ApiBaseUrl);
-                    return await SendOpenAiAsync(request, config, null, ct);
-                }
-            }
-
-            _logger.LogInformation(
-                "Gemini 原生通道跳过：{Reason} url={Url}", reason, config.ApiBaseUrl);
-            return await SendOpenAiAsync(request, config, null, ct);
-        }
-
-        return await SendOpenAiAsync(request, config, strategy.Shape, ct);
-    }
-
-    private async Task<AiChatResponse> SendOpenAiAsync(
-        AiChatRequest request, AiConfig config, string? searchShape, CancellationToken ct)
-    {
-        var requestBody = OpenAiRequestBuilder.Build(request, config, searchShape);
-        var url = $"{config.ApiBaseUrl.TrimEnd('/')}/chat/completions";
-
-        _logger.LogInformation(
-            "AI 请求 transport=openai images={Images} search={Search} url={Url}",
-            request.Messages.Sum(m => m.Images.Count), searchShape ?? "off", url);
-
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url);
-        httpRequest.Headers.Add("Authorization", $"Bearer {config.ApiKey}");
-        httpRequest.Content = JsonContent.Create(requestBody);
-
-        HttpResponseMessage response;
-        try
-        {
-            response = await _httpClient.SendAsync(httpRequest, ct);
-        }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogError(ex, "AI request failed: {Url}", url);
-            throw new InvalidOperationException($"AI request failed: {ex.Message}", ex);
-        }
-        catch (TaskCanceledException ex) when (ct.IsCancellationRequested)
-        {
-            _logger.LogWarning(ex, "AI request cancelled");
-            throw;
-        }
-        catch (TaskCanceledException ex)
-        {
-            _logger.LogError(ex, "AI request timeout: {Url}", url);
-            throw new InvalidOperationException($"AI request timeout: {ex.Message}", ex);
-        }
-
-        using (response)
-        {
-            var raw = await response.Content.ReadAsStringAsync(ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogError("AI error: {StatusCode}, Body: {Body}",
-                    (int)response.StatusCode, raw.Length > 500 ? raw[..500] : raw);
-                throw new AiRequestException((int)response.StatusCode, raw);
-            }
-
-            JsonElement json;
-            try
-            {
-                json = JsonDocument.Parse(raw).RootElement.Clone();
-            }
-            catch (JsonException ex)
-            {
-                throw new InvalidOperationException("AI response invalid JSON", ex);
-            }
-
-            var rawContent = WebSearchProbe.ReadResponseText(json);
-            var finishReason = ReadFinishReason(json);
-            var model = json.TryGetProperty("model", out var modelElement) &&
-                        modelElement.ValueKind == JsonValueKind.String
-                ? modelElement.GetString()
-                : config.ModelName;
-            var (promptTokens, completionTokens) = ReadUsage(json);
-
-            _logger.LogDebug(
-                "AI response: transport=openai model={Model}, tokens={Prompt}+{Completion}, finish={Finish}",
-                model, promptTokens, completionTokens, finishReason);
-
-            return new AiChatResponse
-            {
-                Content = CjkTextFixer.Cleanse(rawContent),
-                RawContent = rawContent,
-                Model = model,
-                FinishReason = finishReason,
-                PromptTokens = promptTokens,
-                CompletionTokens = completionTokens
-            };
-        }
-    }
-
-    private async Task<AiChatResponse> SendGeminiNativeBodyAsync(
-        Dictionary<string, object> requestBody, AiConfig config, CancellationToken ct)
-    {
-        string? lastError = null;
-        foreach (var url in WebSearchProbe.GeminiUrlCandidates(config.ApiBaseUrl, config.ModelName))
-        {
-            using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url);
-            httpRequest.Headers.Add("x-goog-api-key", config.ApiKey);
-            // Google 官方 Key 认 x-goog-api-key；中转通常认 Bearer。Key 不是 AIza 开头时两个都带，无害。
-            if (!config.ApiKey.StartsWith("AIza", StringComparison.Ordinal))
-                httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", config.ApiKey);
-            httpRequest.Content = JsonContent.Create(requestBody);
-
-            _logger.LogInformation(
-                "AI 请求 transport=gemini search={Search} url={Url}",
-                requestBody.ContainsKey("tools") ? "on" : "off", url);
-
-            HttpResponseMessage response;
-            try
-            {
-                response = await _httpClient.SendAsync(httpRequest, ct);
-            }
-            catch (HttpRequestException ex)
-            {
-                lastError = ex.Message;
-                continue;
-            }
-
-            using (response)
-            {
-                var raw = await response.Content.ReadAsStringAsync(ct);
-                if (response.StatusCode == HttpStatusCode.NotFound)
-                {
-                    lastError = $"404 {url}";
-                    continue;
-                }
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    _logger.LogError("Gemini native error: {StatusCode}, Body: {Body}",
-                        (int)response.StatusCode, raw.Length > 500 ? raw[..500] : raw);
-                    throw new AiRequestException((int)response.StatusCode, raw);
-                }
-
-                JsonElement json;
-                try
-                {
-                    json = JsonDocument.Parse(raw).RootElement.Clone();
-                }
-                catch (JsonException ex)
-                {
-                    throw new InvalidOperationException("Gemini native response invalid JSON", ex);
-                }
-
-                if (!json.TryGetProperty("candidates", out var candidates) ||
-                    candidates.ValueKind != JsonValueKind.Array ||
-                    candidates.GetArrayLength() == 0)
-                    throw new InvalidOperationException("Gemini native response missing candidates");
-
-                var candidate = candidates[0];
-                var finishReason = candidate.TryGetProperty("finishReason", out var fr) &&
-                                   fr.ValueKind == JsonValueKind.String
-                    ? fr.GetString()
-                    : null;
-
-                var rawContent = WebSearchProbe.ReadResponseText(json);
-                var (promptTokens, completionTokens) = ReadGeminiUsage(json);
-
-                _logger.LogDebug(
-                    "AI response: transport=gemini model={Model}, tokens={Prompt}+{Completion}, finish={Finish}",
-                    config.ModelName, promptTokens, completionTokens, finishReason);
-
-                return new AiChatResponse
-                {
-                    Content = CjkTextFixer.Cleanse(rawContent),
-                    RawContent = rawContent,
-                    Model = config.ModelName,
-                    FinishReason = finishReason,
-                    PromptTokens = promptTokens,
-                    CompletionTokens = completionTokens
-                };
-            }
-        }
-
-        throw new AiRequestException(404, $"未找到 Gemini 原生端点：{lastError}");
-    }
+    private Task<AiChatResponse> SendSingleAsync(
+        AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct) =>
+        _executor.ExecuteAsync(request, config, strategy, ct);
 
     /// <summary>
     /// 两段式：先看图生成检索材料，再做纯文本联网回答。
@@ -439,7 +254,7 @@ public class AiChatService : IAiChatService
         {
             described = await SendSingleAsync(describeRequest, describeConfig, TransportNoSearch(config), ct);
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (AiRequestException ex) when (ex.IsDeterministicRejection && !ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "两段式第一步（看图生成检索词）失败，回退不检索");
             return await SendSingleAsync(request, config, AiSearchStrategy.CompatNoSearch, ct);
@@ -475,7 +290,7 @@ public class AiChatService : IAiChatService
                 Truncate(parsed.Value.Query, 80), config.ApiBaseUrl, strategy.Shape);
             return await SendSingleAsync(stage2, config, strategy, ct);
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (AiRequestException ex) when (ex.IsDeterministicRejection && !ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "两段式第二步（联网回答）失败，回退不检索");
             return await SendSingleAsync(request, config, AiSearchStrategy.CompatNoSearch, ct);
@@ -505,53 +320,6 @@ public class AiChatService : IAiChatService
 
         var inferred = AiProviderPreset.InferWebSearchMode(config.ApiBaseUrl);
         return inferred == "none" ? null : new AiSearchStrategy("openai", inferred);
-    }
-
-    private static string? ReadFinishReason(JsonElement json)
-    {
-        if (!json.TryGetProperty("choices", out var choices) ||
-            choices.ValueKind != JsonValueKind.Array ||
-            choices.GetArrayLength() == 0)
-            return null;
-
-        var choice = choices[0];
-        return choice.TryGetProperty("finish_reason", out var reason) &&
-               reason.ValueKind == JsonValueKind.String
-            ? reason.GetString()
-            : null;
-    }
-
-    private static (int Prompt, int Completion) ReadUsage(JsonElement json)
-    {
-        if (!json.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
-            return (0, 0);
-
-        var prompt = usage.TryGetProperty("prompt_tokens", out var pt) &&
-                     pt.ValueKind == JsonValueKind.Number
-            ? pt.GetInt32()
-            : 0;
-        var completion = usage.TryGetProperty("completion_tokens", out var ct) &&
-                         ct.ValueKind == JsonValueKind.Number
-            ? ct.GetInt32()
-            : 0;
-        return (prompt, completion);
-    }
-
-    private static (int Prompt, int Completion) ReadGeminiUsage(JsonElement json)
-    {
-        if (!json.TryGetProperty("usageMetadata", out var usage) ||
-            usage.ValueKind != JsonValueKind.Object)
-            return (0, 0);
-
-        var prompt = usage.TryGetProperty("promptTokenCount", out var pt) &&
-                     pt.ValueKind == JsonValueKind.Number
-            ? pt.GetInt32()
-            : 0;
-        var completion = usage.TryGetProperty("candidatesTokenCount", out var ct) &&
-                         ct.ValueKind == JsonValueKind.Number
-            ? ct.GetInt32()
-            : 0;
-        return (prompt, completion);
     }
 
     /// <summary>

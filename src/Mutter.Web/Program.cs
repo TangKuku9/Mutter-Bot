@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Mutter.Infrastructure.Data;
+using Mutter.Infrastructure;
+using Mutter.Core;
 using Mutter.Infrastructure.Repositories;
 using Mutter.Core.Interfaces;
 using Mutter.Web;
@@ -8,11 +10,9 @@ using Mutter.Web.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 注册 DbContext
-builder.Services.AddDbContext<AppDbContext>();
-
-// 注册 Repository
-builder.Services.AddScoped<IMessageRepository, MessageRepository>();
+// 两种宿主使用相同的运行时装配。
+builder.Services.AddCoreServices();
+builder.Services.AddInfrastructureServices();
 
 // 注册 Web 层服务（Controllers、SignalR、CORS）
 builder.Services.AddMutterWeb();

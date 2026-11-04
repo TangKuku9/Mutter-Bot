@@ -76,6 +76,8 @@ public class ConfigController : ControllerBase
             Temperature = entity.Temperature,
             MaxTokens = entity.MaxTokens,
             MaxContextMessages = entity.MaxContextMessages,
+            ContextWindowTokens = entity.ContextWindowTokens,
+            MaxInputTokens = entity.MaxInputTokens,
             MaxAttachedImages = entity.MaxAttachedImages,
             WebSearchEnabled = entity.WebSearchEnabled,
             WebSearchEndpoint = entity.WebSearchEndpoint,
@@ -310,9 +312,12 @@ public class ConfigController : ControllerBase
         dto.Temperature = Math.Clamp(dto.Temperature, 0, 2);
 
         // 面板输入框有 min/max，但 API 可以绕过面板直连提交。
-        // MaxTokens=0 会让输入预算算成 0、上下文被压到一条；MaxContextMessages=0 同理。
+        // 输出、输入预算与模型容量分别收敛，至少留出 512 输入与 1024 安全余量。
         dto.MaxTokens = Math.Clamp(dto.MaxTokens, 64, 32768);
         dto.MaxContextMessages = Math.Clamp(dto.MaxContextMessages, 2, 100);
+        dto.ContextWindowTokens = Math.Clamp(dto.ContextWindowTokens, 4096, 1048576);
+        dto.MaxTokens = Math.Min(dto.MaxTokens, dto.ContextWindowTokens - 1536);
+        dto.MaxInputTokens = Math.Clamp(dto.MaxInputTokens, 512, dto.ContextWindowTokens - dto.MaxTokens - 1024);
         // 附图张数：负数是无效输入，过大只会白烧 token 与带宽
         dto.MaxAttachedImages = Math.Clamp(dto.MaxAttachedImages, 0, AiConfig.CeilingAttachedImages);
 
@@ -355,6 +360,8 @@ public class ConfigController : ControllerBase
         entity.Temperature = dto.Temperature;
         entity.MaxTokens = dto.MaxTokens;
         entity.MaxContextMessages = dto.MaxContextMessages;
+        entity.ContextWindowTokens = dto.ContextWindowTokens;
+        entity.MaxInputTokens = dto.MaxInputTokens;
         entity.MaxAttachedImages = dto.MaxAttachedImages;
         entity.WebSearchEnabled = dto.WebSearchEnabled;
         entity.WebSearchImageMode = dto.WebSearchImageMode;
@@ -431,6 +438,8 @@ public class ConfigController : ControllerBase
             Temperature = entity.Temperature,
             MaxTokens = entity.MaxTokens,
             MaxContextMessages = entity.MaxContextMessages,
+            ContextWindowTokens = entity.ContextWindowTokens,
+            MaxInputTokens = entity.MaxInputTokens,
             MaxAttachedImages = entity.MaxAttachedImages,
             WebSearchEnabled = entity.WebSearchEnabled,
             WebSearchEndpoint = entity.WebSearchEndpoint,
@@ -451,6 +460,8 @@ public class ConfigController : ControllerBase
         Temperature = input.Temperature,
         MaxTokens = input.MaxTokens,
         MaxContextMessages = input.MaxContextMessages,
+        ContextWindowTokens = input.ContextWindowTokens,
+        MaxInputTokens = input.MaxInputTokens,
         MaxAttachedImages = input.MaxAttachedImages,
         WebSearchEnabled = input.WebSearchEnabled,
         WebSearchEndpoint = input.WebSearchEndpoint,

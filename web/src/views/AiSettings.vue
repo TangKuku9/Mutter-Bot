@@ -70,9 +70,17 @@
         <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" show-input style="max-width: 420px" />
         <ParamHelpButton :label="helpLabel('temperature')" @click="openHelp('temperature')" />
       </el-form-item>
-      <el-form-item label="最大 Tokens">
+      <el-form-item label="回复输出上限">
         <el-input-number v-model="form.maxTokens" :min="64" :max="32768" :step="256" />
         <ParamHelpButton :label="helpLabel('maxTokens')" @click="openHelp('maxTokens')" />
+      </el-form-item>
+      <el-form-item label="模型上下文容量">
+        <el-input-number v-model="form.contextWindowTokens" :min="4096" :max="1048576" :step="4096" />
+        <ParamHelpButton :label="helpLabel('contextWindowTokens')" @click="openHelp('contextWindowTokens')" />
+      </el-form-item>
+      <el-form-item label="输入预算">
+        <el-input-number v-model="form.maxInputTokens" :min="512" :max="Math.max(512, (form.contextWindowTokens || 32768) - 1024)" :step="512" />
+        <ParamHelpButton :label="helpLabel('maxInputTokens')" @click="openHelp('maxInputTokens')" />
       </el-form-item>
       <el-form-item label="上下文条数">
         <el-input-number v-model="form.maxContextMessages" :min="2" :max="100" />
@@ -404,6 +412,8 @@ const configPayload = () => ({
   temperature: form.value.temperature ?? 0.7,
   maxTokens: form.value.maxTokens ?? 2048,
   maxContextMessages: form.value.maxContextMessages ?? 20,
+  contextWindowTokens: form.value.contextWindowTokens ?? 32768,
+  maxInputTokens: form.value.maxInputTokens ?? 16384,
   maxAttachedImages: form.value.maxAttachedImages ?? 3,
   webSearchEnabled: !!form.value.webSearchEnabled,
   webSearchEndpoint: form.value.webSearchEndpoint || '',
@@ -612,7 +622,7 @@ const presetHelp = computed(() => {
 
 const HELP_ORDER = [
   'configPreset', 'presetId', 'apiBaseUrl', 'apiKey', 'modelName', 'personality', 'systemPrompt',
-  'temperature', 'maxTokens', 'maxContextMessages', 'maxAttachedImages',
+  'temperature', 'maxTokens', 'contextWindowTokens', 'maxInputTokens', 'maxContextMessages', 'maxAttachedImages',
   'webSearchEnabled', 'webSearchImageMode'
 ]
 
@@ -686,12 +696,22 @@ const HELP = {
     ]
   },
   maxTokens: {
-    title: '最大 Tokens',
+    title: '回复输出上限',
     value: (f) => `${f.maxTokens}`,
     lines: [
       '单次回复的输出上限，默认 2048。',
       '与「择机发言」的「判定输出上限」互不影响，各管各的。'
     ]
+  },
+  contextWindowTokens: {
+    title: '模型上下文容量',
+    value: (f) => `${f.contextWindowTokens ?? 32768}`,
+    lines: ['按服务商公布的模型上下文容量填写，默认 32768。', '输入、输出和安全余量共同占用这段容量；切换模型时请核对。']
+  },
+  maxInputTokens: {
+    title: '输入预算',
+    value: (f) => `${f.maxInputTokens ?? 16384}`,
+    lines: ['历史、当前消息、系统提示与图片共用的本地输入预算，默认 16384。', '文本和图片使用保守估算，并额外预留输出和安全余量；超过预算时先裁掉旧历史。', '当前消息或附件本身过大时会提示缩短内容，不会静默删掉当前问题。']
   },
   maxContextMessages: {
     title: '上下文条数',
