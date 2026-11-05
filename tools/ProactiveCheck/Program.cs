@@ -7,6 +7,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Mutter.Core.EventHandlers;
 using Mutter.Core;
 using Mutter.Core.Interfaces;
@@ -15,6 +16,7 @@ using Mutter.Core.Models.Config;
 using Mutter.Core.Models.QQOfficial;
 using Mutter.Core.Proactive;
 using Mutter.Core.Services;
+using Mutter.Core.Services.WebSearch;
 using Mutter.Infrastructure;
 using Mutter.Infrastructure.Data;
 using Microsoft.Extensions.Hosting;
@@ -700,6 +702,559 @@ Check(Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(geminiDoc.RootElement
     "Gemini 原生 usageMetadata.promptTokenCount 可读出");
 Check(Mutter.Core.Services.WebSearchProbe.Cases.Any(c => c.Endpoint == "gemini" && c.Shape == "gemini_native"),
     "矩阵含 Gemini 原生探测用例");
+
+Console.WriteLine("== 2i. 独立搜索服务（外搜）：触发判定、检索词提炼与注入构建（纯函数） ==");
+Check(!WebSearchTrigger.ShouldSearch("今天有什么大新闻", false, WebSearchTrigger.Mode.Off),
+    "外搜档位 off：恒不检索（成本闸优先于一切特征）");
+Check(!WebSearchTrigger.ShouldSearch("今天有什么大新闻", true, WebSearchTrigger.Mode.Off),
+    "off 连带图也不检索");
+Check(WebSearchTrigger.ShouldSearch("就随便聊聊", false, WebSearchTrigger.Mode.Always),
+    "外搜档位 always：恒检索（调用方已带着检索词来）");
+Check(!WebSearchTrigger.ShouldSearch("哈哈哈哈笑死我了", false, WebSearchTrigger.Mode.Auto),
+    "auto 档纯闲聊不检索");
+Check(!WebSearchTrigger.ShouldSearch("在吗", false, WebSearchTrigger.Mode.Auto),
+    "auto 档短寒暄不检索（疑问字太短仍是寒暄）");
+Check(WebSearchTrigger.ShouldSearch("这个游戏多少钱 值得买吗", false, WebSearchTrigger.Mode.Auto),
+    "auto 档足够长的事实疑问触发");
+Check(WebSearchTrigger.ShouldSearch("今天台风登陆了吗 各地情况如何", false, WebSearchTrigger.Mode.Auto),
+    "auto 档时效关键词触发");
+Check(WebSearchTrigger.ShouldSearch("看看这个 https://example.com/a 好玩", false, WebSearchTrigger.Mode.Auto),
+    "auto 档含 URL 触发");
+Check(WebSearchTrigger.ShouldSearch("2026-11-06 有什么新番开播", false, WebSearchTrigger.Mode.Auto),
+    "auto 档含具体日期触发");
+Check(WebSearchTrigger.ShouldSearch("哈哈哈哈笑死我了", true, WebSearchTrigger.Mode.Auto),
+    "auto 档带图触发（图里实体常需要检索）");
+Check(!WebSearchTrigger.ShouldSearch("   ", false, WebSearchTrigger.Mode.Auto), "空白文本不检索");
+Check(WebSearchTrigger.ExtractQuery("  杭州\n 周末  天气  ") == "杭州 周末 天气",
+    "检索词压平空白并 trim");
+Check(WebSearchTrigger.ExtractQuery("@小助手: 明天天气怎么样") == "明天天气怎么样",
+    "检索词去掉 @机器人 类前缀");
+Check(WebSearchTrigger.ExtractQuery("   ") == "" && WebSearchTrigger.ExtractQuery("") == "",
+    "空文本提炼为空串（上层据此跳过外搜）");
+Check(WebSearchTrigger.ExtractQuery(new string('词', 300)).Length == 120, "检索词超长截断到 120 字");
+
+Check(ExternalSearchInjector.CleanSnippet("<b>标题</b> 与  <i>摘要</i>") == "标题 与 摘要",
+    "命中摘要剥 HTML 标签并压空白");
+Check(ExternalSearchInjector.CleanSnippet("a\u200Bb\u200Fc\uFEFFd\u00ADe") == "abcde",
+    "零宽字符与软连字符被剔除（防资料里夹带不可见指令）");
+Check(ExternalSearchInjector.CleanSnippet(null) == "" && ExternalSearchInjector.CleanSnippet("  ") == "",
+    "空摘要清洗后为空串");
+var longCleaned = ExternalSearchInjector.CleanSnippet(new string('长', 500));
+Check(longCleaned.Length == ExternalSearchInjector.MaxSnippetChars + 1 && longCleaned.EndsWith('…'),
+    $"单条摘要截到 {ExternalSearchInjector.MaxSnippetChars} 字加省略号");
+
+// 北京 2026-11-06 12:00（UTC 同日 04:00）：注入块头部应按北京时间渲染
+var searchNow = new DateTimeOffset(2026, 11, 6, 4, 0, 0, TimeSpan.Zero);
+Check(ExternalSearchInjector.BuildInjection(Array.Empty<WebSearchHit>(), searchNow) is null,
+    "无命中返回 null：上层视为无资料，不再补打内建搜索");
+var blankHits = new[] { new WebSearchHit { Title = "<i></i>", Url = "https://a.example/0", Snippet = "  " } };
+Check(ExternalSearchInjector.BuildInjection(blankHits, searchNow) is null,
+    "清洗后全空的命中同样视为无资料");
+var manyHits = Enumerable.Range(1, 8).Select(i => new WebSearchHit
+{
+    Title = $"标题{i}", Url = $"https://a.example/{i}", Snippet = $"摘要{i}"
+}).ToList();
+var injection6 = ExternalSearchInjector.BuildInjection(manyHits, searchNow)!;
+Check(injection6.Contains("【检索资料】") && injection6.Contains("北京时间 2026-11-06 12:00"),
+    "注入块带【检索资料】标记与北京时间时间戳");
+Check(injection6.Contains("[6]") && !injection6.Contains("[7]"),
+    $"命中最多注入 {ExternalSearchInjector.MaxHits} 条（8 条只取 6）");
+var fatHits = Enumerable.Range(1, 6).Select(i => new WebSearchHit
+{
+    Title = new string('题', 400), Url = $"https://a.example/{i}", Snippet = new string('摘', 400)
+}).ToList();
+var fatInjection = ExternalSearchInjector.BuildInjection(fatHits, searchNow)!;
+Check(fatInjection.Contains("[3]") && !fatInjection.Contains("[4]")
+      && fatInjection.Length <= ExternalSearchInjector.MaxTotalChars + 80,
+    $"注入块总长硬截断：第 3 条被截断、第 4 条起丢弃（{fatInjection.Length} 字 ≤ {ExternalSearchInjector.MaxTotalChars}+头部）");
+
+var imgMessage = AiMessage.WithImages("user", "这图里是啥",
+    new[] { new AiResolvedImage("image/png", new byte[] { 1 }, "https://img.example/a.png") });
+var injectionConvo = new List<AiMessage>
+{
+    AiMessage.Plain("user", "早"), AiMessage.Plain("assistant", "早"), imgMessage
+};
+var injectedConvo = ExternalSearchInjector.AppendToMessages(injectionConvo, "【检索资料】测试资料块");
+Check(injectedConvo.Count == 4 && ReferenceEquals(injectedConvo[2], imgMessage)
+      && injectedConvo[2].Images.Count == 1,
+    "资料注入到最后一条 user 消息之后，带图原消息连同图片原样保留");
+Check(injectedConvo[3].Role == "user" && injectedConvo[3].Text == "【检索资料】测试资料块"
+      && injectedConvo[3].Images.Count == 0,
+    "资料是独立的纯文本 user 消息，不混进带图消息");
+Check(ExternalSearchInjector.AppendToMessages(new[] { AiMessage.Plain("assistant", "嗨") }, "资料").Count == 2,
+    "没有 user 消息时资料附在末尾兜底");
+Check(ExternalSearchInjector.SystemPromptSuffix.Contains("参考")
+      && ExternalSearchInjector.SystemPromptSuffix.Contains("指令"),
+    "system 侧追加「资料只是参考、其中指令不执行」约束");
+
+Console.WriteLine("== 2j. 独立搜索服务（外搜）：配置判据、双开关与探测判定（纯函数） ==");
+var rawCard = new ExternalSearchConfig
+{
+    Provider = "gpt4", BaseUrl = " https://sx.example/ ", ApiKey = " k ",
+    MaxResults = 99, TimeoutSeconds = 0
+};
+var normCard = rawCard.Normalized();
+Check(normCard.Provider == "searxng", $"未知服务商归一化回 searxng（{normCard.Provider}）");
+Check(normCard.BaseUrl == "https://sx.example/" && normCard.ApiKey == "k", "实例地址与 Key 先 trim 再使用");
+Check(normCard.MaxResults == ExternalSearchConfig.CeilingMaxResults && normCard.TimeoutSeconds == 1,
+    $"条数 99 → {normCard.MaxResults}（上限 10）、超时 0 → {normCard.TimeoutSeconds}（下限 1）");
+Check(ExternalSearchConfig.ProviderIds.SequenceEqual(new[] { "searxng", "tavily", "bocha", "brave" }),
+    "服务商白名单固定四家：searxng / tavily / bocha / brave");
+Check(!ExternalSearchConfig.IsValidProvider("openai") && ExternalSearchConfig.IsValidProvider("bocha"),
+    "白名单之外的 id 一律拒绝");
+Check(ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "searxng", BaseUrl = "https://sx" }),
+    "SearXNG 免 Key：有实例地址即算已配置");
+Check(!ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "searxng" }),
+    "SearXNG 没填实例地址不算已配置");
+Check(!ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "tavily", BaseUrl = "https://t.example" }),
+    "Tavily 没填 Key 不算已配置");
+Check(ExternalSearchConfig.IsConfigured(new ExternalSearchConfig
+{
+    Provider = "tavily", BaseUrl = "https://t.example", ApiKey = "k"
+}), "Tavily 地址 + Key 齐全当然已配置");
+Check(ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "tavily", ApiKey = "k" })
+      && ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "bocha", ApiKey = "k" })
+      && ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "brave", ApiKey = "k" }),
+    "Tavily/博查/Brave 有 Key 即已配置：BaseUrl 留空走官方默认端点");
+var secretCard = new ExternalSearchConfig
+{
+    Provider = "brave", BaseUrl = "https://api.search.brave.com/res/v1/web/search", ApiKey = "super-secret"
+};
+var describedCard = secretCard.Describe();
+Check(describedCard.Contains("brave") && !describedCard.Contains("super-secret")
+      && !describedCard.Contains("brave.com"),
+    "外搜公开描述只含服务商与开关位，Key 与实例地址不外泄");
+
+Check(ExternalSearchService.IsActive(new AiConfig
+{
+    WebSearchEnabled = true, ExternalSearch = new ExternalSearchConfig { Enabled = true, BaseUrl = "https://sx" }
+}), "IsActive：AI 主开关 + 外搜卡片开关 + 配置完整，三者齐备才生效");
+Check(!ExternalSearchService.IsActive(new AiConfig
+{
+    ExternalSearch = new ExternalSearchConfig { Enabled = true, BaseUrl = "https://sx" }
+}), "AI 全局联网主开关关着时外搜不生效（双开关之一）");
+Check(!ExternalSearchService.IsActive(new AiConfig { WebSearchEnabled = true }),
+    "外搜卡片默认 Enabled=false：升级后未配置的行为零变化");
+Check(!ExternalSearchService.IsActive(new AiConfig
+{
+    WebSearchEnabled = true, ExternalSearch = new ExternalSearchConfig { Enabled = true }
+}), "卡片开了但没配实例地址：IsActive 仍为 false");
+
+Check(AiChatService.HasConfiguredSearch(new AiConfig
+{
+    WebSearchEnabled = true, ExternalSearch = new ExternalSearchConfig { Enabled = true, BaseUrl = "https://sx" }
+}), "只配外搜：DeepSeek/中转站这类无内建搜索端点也能走择机联网核实");
+Check(AiChatService.HasConfiguredSearch(new AiConfig
+{
+    WebSearchEnabled = true, WebSearchEndpoint = "openai", WebSearchShape = "enable_search"
+}), "内建搜索通道照常被认可（外搜不挤掉它）");
+Check(!AiChatService.HasConfiguredSearch(new AiConfig { WebSearchEnabled = true }),
+    "两条通道都没配时 HasConfiguredSearch 为 false：不多打一次注定空转的改写调用");
+
+var probeHits = new WebSearchOutcome
+{
+    Hits =
+    [
+        new WebSearchHit { Title = "标题一", Url = "https://a.example/1", Snippet = "摘要一" },
+        new WebSearchHit { Title = "标题二", Url = "https://a.example/2", Snippet = "摘要二" }
+    ]
+};
+var (verifiedVerdict, verifiedDetail) = ExternalSearchProbe.Judge(probeHits, null);
+Check(verifiedVerdict == "verified" && verifiedDetail.Contains("命中 2 条"),
+    "测试搜索有命中即 verified 并带条数");
+Check(ExternalSearchProbe.Judge(WebSearchOutcome.Empty, null).Verdict == "no_results",
+    "连通但 0 条判 no_results（提示换词或查实例质量）");
+var (authVerdict, authDetail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
+    new WebSearchFailure(WebSearchFailureKind.Auth, 403,
+        "SearXNG 实例未开启 JSON 输出（settings.yml 的 search.formats 需含 json）"));
+Check(authVerdict == "auth_failed" && authDetail.Contains("settings.yml"),
+    "SearXNG 403(JSON) 给出 settings.yml 加 json 的部署修复提示，而不是笼统的鉴权失败");
+var (auth401Verdict, auth401Detail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
+    new WebSearchFailure(WebSearchFailureKind.Auth, 401, "auth rejected 401"));
+Check(auth401Verdict == "auth_failed" && auth401Detail.Contains("鉴权"),
+    "其余鉴权失败判 auth_failed 并提示查 Key/地址");
+var (failedVerdict, failedDetail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
+    new WebSearchFailure(WebSearchFailureKind.Transient, 503, "http 503"));
+Check(failedVerdict == "failed" && failedDetail.Contains("http 503"), "瞬时失败判 failed 并保留原因");
+var (disabledVerdict, disabledDetail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
+    new WebSearchFailure(WebSearchFailureKind.Disabled, null, "配置不完整"));
+Check(disabledVerdict == "failed" && disabledDetail.Contains("配置不完整"), "未启用/配置不完整判 failed");
+
+Console.WriteLine("== 2k. 独立搜索服务（外搜）：编排器与 SearXNG Provider（假实现隔离，不出网） ==");
+ExternalSearchConfig ExtConfig(bool enabled = true, string provider = "searxng") => new()
+{
+    Enabled = enabled, Provider = provider, BaseUrl = "https://search.example"
+};
+var extHits = new List<WebSearchHit>
+{
+    new() { Title = "标题", Url = "https://a.example/1", Snippet = "摘要" }
+};
+// 关闭/未配置的短路：Provider 一旦被请求就会抛，Calls==0 是硬证据
+var closedProvider = new FakeSearchProvider("tavily",
+    _ => throw new InvalidOperationException("关闭状态下不应请求 Provider"));
+var offSvc = new ExternalSearchService(new[] { closedProvider }, new ExternalSearchTestClock(),
+    NullLogger<ExternalSearchService>.Instance);
+var (offOutcome, offFail) = await offSvc.SearchAsync(
+    new AiConfig
+    {
+        WebSearchEnabled = true,
+        ExternalSearch = new ExternalSearchConfig { Enabled = false, BaseUrl = "https://sx" }
+    },
+    "查询");
+Check(offFail is { Kind: WebSearchFailureKind.Disabled } && closedProvider.Calls == 0,
+    "外搜卡片关着时直接短路：以结果返回而不是抛异常，Provider 未被请求");
+var (_, blankFail) = await offSvc.SearchAsync(
+    new AiConfig
+    {
+        WebSearchEnabled = true, ExternalSearch = new ExternalSearchConfig { Enabled = true }
+    },
+    "查询");
+Check(blankFail is { Kind: WebSearchFailureKind.Disabled } && blankFail.Reason.Contains("配置不完整"),
+    "SearXNG 未填实例地址视为配置不完整，不发出请求");
+var (_, unknownFail) = await offSvc.SearchAsync(
+    new AiConfig
+    {
+        WebSearchEnabled = true,
+        ExternalSearch = new ExternalSearchConfig { Enabled = true, BaseUrl = "https://x", Provider = "gpt" }
+    },
+    "查询");
+Check(unknownFail is { Kind: WebSearchFailureKind.Disabled } && unknownFail.Reason.Contains("未知 provider"),
+    "注册表里没有的 provider 明确报未知（gpt 已被归一化为 searxng）");
+
+var cacheClock = new ExternalSearchTestClock();
+var cacheProvider = new FakeSearchProvider("searxng",
+    _ => Task.FromResult(new WebSearchOutcome { Hits = extHits }));
+var cacheSvc = new ExternalSearchService(new[] { cacheProvider }, cacheClock,
+    NullLogger<ExternalSearchService>.Instance);
+var extCfg = new AiConfig { WebSearchEnabled = true, ExternalSearch = ExtConfig() };
+var (firstRun, firstFail) = await cacheSvc.SearchAsync(extCfg, "杭州 天气");
+Check(firstFail is null && firstRun.Hits.Count == 1 && !firstRun.ServedFromCache && cacheProvider.Calls == 1,
+    "首次检索真实打到 Provider 且不标记缓存");
+var (secondRun, secondFail) = await cacheSvc.SearchAsync(extCfg, "杭州 天气");
+Check(secondFail is null && secondRun.ServedFromCache && cacheProvider.Calls == 1,
+    "同 query 3 分钟内命中缓存，不再消耗一次检索");
+await cacheSvc.SearchAsync(extCfg, "上海 天气");
+Check(cacheProvider.Calls == 2, "不同 query 各自检索（缓存键含检索词）");
+cacheClock.Advance(ExternalSearchService.CacheTtl.Add(TimeSpan.FromMinutes(1)));
+var (expiredRun, _) = await cacheSvc.SearchAsync(extCfg, "杭州 天气");
+Check(!expiredRun.ServedFromCache && cacheProvider.Calls == 3, "超过 3 分钟缓存过期，重新检索");
+
+// 并发去重要确定性：假 Provider 挂在 TCS 上，两次调用同步进入缓存入口后再放行
+var slowGate = new TaskCompletionSource<WebSearchOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+var slowProvider = new FakeSearchProvider("searxng", _ => slowGate.Task);
+var slowClock = new ExternalSearchTestClock();
+var slowSvc = new ExternalSearchService(new[] { slowProvider }, slowClock,
+    NullLogger<ExternalSearchService>.Instance);
+var call1 = slowSvc.SearchAsync(extCfg, "周杰伦 最新 专辑");
+Check(slowProvider.Calls == 1, "并发合流：第一个调用放行真实请求");
+slowClock.Advance(TimeSpan.FromMilliseconds(5));
+var call2 = slowSvc.SearchAsync(extCfg, "周杰伦 最新 专辑");
+Check(slowProvider.Calls == 1, "并发合流：同 query 的第二个调用挂到同一请求上，不再发");
+var call3 = slowSvc.SearchAsync(extCfg, "别的 话题");
+Check(slowProvider.Calls == 2, "并发合流：不同 query 不受影响，照常发自己的请求");
+slowGate.SetResult(new WebSearchOutcome { Hits = extHits });
+var (r1, f1) = await call1;
+var (r2, f2) = await call2;
+var (r3, f3) = await call3;
+Check(f1 is null && f2 is null && f3 is null
+      && r1.Hits.Count == 1 && r2.Hits.Count == 1 && r3.Hits.Count == 1,
+    "合流与并行调用都拿到同一份命中，不抛异常");
+Check(!r1.ServedFromCache && r2.ServedFromCache && !r3.ServedFromCache,
+    "只有复用既有结果的后来者标记 ServedFromCache");
+
+var boomProvider = new FakeSearchProvider("searxng",
+    _ => throw new WebSearchRequestException(WebSearchFailureKind.Transient, 503, "http 503"));
+var boomClock = new ExternalSearchTestClock();
+var boomSvc = new ExternalSearchService(new[] { boomProvider }, boomClock,
+    NullLogger<ExternalSearchService>.Instance);
+for (var i = 1; i <= 3; i++)
+{
+    var (_, fail) = await boomSvc.SearchAsync(extCfg, "会失败的 检索词");
+    Check(fail is { Kind: WebSearchFailureKind.Transient } && boomProvider.Calls == i,
+        $"第 {i} 次失败以结果返回而不是抛异常（熔断阈值 {ExternalSearchService.BreakerThreshold} 未到）");
+}
+var (_, openFail) = await boomSvc.SearchAsync(extCfg, "会失败的 检索词");
+Check(boomProvider.Calls == 3 && openFail is { Kind: WebSearchFailureKind.Transient }
+      && openFail.Reason.Contains("熔断"),
+    "连续 3 次失败后熔断打开：第 4 次快速失败，不再打 Provider");
+boomClock.Advance(ExternalSearchService.BreakerCooldown);
+var (_, healedFail) = await boomSvc.SearchAsync(extCfg, "会失败的 检索词");
+Check(boomProvider.Calls == 4 && healedFail is not null,
+    "熔断冷却结束后恢复放行（本例仍失败，失败计数重新累积）");
+
+var flakyProvider = new FakeSearchProvider("searxng", q => q.Contains("会好")
+    ? Task.FromResult(new WebSearchOutcome { Hits = extHits })
+    : throw new WebSearchRequestException(WebSearchFailureKind.Transient, 500, "http 500"));
+var flakySvc = new ExternalSearchService(new[] { flakyProvider }, new ExternalSearchTestClock(),
+    NullLogger<ExternalSearchService>.Instance);
+await flakySvc.SearchAsync(extCfg, "失败 一");
+await flakySvc.SearchAsync(extCfg, "失败 二");
+await flakySvc.SearchAsync(extCfg, "会好 的词");
+await flakySvc.SearchAsync(extCfg, "失败 三");
+await flakySvc.SearchAsync(extCfg, "失败 四");
+Check(flakyProvider.Calls == 5, "中间成功一次就清零连续失败：2 败 1 成 2 败后仍未熔断");
+await flakySvc.SearchAsync(extCfg, "失败 五");
+var (_, gatedFail) = await flakySvc.SearchAsync(extCfg, "失败 六");
+Check(flakyProvider.Calls == 6 && gatedFail is not null && gatedFail.Reason.Contains("熔断"),
+    "失败 五 恰是第 3 次连续失败 → 熔断打开，失败 六 快速失败");
+
+var authProvider = new FakeSearchProvider("searxng",
+    _ => throw new WebSearchRequestException(WebSearchFailureKind.Auth, 401, "auth rejected 401"));
+var authSvc = new ExternalSearchService(new[] { authProvider }, new ExternalSearchTestClock(),
+    NullLogger<ExternalSearchService>.Instance);
+var (_, authFail) = await authSvc.SearchAsync(extCfg, "鉴权 失败");
+Check(authFail is { Kind: WebSearchFailureKind.Auth, HttpStatus: 401 } && !authFail.Retryable,
+    "鉴权失败归类为 Auth 且不可重试（不重试、不打兜底）");
+var weirdProvider = new FakeSearchProvider("searxng",
+    _ => throw new InvalidOperationException("搜索服务炸了"));
+var weirdSvc = new ExternalSearchService(new[] { weirdProvider }, new ExternalSearchTestClock(),
+    NullLogger<ExternalSearchService>.Instance);
+var (_, weirdFail) = await weirdSvc.SearchAsync(extCfg, "任意");
+Check(weirdFail is { Kind: WebSearchFailureKind.Transient } && weirdFail.Reason.Contains("炸了"),
+    "未知异常同样转成失败结果，绝不打断聊天回复");
+
+var stubHandler = new StubHttpHandler();
+using var searxHttp = new HttpClient(stubHandler);
+var searx = new SearxngProvider(searxHttp, NullLogger<SearxngProvider>.Instance);
+var searxCfg = new ExternalSearchConfig { BaseUrl = "https://sx.example/", MaxResults = 2 };
+stubHandler.Body = """
+    {"results":[
+      {"title":"标题一","url":"https://a.example/1","content":"摘要一"},
+      {"title":"标题二","url":"https://a.example/2","content":"<b>摘要二</b>"},
+      {"title":"标题三","url":"https://a.example/3","content":"摘要三"}]}
+    """;
+var searxOutcome = await searx.SearchAsync(searxCfg, "查询", default);
+Check(searxOutcome.Hits.Count == 2 && searxOutcome.Hits[0].Title == "标题一"
+      && searxOutcome.Hits[0].Snippet == "摘要一",
+    "SearXNG JSON 解析：title/url/content 正确映射并按 MaxResults 截断");
+Check(stubHandler.LastUrl!.StartsWith("https://sx.example/search") && stubHandler.LastUrl.Contains("format=json"),
+    "请求打到 /search 并显式要求 JSON 输出");
+stubHandler.StatusCode = 403;
+stubHandler.Body = "JSON format is not enabled in settings.yml";
+WebSearchRequestException? searx403 = null;
+try { await searx.SearchAsync(searxCfg, "查询", default); }
+catch (WebSearchRequestException ex) { searx403 = ex; }
+Check(searx403 is { Kind: WebSearchFailureKind.Auth, HttpStatus: 403 } && searx403.Message.Contains("JSON 输出"),
+    "SearXNG 403 且响应体提到 JSON：归类为鉴权失败并点名 JSON format 未开启（部署问题而非凭据问题）");
+var (searxVerdict, searxDetail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
+    searx403 is null ? null : new WebSearchFailure(searx403.Kind, searx403.HttpStatus, searx403.Message));
+Check(searxVerdict == "auth_failed" && searxDetail.Contains("settings.yml"),
+    "真实 SearXNG 403(JSON) 异常穿过 Judge 得到 settings.yml 修复指引");
+// 空响应体的 403 是普通实例鉴权，不能误导用户去改 settings.yml
+stubHandler.Body = "";
+WebSearchRequestException? searx403Plain = null;
+try { await searx.SearchAsync(searxCfg, "查询", default); }
+catch (WebSearchRequestException ex) { searx403Plain = ex; }
+Check(searx403Plain is { Kind: WebSearchFailureKind.Auth, HttpStatus: 403 }
+      && searx403Plain.Message.Contains("auth rejected"),
+    "响应体不提 JSON 的 403 按普通鉴权拒绝处理");
+var (plainVerdict, plainDetail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
+    searx403Plain is null ? null : new WebSearchFailure(searx403Plain.Kind, searx403Plain.HttpStatus, searx403Plain.Message));
+Check(plainVerdict == "auth_failed" && plainDetail.Contains("鉴权") && !plainDetail.Contains("settings.yml"),
+    "普通 403 穿过 Judge 提示查 Key/地址，不误报 JSON 部署问题");
+stubHandler.StatusCode = 200;
+stubHandler.Body = "{}";
+WebSearchRequestException? badShape = null;
+try { await searx.SearchAsync(searxCfg, "查询", default); }
+catch (WebSearchRequestException ex) { badShape = ex; }
+Check(badShape is { Kind: WebSearchFailureKind.InvalidResponse } && badShape.Message.Contains("results"),
+    "响应缺 results 数组按 InvalidResponse 归类");
+WebSearchRequestException? ssrf = null;
+try { await searx.SearchAsync(new ExternalSearchConfig { BaseUrl = "ftp://x" }, "查询", default); }
+catch (WebSearchRequestException ex) { ssrf = ex; }
+Check(ssrf is { Kind: WebSearchFailureKind.InvalidResponse } && ssrf.Message.Contains("非法地址"),
+    "BaseUrl 只放行 http/https（防 SSRF）");
+
+Console.WriteLine("== 2l. 独立搜索服务（外搜）：AiChatService 运行时集成（捕获执行器，不出网） ==");
+AiConfig RuntimeConfig(ExternalSearchConfig external) => new()
+{
+    ApiBaseUrl = "https://relay.example/v1",
+    ModelName = "any-model",
+    WebSearchEnabled = true,
+    ExternalSearch = external
+};
+ExternalSearchConfig RuntimeSearx(bool enabled = true) => new()
+{
+    Enabled = enabled, Provider = "searxng", BaseUrl = "http://127.0.0.1:18189",
+    MaxResults = 5, TimeoutSeconds = 8
+};
+AiChatService NewExtChat(ExternalSearchCaptureExecutor executor, IWebSearchProvider provider) => new(
+    executor, new StubImageResolver(), new AiSearchCapabilityStore(),
+    new ExternalSearchService(new[] { provider }, new ExternalSearchTestClock(),
+        NullLogger<ExternalSearchService>.Instance),
+    NullLogger<AiChatService>.Instance);
+var runtimeHits = new[]
+{
+    new WebSearchHit { Title = "结果一", Url = "https://example.com/1", Snippet = "摘要" }
+};
+
+// 1) Force + 显式检索词（择机 Phase 2 / 两段式第二阶段的调用形状）
+var forceExecutor = new ExternalSearchCaptureExecutor();
+var forceProvider = new FakeSearchProvider("searxng",
+    _ => Task.FromResult(new WebSearchOutcome { Hits = runtimeHits }));
+var forceChat = NewExtChat(forceExecutor, forceProvider);
+var forceReply = await forceChat.ChatWithSearchQueryAsync("你是群友",
+    new List<(string Role, string Content)> { ("user", "今天杭州天气怎么样？") },
+    RuntimeConfig(RuntimeSearx()), "杭州 今天 天气", default);
+Check(forceProvider.Calls == 1 && forceExecutor.Calls.Count == 1,
+    "Force + 显式检索词：Provider 只检索一次，执行器只收到一次请求");
+Check(forceExecutor.Last is not null
+      && forceExecutor.Last.Search == AiSearchIntent.Off
+      && forceExecutor.Last.SystemPrompt.Contains("检索资料")
+      && forceExecutor.Last.Messages[^1].Role == "user"
+      && forceExecutor.Last.Messages[^1].Text.Contains("【检索资料】")
+      && forceExecutor.Last.Messages.Any(m => m.Text.Contains("https://example.com/1"))
+      && forceReply.Content == "ok",
+    "资料注入在末尾且命中 URL 可见，模型侧以 Off 发送并正常回复");
+
+// 2) auto 档闲聊：不触发，原请求照发
+var idleExecutor = new ExternalSearchCaptureExecutor();
+var idleProvider = new FakeSearchProvider("searxng",
+    _ => Task.FromResult(new WebSearchOutcome { Hits = runtimeHits }));
+var idleChat = NewExtChat(idleExecutor, idleProvider);
+await idleChat.ChatAsync("系统",
+    new List<(string Role, string Content)> { ("user", "在吗，聊会儿天") },
+    RuntimeConfig(RuntimeSearx()), default);
+Check(idleProvider.Calls == 0 && idleExecutor.Last?.Search == AiSearchIntent.Inherit,
+    "auto 档闲聊不触发外搜，原请求按 Inherit 照发");
+
+// 3) auto 档时效消息：触发并注入
+var freshExecutor = new ExternalSearchCaptureExecutor();
+var freshProvider = new FakeSearchProvider("searxng",
+    _ => Task.FromResult(new WebSearchOutcome { Hits = runtimeHits }));
+var freshChat = NewExtChat(freshExecutor, freshProvider);
+await freshChat.ChatAsync("系统",
+    new List<(string Role, string Content)> { ("user", "今天的新闻有什么") },
+    RuntimeConfig(RuntimeSearx()), default);
+Check(freshProvider.Calls == 1 && freshExecutor.Last?.Search == AiSearchIntent.Off
+      && freshExecutor.Last!.Messages[^1].Text.Contains("【检索资料】"),
+    "auto 档时效消息触发外搜并注入资料");
+
+// 4) 0 条结果：无资料，即使开着兜底也不再打内建
+var zeroExecutor = new ExternalSearchCaptureExecutor();
+var zeroProvider = new FakeSearchProvider("searxng", _ => Task.FromResult(WebSearchOutcome.Empty));
+var zeroChat = NewExtChat(zeroExecutor, zeroProvider);
+var zeroConfig = RuntimeConfig(RuntimeSearx()) with
+{
+    WebSearchShape = "enable_search", WebSearchEndpoint = "openai",
+    ExternalSearch = RuntimeSearx() with { FallbackToBuiltin = true }
+};
+await zeroChat.ChatAsync("系统",
+    new List<(string Role, string Content)> { ("user", "今天新闻") },
+    zeroConfig, default);
+Check(zeroProvider.Calls == 1 && zeroExecutor.Last?.Search == AiSearchIntent.Inherit
+      && zeroExecutor.Strategy?.Shape is null,
+    "0 条结果视为无资料：即使 FallbackToBuiltin=true 也不打内建（strategy.Shape 为 null）");
+
+// 5) 外搜失败 + 显式兜底：内建通道重试
+var fallbackExecutor = new ExternalSearchCaptureExecutor();
+var fallbackProvider = new FakeSearchProvider("searxng",
+    _ => throw new WebSearchRequestException(WebSearchFailureKind.Transient, 500, "http 500"));
+var fallbackChat = NewExtChat(fallbackExecutor, fallbackProvider);
+var fallbackConfig = RuntimeConfig(RuntimeSearx()) with
+{
+    WebSearchShape = "enable_search", WebSearchEndpoint = "openai",
+    ExternalSearch = RuntimeSearx() with { FallbackToBuiltin = true }
+};
+await fallbackChat.ChatAsync("系统",
+    new List<(string Role, string Content)> { ("user", "今天的新闻") },
+    fallbackConfig, default);
+Check(fallbackExecutor.Strategy?.Shape == "enable_search",
+    "外搜失败且 FallbackToBuiltin=true：退回内建搜索通道（strategy.Shape=enable_search）");
+
+// 6) 带图：先看图提炼检索词，第二阶段保留原图 + 看图结论 + 检索资料
+var visionSeen = 0;
+var visionExecutor = new ExternalSearchCaptureExecutor((request, _) =>
+{
+    visionSeen++;
+    return visionSeen == 1
+        ? new AiChatResponse { Content = "图片描述：左红右蓝\n检索词：颜色 对比 测试" }
+        : new AiChatResponse { Content = "ok" };
+});
+var visionProvider = new FakeSearchProvider("searxng",
+    _ => Task.FromResult(new WebSearchOutcome { Hits = runtimeHits }));
+var visionChat = NewExtChat(visionExecutor, visionProvider);
+var visionReply = await visionChat.ChatWithImagesAsync("系统", "这张图在说啥",
+    new[] { "https://img.example/a.png" }, RuntimeConfig(RuntimeSearx()), null, default);
+Check(visionProvider.Calls == 1 && visionExecutor.Calls.Count == 2,
+    "带图外搜两段式：Provider 检索一次，看图与正式回答各一次调用");
+Check(visionExecutor.Calls[0].Request.Search == AiSearchIntent.Off
+      && visionExecutor.Calls[0].Request.HasImages,
+    "看图这步以 Off 意图发送并携带原图（不继承全局联网开关）");
+var visionSecond = visionExecutor.Calls[1].Request;
+Check(visionSecond.Search == AiSearchIntent.Off
+      && visionSecond.Messages.Any(m => m.Images.Count == 1)
+      && visionSecond.Messages.Any(m => m.Text.Contains("图片已识别内容"))
+      && visionSecond.Messages.Any(m => m.Text.Contains("【检索资料】"))
+      && visionReply.Content == "ok",
+    "第二阶段保留原图并附「图片已识别内容」与【检索资料】，回复不打断");
+
+// 7) 外搜卡片关闭：不碰 Provider，走升级前的旧路径
+var legacyExecutor = new ExternalSearchCaptureExecutor();
+var legacyProvider = new FakeSearchProvider("searxng",
+    _ => Task.FromResult(new WebSearchOutcome { Hits = runtimeHits }));
+var legacyChat = NewExtChat(legacyExecutor, legacyProvider);
+await legacyChat.ChatAsync("系统",
+    new List<(string Role, string Content)> { ("user", "今天新闻") },
+    RuntimeConfig(RuntimeSearx(enabled: false)), default);
+Check(legacyProvider.Calls == 0 && legacyExecutor.Last?.Search == AiSearchIntent.Inherit,
+    "外搜卡片关闭时不碰 Provider，行为与升级前一致");
+
+Console.WriteLine("== 2m. 独立搜索服务（外搜）：Tavily/博查/Brave Provider 契约（假 HTTP，不出网） ==");
+var contractHandler = new StubHttpHandler();
+using var contractHttp = new HttpClient(contractHandler);
+var tavily = new TavilyProvider(contractHttp, NullLogger<TavilyProvider>.Instance);
+var bocha = new BochaProvider(contractHttp, NullLogger<BochaProvider>.Instance);
+var brave = new BraveProvider(contractHttp, NullLogger<BraveProvider>.Instance);
+
+contractHandler.Body = """{"results":[{"title":"T 标题","url":"https://t.example/1","content":"正文摘要"}]}""";
+var tavilyOutcome = await tavily.SearchAsync(
+    new ExternalSearchConfig { ApiKey = "k-tavily", MaxResults = 5 }, "测试 检索", default);
+Check(contractHandler.LastMethod == "POST" && contractHandler.LastUrl == "https://api.tavily.com/search",
+    "Tavily 留空 BaseUrl 时 POST 官方默认端点 /search");
+Check(contractHandler.LastHeaders.TryGetValue("Authorization", out var tavAuth) && tavAuth == "Bearer k-tavily",
+    "Tavily 用 Authorization: Bearer 携带 Key");
+Check(contractHandler.LastRequestBody!.Contains("\"query\":")
+      && contractHandler.LastRequestBody.Contains("\"max_results\":"),
+    "Tavily 请求体带 query 与 max_results");
+Check(tavilyOutcome.Hits.Count == 1 && tavilyOutcome.Hits[0].Snippet == "正文摘要",
+    "Tavily 解析 results[].content 为 Snippet");
+await tavily.SearchAsync(new ExternalSearchConfig { ApiKey = "k", BaseUrl = "https://gw.example/tv" }, "查询", default);
+Check(contractHandler.LastUrl == "https://gw.example/tv/search",
+    "Tavily 非空 BaseUrl 覆盖默认端点并自动补 /search 路径");
+
+contractHandler.Body = """
+    {"code":200,"data":{"webPages":{"value":[
+      {"name":"博查标题","url":"https://b.example/1","summary":"博查摘要"}]}}}
+    """;
+var bochaOutcome = await bocha.SearchAsync(
+    new ExternalSearchConfig { ApiKey = "k-bocha", MaxResults = 5 }, "测试 检索", default);
+Check(contractHandler.LastMethod == "POST" && contractHandler.LastUrl == "https://api.bochaai.com/v1/web-search",
+    "博查留空 BaseUrl 时 POST 官方默认端点");
+Check(contractHandler.LastHeaders["Authorization"] == "Bearer k-bocha", "博查用 Bearer 携带 Key");
+Check(contractHandler.LastRequestBody!.Contains("\"count\":"), "博查请求体带 count 条数");
+Check(bochaOutcome.Hits.Count == 1 && bochaOutcome.Hits[0].Title == "博查标题"
+      && bochaOutcome.Hits[0].Snippet == "博查摘要",
+    "博查解析 data.webPages.value[] 的 name/url/summary");
+await bocha.SearchAsync(
+    new ExternalSearchConfig { ApiKey = "k", BaseUrl = "https://gw.example/bocha/v1/web-search" }, "查询", default);
+Check(contractHandler.LastUrl == "https://gw.example/bocha/v1/web-search",
+    "博查非空 BaseUrl 原样使用（自建网关直接给完整端点）");
+
+contractHandler.Body = """{"web":{"results":[{"title":"B 标题","url":"https://br.example/1","description":"Brave 摘要"}]}}""";
+var braveOutcome = await brave.SearchAsync(
+    new ExternalSearchConfig { ApiKey = "k-brave", MaxResults = 3 }, "测试 检索", default);
+Check(contractHandler.LastMethod == "GET"
+      && contractHandler.LastUrl!.StartsWith("https://api.search.brave.com/res/v1/web/search?")
+      && contractHandler.LastUrl.Contains("q=") && contractHandler.LastUrl.Contains("count=3"),
+    "Brave 留空 BaseUrl 时 GET 官方默认端点并带 q/count");
+Check(contractHandler.LastHeaders["X-Subscription-Token"] == "k-brave",
+    "Brave 用 X-Subscription-Token 携带 Key");
+Check(braveOutcome.Hits.Count == 1 && braveOutcome.Hits[0].Snippet == "Brave 摘要",
+    "Brave 解析 web.results[].description 为 Snippet");
+await brave.SearchAsync(new ExternalSearchConfig { ApiKey = "k", BaseUrl = "https://gw.example/brave" }, "查询", default);
+Check(contractHandler.LastUrl!.StartsWith("https://gw.example/brave?"),
+    "Brave 非空 BaseUrl 覆盖官方默认端点");
 
 Console.WriteLine("== 3g. 面板口令哈希（PBKDF2 迭代升级与旧格式兼容） ==");
 var panelHash = PanelPasswordHasher.Hash("s3cret-pass");
@@ -1614,11 +2169,104 @@ file sealed class ScriptedAiChatService : IAiChatService
         List<(string Role, string Content)> conversationHistory, AiConfig config,
         string? responseFormat, CancellationToken ct = default) => Next();
 
+    public Task<AiChatResponse> ChatWithSearchQueryAsync(string systemPrompt,
+        List<(string Role, string Content)> conversationHistory, AiConfig config,
+        string searchQuery, CancellationToken ct = default) => Next();
+
     private Task<AiChatResponse> Next()
     {
         var response = _responses.Dequeue();
         return response is Exception exception
             ? Task.FromException<AiChatResponse>(exception)
             : Task.FromResult((AiChatResponse)response);
+    }
+}
+
+// 外搜编排器的隔离测试桩：不出网，调用次数与放行时机完全由自检控制。
+file sealed class FakeSearchProvider : IWebSearchProvider
+{
+    private readonly Func<string, Task<WebSearchOutcome>> _impl;
+
+    public FakeSearchProvider(string id, Func<string, Task<WebSearchOutcome>> impl)
+    {
+        Id = id;
+        _impl = impl;
+    }
+
+    public string Id { get; }
+    public bool RequiresApiKey => false;
+    public string DisplayName => "假搜索（自检）";
+    public int Calls;
+
+    public Task<WebSearchOutcome> SearchAsync(ExternalSearchConfig config, string query, CancellationToken ct)
+    {
+        Interlocked.Increment(ref Calls);
+        return _impl(query);
+    }
+}
+
+// 外搜自检用的假时钟：缓存 TTL 与熔断冷却全靠推进它，不真的等待。
+file sealed class ExternalSearchTestClock : TimeProvider
+{
+    private DateTimeOffset _now = new(2026, 11, 6, 4, 0, 0, TimeSpan.Zero);
+    public override DateTimeOffset GetUtcNow() => _now;
+    public void Advance(TimeSpan elapsed) => _now += elapsed;
+}
+
+// 外搜 Provider 的本地假 HTTP：只回罐头响应，记录请求地址、方法、头与请求体供断言。
+file sealed class StubHttpHandler : HttpMessageHandler
+{
+    public int StatusCode = 200;
+    public string Body = "{}";
+    public string? LastUrl;
+    public string? LastMethod;
+    public string? LastRequestBody;
+    public readonly Dictionary<string, string> LastHeaders = new();
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        LastUrl = request.RequestUri!.ToString();
+        LastMethod = request.Method.Method;
+        LastHeaders.Clear();
+        foreach (var header in request.Headers)
+            LastHeaders[header.Key] = string.Join(", ", header.Value);
+        if (request.Content is not null)
+        {
+            foreach (var header in request.Content.Headers)
+                LastHeaders[header.Key] = string.Join(", ", header.Value);
+            LastRequestBody = await request.Content.ReadAsStringAsync(cancellationToken);
+        }
+        else
+        {
+            LastRequestBody = null;
+        }
+
+        return new HttpResponseMessage((System.Net.HttpStatusCode)StatusCode)
+        {
+            Content = new StringContent(Body, Encoding.UTF8, "application/json")
+        };
+    }
+}
+
+// 外搜集成测试的图片解析桩：任何链接都解析成 3 字节 PNG（不做真实下载）。
+file sealed class StubImageResolver : IAiImageResolver
+{
+    public Task<AiResolvedImage?> ResolveAsync(string url, CancellationToken ct = default) =>
+        Task.FromResult<AiResolvedImage?>(new AiResolvedImage("image/png", new byte[] { 1, 2, 3 }, url));
+}
+
+// 外搜集成测试的捕获执行器：记录每次通道选择与请求形状，可注入脚本化回复。
+file sealed class ExternalSearchCaptureExecutor(
+    Func<AiChatRequest, AiSearchStrategy, AiChatResponse>? handler = null) : IAiModelExecutor
+{
+    public List<(AiChatRequest Request, AiSearchStrategy Strategy)> Calls { get; } = new();
+    public AiChatRequest? Last => Calls.Count == 0 ? null : Calls[^1].Request;
+    public AiSearchStrategy? Strategy => Calls.Count == 0 ? null : Calls[^1].Strategy;
+
+    public Task<AiChatResponse> ExecuteAsync(
+        AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct)
+    {
+        Calls.Add((request, strategy));
+        return Task.FromResult(handler?.Invoke(request, strategy) ?? new AiChatResponse { Content = "ok" });
     }
 }

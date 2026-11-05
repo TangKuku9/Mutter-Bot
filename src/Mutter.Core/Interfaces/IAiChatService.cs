@@ -50,4 +50,15 @@ public interface IAiChatService
         AiConfig config,
         string? responseFormat,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// 带检索词的联网聊天（择机 Phase 2 等「已确定要检索、检索词现成」的调用方）。
+    /// 外搜路线会直接用 searchQuery 检索注入；内建路线等同普通 ChatAsync。
+    /// </summary>
+    Task<AiChatResponse> ChatWithSearchQueryAsync(
+        string systemPrompt,
+        List<(string Role, string Content)> conversationHistory,
+        AiConfig config,
+        string searchQuery,
+        CancellationToken ct = default);
 }

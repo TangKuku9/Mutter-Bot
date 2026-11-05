@@ -6,8 +6,10 @@ using Microsoft.Extensions.Options;
 using Mutter.Core.Configuration;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models.Config;
+using Mutter.Core.Services.WebSearch;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
+using Mutter.Infrastructure.Repositories;
 using Mutter.Web.Models;
 
 namespace Mutter.Web.Controllers;
@@ -61,11 +63,14 @@ public class ConfigController : ControllerBase
                 MaxContextMessages = 20,
                 MaxAttachedImages = AiConfig.DefaultMaxAttachedImages,
                 WebSearchImageMode = AiConfig.WebSearchImageModeAuto,
+                ExternalSearch = new ExternalSearchInputDto(),
+                ExternalSearchStatus = new ExternalSearchStatusDto(),
                 AvailableCharacters = characters,
                 AvailableProviders = providers
             };
         }
 
+        var external = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
         return new AiConfigDto
         {
             ApiBaseUrl = entity.ApiBaseUrl,
@@ -89,6 +94,21 @@ public class ConfigController : ControllerBase
                 : entity.WebSearchImageMode,
             WebSearchImageCapable = entity.WebSearchImageCapable,
             WebSearchImageVerifiedAt = entity.WebSearchImageVerifiedAt,
+            ExternalSearch = new ExternalSearchInputDto
+            {
+                Enabled = external.Enabled ?? false,
+                Provider = external.Provider,
+                BaseUrl = external.BaseUrl,
+                // SearXNG 不使用 Key：不回显旧服务商的残留 Key；其余服务打码回显。
+                ApiKey = external.Provider == "searxng" ? string.Empty : MaskApiKey(external.ApiKey),
+                MaxResults = external.MaxResults,
+                TimeoutSeconds = external.TimeoutSeconds,
+                FallbackToBuiltin = external.FallbackToBuiltin
+            },
+            ExternalSearchStatus = new ExternalSearchStatusDto
+            {
+                VerifiedAt = external.VerifiedAt
+            },
             AvailableCharacters = characters,
             AvailableProviders = providers
         };
@@ -269,11 +289,25 @@ public class ConfigController : ControllerBase
         if (!TryReadPresetConfig(preset.ConfigJson, out var config))
             return BadRequest(new { error = "预设数据损坏，无法应用；请删除后重新保存" });
 
+        var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
+
+        // 预设快照不保存外搜 Key；同服务商且同地址时沿用当前 Key 再校验，
+        // 否则提示用户补 Key，不能把已配置的服务应用成不可用。
+        if (config.ExternalSearch is { } presetExternal
+            && string.IsNullOrEmpty(presetExternal.ApiKey)
+            && entity is not null)
+        {
+            var currentExternal = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
+            if (string.Equals(currentExternal.Provider, presetExternal.Provider, StringComparison.Ordinal)
+                && string.Equals(currentExternal.BaseUrl.TrimEnd('/'), presetExternal.BaseUrl.TrimEnd('/'),
+                    StringComparison.Ordinal))
+                presetExternal.ApiKey = currentExternal.ApiKey;
+        }
+
         var error = NormalizeAndValidateAiConfigInput(config);
         if (error != null)
             return BadRequest(new { error = $"预设内容无效：{error}" });
 
-        var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
         if (entity == null)
         {
             entity = new AiConfigEntity();
@@ -341,6 +375,41 @@ public class ConfigController : ControllerBase
 
         dto.WebSearchEndpoint = endpoint;
         dto.WebSearchShape = shape;
+
+        // 独立搜索服务：数值收敛 + provider 白名单 + URL 限制。
+        // null=面板没提交这块（只保存主表单），保持库中原值，不在这里动。
+        if (dto.ExternalSearch is { } external)
+        {
+            external.Provider = (external.Provider ?? string.Empty).Trim();
+            if (external.Provider.Length == 0) external.Provider = "searxng";
+            if (!ExternalSearchConfig.IsValidProvider(external.Provider))
+                return $"未知的搜索服务商：{external.Provider}";
+            external.BaseUrl = (external.BaseUrl ?? string.Empty).Trim();
+            external.ApiKey = (external.ApiKey ?? string.Empty).Trim();
+            if (external.BaseUrl.Length > 0)
+            {
+                // 只放行 http/https，与运行时 RequireHttpUrl 同一条规则
+                if (!Uri.TryCreate(external.BaseUrl, UriKind.Absolute, out var uri)
+                    || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                    return "搜索服务地址必须是 http/https 开头的完整 URL";
+                // 启用时校验配置完整性；SearXNG 免 Key，其余必须有 Key（打码值视为已配置）
+                if (external.Enabled
+                    && external.Provider != "searxng"
+                    && external.ApiKey.Length == 0)
+                    return $"{external.Provider} 需要 API Key";
+            }
+            else if (external.Enabled)
+            {
+                // Tavily/Brave/博查留空 BaseUrl 时有官方默认端点，允许为空；SearXNG 必须填实例地址
+                if (external.Provider == "searxng")
+                    return "SearXNG 必须填写实例地址";
+                if (external.ApiKey.Length == 0)
+                    return $"{external.Provider} 需要 API Key";
+            }
+            external.MaxResults = Math.Clamp(external.MaxResults, 1, ExternalSearchConfig.CeilingMaxResults);
+            external.TimeoutSeconds = Math.Clamp(external.TimeoutSeconds, 1, ExternalSearchConfig.CeilingTimeoutSeconds);
+        }
+
         return null;
     }
 
@@ -413,6 +482,41 @@ public class ConfigController : ControllerBase
             entity.WebSearchImageCapable = imageCapable;
             entity.WebSearchImageVerifiedAt = DateTime.UtcNow;
         }
+
+        ApplyExternalSearch(entity, dto.ExternalSearch);
+    }
+
+    /// <summary>
+    /// 外搜卡片落库。dto 为 null（面板没提交这块）时完全不动库值；
+    /// Key 沿用「打码值=未修改」规则；服务商/地址/Key 任一变化即清空验证结论。
+    /// </summary>
+    private static void ApplyExternalSearch(AiConfigEntity entity, ExternalSearchInputDto? dto)
+    {
+        if (dto is null) return;
+
+        var current = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
+        // SearXNG 免 Key，落库清空，避免旧服务商的 Key 残留；其余服务沿用「打码值=未修改」。
+        var resolvedKey = dto.Provider == "searxng"
+            ? string.Empty
+            : string.IsNullOrEmpty(dto.ApiKey) && current.ApiKey.Length > 0
+                ? current.ApiKey
+                : ResolveSubmittedApiKey(current.ApiKey, dto.ApiKey);
+
+        var targetChanged = !string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal)
+                            || !string.Equals(current.BaseUrl.TrimEnd('/'), dto.BaseUrl.TrimEnd('/'), StringComparison.Ordinal)
+                            || !string.Equals(current.ApiKey, resolvedKey, StringComparison.Ordinal);
+
+        entity.ExternalSearchJson = ExternalSearchJsonCodec.Encode(new ExternalSearchConfig
+        {
+            Enabled = dto.Enabled,
+            Provider = dto.Provider,
+            BaseUrl = dto.BaseUrl,
+            ApiKey = resolvedKey,
+            MaxResults = dto.MaxResults,
+            TimeoutSeconds = dto.TimeoutSeconds,
+            FallbackToBuiltin = dto.FallbackToBuiltin,
+            VerifiedAt = targetChanged ? null : current.VerifiedAt
+        });
     }
 
     /// <summary>
@@ -425,6 +529,18 @@ public class ConfigController : ControllerBase
             return currentKey;
         return submittedKey;
     }
+
+    private static ExternalSearchInputDto ToExternalSearchInput(ExternalSearchConfig config) => new()
+    {
+        Enabled = config.Enabled ?? false,
+        Provider = config.Provider,
+        BaseUrl = config.BaseUrl,
+        // 预设 JSON 不落外搜 Key；读取预设时也不回显其真值。
+        ApiKey = string.Empty,
+        MaxResults = config.MaxResults,
+        TimeoutSeconds = config.TimeoutSeconds,
+        FallbackToBuiltin = config.FallbackToBuiltin
+    };
 
     private static AiPresetConfigDto SnapshotAiConfig(AiConfigEntity? entity)
     {
@@ -449,7 +565,8 @@ public class ConfigController : ControllerBase
             WebSearchShape = entity.WebSearchShape,
             WebSearchImageMode = string.IsNullOrWhiteSpace(entity.WebSearchImageMode)
                 ? AiConfig.WebSearchImageModeAuto
-                : entity.WebSearchImageMode
+                : entity.WebSearchImageMode,
+            ExternalSearch = ToExternalSearchInput(ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson))
         };
     }
 
@@ -470,14 +587,17 @@ public class ConfigController : ControllerBase
         WebSearchEnabled = input.WebSearchEnabled,
         WebSearchEndpoint = input.WebSearchEndpoint,
         WebSearchShape = input.WebSearchShape,
-        WebSearchImageMode = input.WebSearchImageMode
+        WebSearchImageMode = input.WebSearchImageMode,
+        ExternalSearch = input.ExternalSearch
     };
 
     private static string SerializePresetConfig(AiPresetConfigDto config)
     {
-        // 双保险：Key 只走单独一列，任何调用方都不可能把它序列化进快照。
+        // 双保险：主 Key 只走单独一列；外搜 Key 不进入预设快照，应用预设时沿用当前值。
         config.Version = 1;
         config.ApiKey = string.Empty;
+        if (config.ExternalSearch is not null)
+            config.ExternalSearch.ApiKey = string.Empty;
         return JsonSerializer.Serialize(config, PresetJsonOptions);
     }
 
@@ -614,6 +734,106 @@ public class ConfigController : ControllerBase
 
     private static string TrimToLength(string value, int max) =>
         value.Length <= max ? value : value[..max];
+
+    /// <summary>
+    /// 「测试搜索」：用表单当前值跑一次真实外搜（SearXNG/官方端点均真请求），
+    /// 一次成败即结论，不需要形状矩阵。Key 打码时回退库中真值，与探测同一规则。
+    /// 成功会顺手把 VerifiedAt 落库。
+    /// </summary>
+    [HttpPost("ai/probe-search")]
+    public async Task<IActionResult> ProbeExternalSearch(
+        [FromBody] ExternalSearchInputDto dto,
+        [FromServices] ExternalSearchService searchService,
+        CancellationToken ct)
+    {
+        dto.Provider = (dto.Provider ?? string.Empty).Trim();
+        if (dto.Provider.Length == 0) dto.Provider = "searxng";
+        if (!ExternalSearchConfig.IsValidProvider(dto.Provider))
+            return BadRequest(new { error = $"未知的搜索服务商：{dto.Provider}" });
+        dto.BaseUrl = (dto.BaseUrl ?? string.Empty).Trim();
+        dto.ApiKey = (dto.ApiKey ?? string.Empty).Trim();
+        dto.MaxResults = Math.Clamp(dto.MaxResults, 1, ExternalSearchConfig.CeilingMaxResults);
+        dto.TimeoutSeconds = Math.Clamp(dto.TimeoutSeconds, 1, ExternalSearchConfig.CeilingTimeoutSeconds);
+
+        // 探测也要求配置完整：SearXNG 必须有地址，其余必须有 Key（打码值视为未修改，回库里取）
+        var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync(ct);
+        var current = ExternalSearchJsonCodec.Decode(entity?.ExternalSearchJson);
+        var apiKey = ResolveSubmittedApiKey(current.ApiKey, dto.ApiKey);
+
+        var probeConfig = new AiConfig
+        {
+            // 外搜不依赖模型端点；WebSearchEnabled 在 ExternalSearchService 内部以卡片为准
+            WebSearchEnabled = true,
+            ExternalSearch = new ExternalSearchConfig
+            {
+                Enabled = true,
+                Provider = dto.Provider,
+                BaseUrl = dto.BaseUrl,
+                ApiKey = apiKey,
+                MaxResults = dto.MaxResults,
+                TimeoutSeconds = dto.TimeoutSeconds,
+                FallbackToBuiltin = false
+            }
+        };
+
+        if (!ExternalSearchConfig.IsConfigured(probeConfig.ExternalSearch.Normalized()))
+            return BadRequest(new
+            {
+                error = dto.Provider == "searxng"
+                    ? "SearXNG 需要填写实例地址"
+                    : $"{dto.Provider} 需要填写 API Key"
+            });
+
+        // 探测绕过 3 分钟缓存：直接走 provider，避免「刚才测过」干扰判断
+        var provider = searchService.ResolveProvider(dto.Provider);
+        if (provider is null)
+            return BadRequest(new { error = $"未知的搜索服务商：{dto.Provider}" });
+
+        WebSearchOutcome outcome;
+        WebSearchFailure? failure = null;
+        try
+        {
+            outcome = await provider.SearchAsync(
+                probeConfig.ExternalSearch.Normalized(), ExternalSearchProbe.TestQuery, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            outcome = WebSearchOutcome.Empty;
+            failure = ex is WebSearchRequestException typed
+                ? new WebSearchFailure(typed.Kind, typed.HttpStatus, typed.Message)
+                : new WebSearchFailure(WebSearchFailureKind.Transient, null, ex.Message);
+        }
+        var (verdict, detail) = ExternalSearchProbe.Judge(outcome, failure, dto.Provider);
+
+        // verified 时把结论顺手落库（与表单一致的值），面板刷新即见“已验证”
+        if (verdict == "verified" && entity is not null)
+        {
+            var saved = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
+            var matchesForm = string.Equals(saved.Provider, dto.Provider, StringComparison.Ordinal)
+                              && string.Equals(saved.BaseUrl.TrimEnd('/'), dto.BaseUrl.TrimEnd('/'), StringComparison.Ordinal)
+                              && string.Equals(saved.ApiKey, apiKey, StringComparison.Ordinal);
+            if (matchesForm)
+            {
+                entity.ExternalSearchJson = ExternalSearchJsonCodec.Encode(saved with { VerifiedAt = DateTime.UtcNow });
+                await _dbContext.SaveChangesAsync(ct);
+            }
+        }
+
+        return Ok(new ExternalSearchProbeResultDto
+        {
+            Verdict = verdict,
+            Detail = detail,
+            Hits = outcome.Hits.Take(3).Select(h => new ExternalSearchHitDto
+            {
+                Title = h.Title,
+                Url = h.Url
+            }).ToList()
+        });
+    }
 
     /// <summary>
     /// 联网搜索探测（一次性返回）：保留给脚本/旧前端；面板用流式版本看逐项进度。
@@ -1065,6 +1285,21 @@ public class QqBotStatusDto
     public string AppId { get; set; } = string.Empty;
     public string ApiBaseUrl { get; set; } = string.Empty;
     public bool IsConnected { get; set; }
+}
+
+/// <summary>「测试搜索」结论：一次真实检索的成败即结果。</summary>
+public class ExternalSearchProbeResultDto
+{
+    /// <summary>verified / no_results / auth_failed / failed。</summary>
+    public string Verdict { get; set; } = string.Empty;
+    public string Detail { get; set; } = string.Empty;
+    public List<ExternalSearchHitDto> Hits { get; set; } = new();
+}
+
+public class ExternalSearchHitDto
+{
+    public string Title { get; set; } = string.Empty;
+    public string Url { get; set; } = string.Empty;
 }
 
 public class WebSearchProbeDto

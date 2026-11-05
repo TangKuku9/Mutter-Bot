@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
+using Mutter.Core.Services.WebSearch;
 
 namespace Mutter.Core.Services;
 
@@ -10,6 +11,7 @@ public class AiChatService : IAiChatService
     private readonly IAiModelExecutor _executor;
     private readonly IAiImageResolver _imageResolver;
     private readonly AiSearchCapabilityStore _capabilities;
+    private readonly ExternalSearchService? _externalSearch;
     private readonly ILogger<AiChatService> _logger;
 
     public AiChatService(
@@ -22,6 +24,20 @@ public class AiChatService : IAiChatService
         _imageResolver = imageResolver;
         _capabilities = capabilities;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// 带独立搜索服务的构造。外搜在 Core 里以 Optional 依赖出现（工具/自检可不装配），
+    /// 装配了才走预检索注入；没装配时行为与旧构造完全一致。
+    /// </summary>
+    public AiChatService(
+        IAiModelExecutor executor,
+        IAiImageResolver imageResolver,
+        AiSearchCapabilityStore capabilities,
+        ExternalSearchService externalSearch,
+        ILogger<AiChatService> logger) : this(executor, imageResolver, capabilities, logger)
+    {
+        _externalSearch = externalSearch;
     }
 
     public async Task<AiChatResponse> ChatAsync(
@@ -49,6 +65,25 @@ public class AiChatService : IAiChatService
 
         return operation.WithUsage(await SendAsync(
             new AiChatRequest(systemPrompt, messages, responseFormat), config, ct));
+    }
+
+    public async Task<AiChatResponse> ChatWithSearchQueryAsync(
+        string systemPrompt,
+        List<(string Role, string Content)> conversationHistory,
+        AiConfig config,
+        string searchQuery,
+        CancellationToken ct = default)
+    {
+        using var operation = AiCallScope.Begin(ct);
+        ct = operation.Token;
+        config = config with { };
+        var messages = conversationHistory
+            .Select(m => AiMessage.Plain(m.Role, m.Content))
+            .ToList();
+
+        return operation.WithUsage(await SendAsync(
+            new AiChatRequest(systemPrompt, messages, null, AiSearchIntent.Force, searchQuery),
+            config, ct));
     }
 
     public async Task<AiChatResponse> ChatAsync(
@@ -141,7 +176,18 @@ public class AiChatService : IAiChatService
     private async Task<AiChatResponse> SendAsync(
         AiChatRequest request, AiConfig config, CancellationToken ct)
     {
+        // 外搜路线优先：预检索 + 注入资料 + 关闭内建搜索。
+        // 不挑服务商（任何 OpenAI 兼容端点都吃纯文本注入），也不依赖图文+搜索单请求能力。
+        var (externalApplied, suppressBuiltin) = await TrySendWithExternalSearchAsync(request, config, ct);
+        if (externalApplied is not null)
+            return externalApplied;
+
         var wantsSearch = config.WebSearchEnabled && request.Search != AiSearchIntent.Off;
+        // 外搜是首选通道：0 条结果视为无资料，绝不再打一次内建；
+        // 外搜失败则只有显式开启兜底时，才交给内建通道重试，避免同一条消息双份检索费用。
+        if (ExternalSearchService.IsActive(config)
+            && (suppressBuiltin || !config.ExternalSearch.FallbackToBuiltin))
+            wantsSearch = false;
         var strategy = wantsSearch ? ResolveConfiguredStrategy(config) : null;
 
         if (strategy is null)
@@ -218,6 +264,141 @@ public class AiChatService : IAiChatService
     private Task<AiChatResponse> SendSingleAsync(
         AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct) =>
         _executor.ExecuteAsync(request, config, strategy, ct);
+
+    /// <summary>
+    /// 外搜路线：先自检索，把资料注入消息，再以「不检索」姿态发给模型（资料已在请求里）。
+    /// 返回 null 表示本次没有由外搜完成回复；<paramref name="suppressBuiltin"/> 为 true 时
+    /// 说明外搜已成功执行（只是 0 条资料）或调用已明确禁用检索，内建通道不得再搜一次。
+    /// </summary>
+    private async Task<(AiChatResponse? Response, bool SuppressBuiltin)> TrySendWithExternalSearchAsync(
+        AiChatRequest request, AiConfig config, CancellationToken ct)
+    {
+        if (_externalSearch is null || !ExternalSearchService.IsActive(config))
+            return (null, false);
+        if (request.Search == AiSearchIntent.Off)
+            return (null, true);
+
+        var intent = request.Search switch
+        {
+            AiSearchIntent.Force => WebSearchTrigger.Mode.Always,
+            _ => WebSearchTrigger.Mode.Auto
+        };
+        if (config.WebSearchImageMode == AiConfig.WebSearchImageModeOff && request.HasImages)
+            return (null, true);
+        if (string.IsNullOrWhiteSpace(request.SearchQuery)
+            && !WebSearchTrigger.ShouldSearch(request.LastUserText, request.HasImages, intent))
+            // 外搜是首选通道：它判定“不需要检索”时，内建通道也不能自行搜一遍。
+            return (null, true);
+
+        // 带图先提炼画面与检索词：图片本身不能发给搜索服务，用户原话也未必包含图里实体。
+        // 第二阶段仍保留原图并附加检索资料，模型可以在同一次回答中同时看图、看资料。
+        var imageContext = await DescribeImagesForExternalSearchAsync(request, config, ct);
+        if (request.HasImages && imageContext is null)
+            return (null, false);
+        var query = !string.IsNullOrWhiteSpace(request.SearchQuery)
+            ? request.SearchQuery
+            : imageContext?.Query;
+        if (string.IsNullOrWhiteSpace(query))
+            query = WebSearchTrigger.ExtractQuery(request.LastUserText);
+        if (string.IsNullOrWhiteSpace(query)) return (null, true);
+
+        WebSearchOutcome outcome;
+        try
+        {
+            RuntimeActivity.Current?.Mark("search", config.ExternalSearch.Provider);
+            (outcome, var failure) = await _externalSearch.SearchAsync(config, query, ct);
+            if (failure is not null)
+            {
+                // 鉴权失败、超时、熔断、异常等都按同一策略处理；回复优先于检索。
+                _logger.LogInformation(
+                    "外搜未命中 kind={Kind} reason={Reason} fallback={Fallback}",
+                    failure.Kind, Truncate(failure.Reason, 120), config.ExternalSearch.FallbackToBuiltin);
+                return (null, false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "外搜异常，回落内建/普通路线（回复优先）");
+            return (null, false);
+        }
+
+        var injection = ExternalSearchInjector.BuildInjection(outcome.Hits, DateTimeOffset.UtcNow);
+        if (injection is null)
+        {
+            _logger.LogInformation("外搜 0 条可用命中，视为无资料，直接原请求发送");
+            // 设计约定：HTTP 成功但 0 条结果 = 无资料，不再打一次内建搜索。
+            return (null, true);
+        }
+        var messages = ExternalSearchInjector.AppendToMessages(request.Messages, injection);
+        if (!string.IsNullOrWhiteSpace(imageContext?.Caption))
+        {
+            // 把已经确认的看图结论附在原用户消息后，避免模型重新猜图；原图仍保留。
+            messages = messages.Select(m => ReferenceEquals(m, imageContext.Value.Message)
+                ? m with { Text = m.Text + "\n\n【图片已识别内容】\n" + imageContext.Value.Caption }
+                : m).ToList();
+        }
+        var injectedRequest = new AiChatRequest(
+            request.SystemPrompt + ExternalSearchInjector.SystemPromptSuffix,
+            messages,
+            request.ResponseFormat,
+            // 资料已经在请求里，模型侧不再需要搜索
+            AiSearchIntent.Off);
+
+        _logger.LogInformation(
+            "外搜注入完成 hits={Hits} query={Query} cached={Cached}",
+            outcome.Hits.Count, Truncate(query, 80), outcome.ServedFromCache);
+
+        try
+        {
+            var response = await SendSingleAsync(injectedRequest, config, AiSearchStrategy.CompatNoSearch, ct);
+            return (response, false);
+        }
+        catch (AiRequestException ex) when (ex.IsDeterministicRejection && !ct.IsCancellationRequested)
+        {
+            // 注入后的请求被拒（长度/格式类）：退回原请求不检索，别让回复消失
+            _logger.LogWarning(ex, "外搜注入请求被上游拒绝，退回原请求不检索");
+            return (null, false);
+        }
+    }
+
+    /// <summary>
+    /// 外搜带图前的轻量看图步骤。只取最后一个带图 user 消息，复用既有两段式提示词与解析器；
+    /// 未带图、没有可用图片或看图被拒都返回 null，上层直接走不检索回复。
+    /// </summary>
+    private async Task<(AiMessage Message, string Caption, string Query)?> DescribeImagesForExternalSearchAsync(
+        AiChatRequest request, AiConfig config, CancellationToken ct)
+    {
+        if (!request.HasImages) return null;
+
+        var message = request.Messages.LastOrDefault(m => m.Role == "user" && m.Images.Count > 0);
+        if (message is null) return null;
+        var describeRequest = new AiChatRequest(
+            ImageSearchDescribePrompt,
+            [AiMessage.WithImages("user", message.Text, message.Images)],
+            null,
+            AiSearchIntent.Off);
+        var describeConfig = config with
+        {
+            Temperature = 0.1,
+            MaxTokens = Math.Min(config.MaxTokens, 512)
+        };
+
+        try
+        {
+            var described = await SendSingleAsync(describeRequest, describeConfig, TransportNoSearch(config), ct);
+            var parsed = ParseSearchDescription(described.Content);
+            return parsed is null ? null : (message, parsed.Value.Caption, parsed.Value.Query);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "外搜带图的看图步骤失败，本次不检索，保留原图正常回复");
+            return null;
+        }
+    }
 
     /// <summary>
     /// 两段式：先看图生成检索材料，再做纯文本联网回答。
@@ -306,10 +487,11 @@ public class AiChatService : IAiChatService
             : AiSearchStrategy.CompatNoSearch;
 
     /// <summary>
-    /// 当前配置是否真的能发出带搜索的请求。择机发言据此决定要不要多打一次改写调用：
-    /// 全局开关开着但服务商/形状都没配时，多打一次也只是普通请求，纯浪费。
+    /// 当前配置是否真的能发出带搜索的请求（内建通道或外搜任一）。择机发言据此决定要不要
+    /// 多打一次改写调用：全局开关开着但两条通道都没配时，多打一次也只是普通请求，纯浪费。
     /// </summary>
-    public static bool HasConfiguredSearch(AiConfig config) => ResolveConfiguredStrategy(config) is not null;
+    public static bool HasConfiguredSearch(AiConfig config) =>
+        ExternalSearchService.IsActive(config) || ResolveConfiguredStrategy(config) is not null;
 
     private static AiSearchStrategy? ResolveConfiguredStrategy(AiConfig config)
     {

@@ -87,6 +87,13 @@ public record AiConfig
     /// <summary>图文组合的验证时间；为空表示未测。</summary>
     public DateTime? WebSearchImageVerifiedAt { get; set; }
 
+    /// <summary>
+    /// 独立搜索服务（预检索注入）：不依赖模型服务商的搜索能力，先自检索再注入资料，
+    /// 兼容任意 OpenAI 兼容端点（含中转站）。主开关仍是 WebSearchEnabled，两者同时为真才生效；
+    /// 默认未配置时行为与升级前完全一致。
+    /// </summary>
+    public ExternalSearchConfig ExternalSearch { get; set; } = new() { Enabled = false };
+
     public const string WebSearchImageModeAuto = "auto";
     public const string WebSearchImageModeTwoStage = "two_stage";
     public const string WebSearchImageModeOff = "off";

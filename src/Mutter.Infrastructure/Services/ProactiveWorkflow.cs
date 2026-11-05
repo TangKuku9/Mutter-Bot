@@ -267,12 +267,12 @@ public sealed class ProactiveWorkflow
 
         try
         {
-            // ChatAsync 默认继承配置里的联网开关，这里正是它该生效的一步；
-            // 上游若确定性拒绝搜索，AiChatService 会自动退回不检索重发，不会把这次改写打没。
-            var response = await _ai.ChatAsync(
+            // 带检索词调用：外搜路线直接用 query 预检索注入；没有外搜时回落内建通道
+            //（上游若确定性拒绝搜索，AiChatService 会自动退回不检索重发，不会把改写打没）。
+            var response = await _ai.ChatWithSearchQueryAsync(
                 systemPrompt,
                 new List<(string Role, string Content)> { ("user", userPrompt) },
-                context.EffectiveConfig, ct);
+                context.EffectiveConfig, query, ct);
 
             var line = ProactivePrompts.SanitizeLine(response.Content);
             var tookMs = (long)(_clock.GetUtcNow().UtcDateTime - startedAt).TotalMilliseconds;

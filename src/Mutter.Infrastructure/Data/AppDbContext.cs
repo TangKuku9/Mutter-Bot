@@ -210,7 +210,10 @@ public class AppDbContext : DbContext
                      // 带图联网：策略 + 图文组合的实测结论。老库默认 auto / 未测，行为与升级前一致。
                      "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchImageMode\" TEXT NOT NULL DEFAULT 'auto'",
                      "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchImageCapable\" INTEGER NULL",
-                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchImageVerifiedAt\" TEXT"
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"WebSearchImageVerifiedAt\" TEXT",
+                     // 独立搜索服务（预检索注入）：整卡 JSON 单列。老库补空串 = 未配置，
+                     // ExternalSearch 走代码内默认值（Enabled=false），行为与升级前一致。
+                     "ALTER TABLE \"AiConfigs\" ADD COLUMN \"ExternalSearchJson\" TEXT NOT NULL DEFAULT ''"
                  })
         {
             try
