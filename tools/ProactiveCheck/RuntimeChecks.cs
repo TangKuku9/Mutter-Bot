@@ -49,7 +49,11 @@ internal static partial class RuntimeChecks
             ("普通回复群记忆与各层开关", SharedMemoryAsync),
             ("群设置与记忆保存事务", AtomicGroupSettingsAsync),
             ("运行队列快照与调用过程关联", RuntimeSnapshotAsync),
-            ("运行账本保留策略只清理过期终态", RetentionAsync)
+            ("运行账本保留策略与累计统计事务", RetentionAsync),
+            ("网关重连缓冲、恢复序号与关闭排空", GatewayHandoffAsync),
+            ("真实宿主停机关闭入口与排空", HostShutdownAsync),
+            ("新装预算默认值与旧配置保留", BudgetDefaultsAsync),
+            ("高负载运行列表保留正在执行任务", RuntimeTaskOrderingAsync)
         })
         {
             try { await run().WaitAsync(TimeSpan.FromSeconds(30)); Console.WriteLine($"PASS  {name}"); }
@@ -459,6 +463,7 @@ internal static partial class RuntimeChecks
         using var scope = env.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         Require(await db.ChatMessages.AnyAsync(m => m.MessageId == "legacy-row"), "schema upgrade must retain legacy rows");
+        Require(!await db.AiUsageArchives.AnyAsync(), "an old database must gain an empty usage archive");
         await db.EnsureSchemaUpgradedAsync();
         Require(await db.ChatMessages.CountAsync(m => m.MessageId == "legacy-row") == 1, "repeated upgrade is idempotent");
         var repo = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
@@ -574,7 +579,7 @@ internal static partial class RuntimeChecks
                 {
                     var script = db.Database.GenerateCreateScript();
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords)\" \\([\\s\\S]*?\\);", "");
+                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|AiUsageArchives)\" \\([\\s\\S]*?\\);", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
                         "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords)\"[^;]*;", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
@@ -677,6 +682,7 @@ internal static partial class RuntimeChecks
     {
         public bool FailMonthlyReceipt { get; set; }
         public bool FailGroupMemoryWrite { get; set; }
+        public bool FailRetentionDelete { get; set; }
         public List<string> Commands { get; } = new();
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
             CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
@@ -690,6 +696,8 @@ internal static partial class RuntimeChecks
         public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command,
             CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
+            if (FailRetentionDelete && command.CommandText.Contains("DELETE FROM \"AiCallRecords\""))
+                throw new InvalidOperationException("synthetic retention delete failure");
             if (FailMonthlyReceipt && command.CommandText.Contains("INSERT INTO \"ActiveMessageQuotas\""))
                 throw new InvalidOperationException("synthetic monthly receipt failure");
             return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);

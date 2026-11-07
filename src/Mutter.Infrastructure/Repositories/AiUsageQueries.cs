@@ -40,7 +40,7 @@ public sealed class AiUsageQueries(AppDbContext db)
 
     public async Task<AiUsageSummary> SummaryAsync(DateTime? since, CancellationToken ct)
     {
-        return await Rows(since).GroupBy(_ => 1).Select(g => new AiUsageSummary
+        var totals = Rows(since).GroupBy(_ => 1).Select(g => new AiUsageSummary
         {
             CallCount = g.LongCount(r => r.Legacy == 0),
             FailedCount = g.LongCount(r => r.Legacy == 0 && r.State != "success"),
@@ -48,6 +48,19 @@ public sealed class AiUsageQueries(AppDbContext db)
             LegacyCount = g.LongCount(r => r.Legacy != 0),
             PromptTokens = g.Sum(r => r.PromptTokens ?? 0),
             CompletionTokens = g.Sum(r => r.CompletionTokens ?? 0)
+        });
+        if (since is not null) return await totals.SingleOrDefaultAsync(ct) ?? new();
+
+        // 与实时明细合为一条查询，清理事务提交前后都不会读到重复或缺失的累计值。
+        return await totals.Concat(db.AiUsageArchives.Select(a => new AiUsageSummary
+        {
+            CallCount = a.CallCount, FailedCount = a.FailedCount, UnknownUsageCount = a.UnknownUsageCount,
+            LegacyCount = a.LegacyCount, PromptTokens = a.PromptTokens, CompletionTokens = a.CompletionTokens
+        })).GroupBy(_ => 1).Select(g => new AiUsageSummary
+        {
+            CallCount = g.Sum(a => a.CallCount), FailedCount = g.Sum(a => a.FailedCount),
+            UnknownUsageCount = g.Sum(a => a.UnknownUsageCount), LegacyCount = g.Sum(a => a.LegacyCount),
+            PromptTokens = g.Sum(a => a.PromptTokens), CompletionTokens = g.Sum(a => a.CompletionTokens)
         }).SingleOrDefaultAsync(ct) ?? new();
     }
 
