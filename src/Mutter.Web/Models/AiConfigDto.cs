@@ -31,6 +31,31 @@ public class AiConfigInputDto
 
     /// <summary>带图联网策略：auto / two_stage / off。</summary>
     public string WebSearchImageMode { get; set; } = "auto";
+
+    /// <summary>
+    /// 独立搜索服务（预检索注入）。null=面板没提交这块（保持库中原值），
+    /// 使「只保存主表单」不会误清外搜配置。
+    /// </summary>
+    public ExternalSearchInputDto? ExternalSearch { get; set; }
+}
+
+/// <summary>独立搜索服务的可写字段。Key 出入面板一律打码，提交打码值=未修改。</summary>
+public class ExternalSearchInputDto
+{
+    public bool Enabled { get; set; }
+    public string Provider { get; set; } = "searxng";
+    public string BaseUrl { get; set; } = string.Empty;
+    public string ApiKey { get; set; } = string.Empty;
+    public int MaxResults { get; set; } = 5;
+    public int TimeoutSeconds { get; set; } = 8;
+    public bool FallbackToBuiltin { get; set; }
+}
+
+/// <summary>面板读取的外搜状态（只读部分）。</summary>
+public class ExternalSearchStatusDto
+{
+    /// <summary>“测试搜索”的验证时间；空=未测或未通过。</summary>
+    public DateTime? VerifiedAt { get; set; }
 }
 
 /// <summary>
@@ -52,6 +77,9 @@ public class AiConfigDto : AiConfigInputDto
 
     /// <summary>图文组合的验证时间（只读）。</summary>
     public DateTime? WebSearchImageVerifiedAt { get; set; }
+
+    /// <summary>独立搜索服务整卡（继承自输入 DTO；Key 已打码）。</summary>
+    public ExternalSearchStatusDto ExternalSearchStatus { get; set; } = new();
 
     public List<CharacterDto> AvailableCharacters { get; set; } = new();
     public List<ProviderPresetDto> AvailableProviders { get; set; } = new();

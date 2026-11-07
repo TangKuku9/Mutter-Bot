@@ -124,6 +124,74 @@
           <ParamHelpButton :label="helpLabel('webSearchImageMode')" @click="openHelp('webSearchImageMode')" />
         </div>
       </el-form-item>
+      <el-form-item label="独立搜索服务">
+        <div class="es-box">
+          <div class="es-head">
+            <div class="es-head-main">
+              <span class="es-title">独立搜索服务<el-tag size="small" type="success" effect="plain" style="margin-left: 6px">推荐</el-tag></span>
+              <span class="es-sub">
+                由本程序先检索、再把结果作为资料注入对话（预检索注入），不依赖模型服务商支持搜索——
+                适合中转站与不带内建搜索的模型。与上方「联网搜索」（模型服务商内建通道）相互独立；
+                总开关仍是上方「联网搜索」，两者同时开启才会生效。
+              </span>
+            </div>
+            <el-switch v-model="form.externalSearch.enabled" aria-label="启用独立搜索服务" />
+            <ParamHelpButton :label="helpLabel('externalSearchEnabled')" @click="openHelp('externalSearchEnabled')" />
+          </div>
+          <el-alert v-if="form.externalSearch.enabled && !form.webSearchEnabled" type="warning" :closable="false"
+            show-icon style="margin-top: 8px"
+            title="独立搜索服务已开启，但上方「联网搜索」总开关未开启；两者同时开启才会真正检索。" />
+          <div class="es-field">
+            <span class="es-label">搜索服务商</span>
+            <el-select v-model="form.externalSearch.provider" style="width: 240px">
+              <el-option v-for="p in ES_PROVIDERS" :key="p.id" :label="p.name" :value="p.id" />
+            </el-select>
+            <ParamHelpButton :label="helpLabel('externalSearchProvider')" @click="openHelp('externalSearchProvider')" />
+          </div>
+          <div class="es-hint-inset hint" v-if="esProviderHint">{{ esProviderHint }}</div>
+          <div class="es-field">
+            <span class="es-label">服务地址</span>
+            <el-input v-model="form.externalSearch.baseUrl" :placeholder="esBaseUrlPlaceholder" style="width: 380px" />
+            <ParamHelpButton :label="helpLabel('externalSearchBaseUrl')" @click="openHelp('externalSearchBaseUrl')" />
+          </div>
+          <div class="es-field">
+            <span class="es-label">API Key</span>
+            <el-input v-model="form.externalSearch.apiKey" type="password" show-password
+              :disabled="form.externalSearch.provider === 'searxng'"
+              :placeholder="form.externalSearch.provider === 'searxng' ? 'SearXNG 免 Key' : '留空或保持打码值表示不修改'"
+              style="width: 380px" />
+            <ParamHelpButton :label="helpLabel('externalSearchApiKey')" @click="openHelp('externalSearchApiKey')" />
+          </div>
+          <div class="es-hint-inset hint" v-if="form.externalSearch.provider !== 'searxng'">
+            只存在本机数据库，页面不回显明文；填新值会直接覆盖。
+          </div>
+          <div class="es-field">
+            <span class="es-label">检索参数</span>
+            <span class="es-inline-label">结果条数</span>
+            <el-input-number v-model="form.externalSearch.maxResults" :min="1" :max="10" />
+            <span class="es-inline-label" style="margin-left: 16px">超时</span>
+            <el-input-number v-model="form.externalSearch.timeoutSeconds" :min="1" :max="30" />
+            <span class="es-inline-label">秒</span>
+            <ParamHelpButton :label="helpLabel('externalSearchLimits')" @click="openHelp('externalSearchLimits')" />
+          </div>
+          <div class="es-field">
+            <span class="es-label">失败兜底</span>
+            <el-switch v-model="form.externalSearch.fallbackToBuiltin" aria-label="外搜失败时回退内建搜索" />
+            <span class="es-inline-label">外搜失败时，回退到服务商内建联网通道</span>
+            <ParamHelpButton :label="helpLabel('externalSearchFallback')" @click="openHelp('externalSearchFallback')" />
+          </div>
+          <div class="es-hint-inset hint">默认关闭；兜底还需要上方「联网搜索」可用，开启后失败会多一次内建检索，回复可能更慢。0 条结果视为无资料，不会再检索。</div>
+          <div class="es-foot">
+            <el-button size="small" :loading="esProbing" :disabled="esProbing" @click="probeExternalSearch">
+              测试搜索
+            </el-button>
+            <ParamHelpButton :label="helpLabel('externalSearchTest')" @click="openHelp('externalSearchTest')" />
+            <span class="hint" style="margin-top: 0">
+              最近验证：{{ form.externalSearchStatus.verifiedAt ? fmt(form.externalSearchStatus.verifiedAt) : '尚未验证' }}
+            </span>
+          </div>
+        </div>
+      </el-form-item>
       <el-form-item>
         <el-button type="primary" :loading="saving" :disabled="!!budget.error" @click="save()">保存配置</el-button>
         <el-button @click="reloadConfig">重新加载</el-button>
@@ -381,6 +449,48 @@
       </template>
     </el-dialog>
 
+    <!-- 独立搜索服务测试：用表单当前值实测一次检索，不需要先保存 -->
+    <el-dialog v-model="esProbeDialog" title="测试搜索 · 独立搜索服务" width="640px" @close="cancelEsProbe">
+      <template v-if="esProbing">
+        <div class="probe-summary">正在用表单当前值实测一次检索（不经缓存、不会保存配置），请稍候……</div>
+        <div class="probe-progress">
+          <div class="probe-progress-item">
+            <el-icon class="is-loading"><Loading /></el-icon>
+            <div class="probe-progress-main">正在请求 {{ esProviderName(form.externalSearch.provider) }}……</div>
+          </div>
+        </div>
+      </template>
+
+      <template v-else-if="esProbeError">
+        <el-alert type="error" :closable="false" show-icon :title="esProbeError" />
+        <div class="probe-footnote">请修正后重试；测试不保存任何配置。</div>
+      </template>
+
+      <template v-else-if="esProbeResult">
+        <div class="es-verdict">
+          <el-tag :type="esVerdictType(esProbeResult.verdict)">{{ esVerdictLabel(esProbeResult.verdict) }}</el-tag>
+          <span>{{ esProbeResult.detail }}</span>
+        </div>
+        <div v-if="(esProbeResult.hits || []).length" class="es-hits">
+          <a v-for="h in esProbeResult.hits" :key="h.url" class="es-hit" :href="h.url" target="_blank"
+            rel="noopener noreferrer">
+            <span class="es-hit-title">{{ h.title || h.url }}</span>
+            <span class="es-hit-url">{{ esHost(h.url) }}</span>
+          </a>
+        </div>
+        <div class="probe-footnote">
+          测试使用表单当前值（含未保存的修改），Key 为打码值时按已保存的 Key 实测。
+          验证通过与当前保存一致时，「最近验证」时间会自动更新；服务商、地址或 Key 变更后需重新测试。
+        </div>
+      </template>
+
+      <el-alert v-else type="info" :closable="false" show-icon title="尚未收到测试结果" />
+
+      <template #footer>
+        <el-button @click="esProbeDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <ParamHelpDrawer v-model="helpVisible" :title="helpTitle" :lines="helpLines" :current="helpCurrent"
       :index="helpIndex" :total="helpTotal" @step="stepHelp" />
   </el-card>
@@ -397,7 +507,23 @@ import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
 
-const form = ref({ availableProviders: [], availableCharacters: [] })
+// 独立搜索服务：与后端 ExternalSearchInputDto 对齐的默认值；响应缺字段时兜底，默认不启用
+const defaultExternalSearch = () => ({
+  enabled: false,
+  provider: 'searxng',
+  baseUrl: '',
+  apiKey: '',
+  maxResults: 5,
+  timeoutSeconds: 8,
+  fallbackToBuiltin: false
+})
+const withExternalDefaults = (data) => ({
+  ...data,
+  externalSearch: { ...defaultExternalSearch(), ...(data?.externalSearch || {}) },
+  externalSearchStatus: data?.externalSearchStatus || { verifiedAt: null }
+})
+
+const form = ref(withExternalDefaults({ availableProviders: [], availableCharacters: [] }))
 const presetId = ref('')
 const loading = ref(false)
 const saving = ref(false)
@@ -433,7 +559,17 @@ const configPayload = () => ({
   webSearchEnabled: !!form.value.webSearchEnabled,
   webSearchEndpoint: form.value.webSearchEndpoint || '',
   webSearchShape: form.value.webSearchShape || '',
-  webSearchImageMode: form.value.webSearchImageMode || 'auto'
+  webSearchImageMode: form.value.webSearchImageMode || 'auto',
+  // 独立搜索服务整卡随表单一起提交（Key 打码值=不修改），预设快照继承同一字段
+  externalSearch: {
+    enabled: !!form.value.externalSearch?.enabled,
+    provider: form.value.externalSearch?.provider || 'searxng',
+    baseUrl: form.value.externalSearch?.baseUrl || '',
+    apiKey: form.value.externalSearch?.apiKey || '',
+    maxResults: form.value.externalSearch?.maxResults ?? 5,
+    timeoutSeconds: form.value.externalSearch?.timeoutSeconds ?? 8,
+    fallbackToBuiltin: !!form.value.externalSearch?.fallbackToBuiltin
+  }
 })
 
 const isDirty = computed(() =>
@@ -621,6 +757,99 @@ const applyProbe = async (row) => {
 
 onBeforeUnmount(cancelProbe)
 
+// ── 独立搜索服务（预检索注入）───────────────────────────────────────────────
+// 服务商白名单与后端 ExternalSearchConfig.ProviderIds 一致；placeholder 对齐各官方端点
+const ES_PROVIDERS = [
+  { id: 'searxng', name: 'SearXNG（自建，免 Key）' },
+  { id: 'tavily', name: 'Tavily' },
+  { id: 'bocha', name: '博查 Bocha' },
+  { id: 'brave', name: 'Brave Search' }
+]
+const esProviderName = (id) => ES_PROVIDERS.find((p) => p.id === id)?.name || id
+const esBaseUrlPlaceholder = computed(() => ({
+  searxng: 'https://searx.example.com（实例根地址）',
+  tavily: '留空 = 官方端点 https://api.tavily.com',
+  bocha: '留空 = 官方端点 https://api.bochaai.com/v1/web-search',
+  brave: '留空 = 官方端点 https://api.search.brave.com/res/v1/web/search'
+}[form.value.externalSearch?.provider] || ''))
+const esProviderHint = computed(() => ({
+  searxng: '免 Key。填写实例根地址即可；实例需在 settings.yml 的 search.formats 中启用 json 输出。',
+  tavily: 'Key 必填；服务地址留空使用官方端点，也可指向自建网关。',
+  bocha: 'Key 必填；服务地址留空使用官方端点。',
+  brave: 'Key 必填；服务地址留空使用官方端点。'
+}[form.value.externalSearch?.provider] || ''))
+
+const esVerdictLabel = (v) => ({
+  verified: '验证通过', no_results: '连通但 0 条结果', auth_failed: '鉴权失败', failed: '测试失败'
+}[v] || v)
+const esVerdictType = (v) => ({
+  verified: 'success', no_results: 'warning', auth_failed: 'danger', failed: 'danger'
+}[v] || 'info')
+const esHost = (u) => { try { return new URL(u).host } catch { return u } }
+
+// 独立搜索测试：不落库、不依赖保存，直接测表单当前值（Key 打码值由后端按已存 Key 解析）
+const esProbing = ref(false)
+const esProbeDialog = ref(false)
+const esProbeResult = ref(null)
+const esProbeError = ref('')
+let esProbeAbort = null
+
+const probeExternalSearch = async () => {
+  const es = form.value.externalSearch
+  // 与后端校验同判据的前置检查：SearXNG 必须有实例地址，其余必须有 Key（打码值视为已配置）
+  const missing = es.provider === 'searxng'
+    ? (!es.baseUrl.trim() ? 'SearXNG 需要填写实例地址' : '')
+    : (!es.apiKey.trim() ? `${esProviderName(es.provider)} 需要填写 API Key` : '')
+  if (missing) {
+    ElMessage.warning(missing)
+    return
+  }
+  esProbeAbort?.abort()
+  const aborter = new AbortController()
+  esProbeAbort = aborter
+  esProbing.value = true
+  esProbeDialog.value = true
+  esProbeResult.value = null
+  esProbeError.value = ''
+  try {
+    const { data } = await api.post('/config/ai/probe-search', {
+      enabled: true,
+      provider: es.provider,
+      baseUrl: es.baseUrl,
+      apiKey: es.apiKey,
+      maxResults: es.maxResults,
+      timeoutSeconds: es.timeoutSeconds,
+      fallbackToBuiltin: false
+    }, { signal: aborter.signal, timeout: 45000 })
+    esProbeResult.value = data
+    if (data?.verdict === 'verified') await refreshExternalStatus()
+  } catch (err) {
+    if (err.name === 'AbortError' || err.code === 'ERR_CANCELED') return
+    esProbeError.value = err.response?.data?.error || err.message || '测试请求失败'
+  } finally {
+    if (esProbeAbort === aborter) {
+      esProbeAbort = null
+      esProbing.value = false
+    }
+  }
+}
+
+const cancelEsProbe = () => {
+  esProbeAbort?.abort()
+  esProbeAbort = null
+  esProbing.value = false
+}
+
+// verified 后只回读验证时间，不整表刷新，避免覆盖未保存的表单修改
+const refreshExternalStatus = async () => {
+  try {
+    const { data } = await api.get('/config/ai')
+    form.value.externalSearchStatus = data?.externalSearchStatus || { verifiedAt: null }
+  } catch { /* 状态刷新失败不影响测试结论 */ }
+}
+
+onBeforeUnmount(cancelEsProbe)
+
 // 人设管理状态
 const manageDialog = ref(false)
 const editDialog = ref(false)
@@ -642,7 +871,9 @@ const presetHelp = computed(() => {
 const HELP_ORDER = [
   'configPreset', 'presetId', 'apiBaseUrl', 'apiKey', 'modelName', 'personality', 'systemPrompt',
   'temperature', 'maxTokens', 'contextWindowTokens', 'maxInputTokens', 'groupMemoryInjectionEnabled', 'maxContextMessages', 'maxAttachedImages',
-  'webSearchEnabled', 'webSearchImageMode'
+  'webSearchEnabled', 'webSearchImageMode',
+  'externalSearchEnabled', 'externalSearchProvider', 'externalSearchBaseUrl', 'externalSearchApiKey',
+  'externalSearchLimits', 'externalSearchFallback', 'externalSearchTest'
 ]
 
 const HELP = {
@@ -776,6 +1007,72 @@ const HELP = {
       '关闭：带图消息一律不检索。',
       '表情包和动图仍不会附图。'
     ]
+  },
+  externalSearchEnabled: {
+    title: '独立搜索服务',
+    value: (f) => (f.externalSearch?.enabled ? '开启' : '关闭'),
+    lines: [
+      '由本程序先检索、再把结果作为资料注入对话（预检索注入），不依赖模型服务商支持搜索。',
+      '适合中转站与不带内建搜索的模型；与上方「联网搜索」（服务商内建通道）相互独立。',
+      '总开关仍是「联网搜索」：两者同时开启才会真正联网检索。',
+      '配置默认关闭，保存后才会生效。'
+    ]
+  },
+  externalSearchProvider: {
+    title: '搜索服务商',
+    value: (f) => ({ searxng: 'SearXNG', tavily: 'Tavily', bocha: '博查 Bocha', brave: 'Brave Search' }[f.externalSearch?.provider] || '未选择'),
+    lines: [
+      'SearXNG：自建元搜索引擎，免 Key，需一个开了 JSON format 的实例。',
+      'Tavily / 博查 / Brave：商用搜索 API，Key 必填，服务地址可留空用官方端点。',
+      '换服务商后需重新「测试搜索」获得新的验证时间。'
+    ]
+  },
+  externalSearchBaseUrl: {
+    title: '服务地址',
+    value: (f) => f.externalSearch?.baseUrl || '未填写',
+    lines: [
+      'SearXNG 必填：实例根地址（不含 /search 路径），例如 https://searx.example.com。',
+      '实例需在 settings.yml 的 search.formats 中加上 json，否则测试会提示未开启 JSON 输出。',
+      '其余服务商留空即用官方默认端点；填了则指向自建网关，必须是 http/https 开头的完整 URL。'
+    ]
+  },
+  externalSearchApiKey: {
+    title: '搜索服务 API Key',
+    value: (f) => (f.externalSearch?.provider === 'searxng' ? '免 Key' : (f.externalSearch?.apiKey ? '已配置' : '未配置')),
+    lines: [
+      'SearXNG 免 Key，输入框禁用。',
+      '其余服务商必填；只存在本机数据库，页面不回显明文。',
+      '留空或保持打码值表示不修改；填新值会直接覆盖。'
+    ]
+  },
+  externalSearchLimits: {
+    title: '检索参数',
+    value: (f) => `${f.externalSearch?.maxResults ?? 5} 条 / ${f.externalSearch?.timeoutSeconds ?? 8} 秒`,
+    lines: [
+      '结果条数：单次检索最多取回并注入多少条，1~10。',
+      '超时：单次检索的最长等待秒数，1~30；超时按失败处理。',
+      '条数越多资料越全，但占用更多上下文、回复更慢。'
+    ]
+  },
+  externalSearchFallback: {
+    title: '失败兜底内建通道',
+    value: (f) => (f.externalSearch?.fallbackToBuiltin ? '开启' : '关闭'),
+    lines: [
+      '外搜失败（超时、5xx、鉴权等）时，回退到服务商内建联网通道再试一次。',
+      '默认关闭：失败就按没有联网资料回答，回复速度不受影响。',
+      '0 条结果视为无资料，不会触发内建检索，避免同一条消息双份检索费用。',
+      '只在上方「联网搜索」也可用时才有兜底效果。'
+    ]
+  },
+  externalSearchTest: {
+    title: '测试搜索',
+    value: () => '用表单当前值实测',
+    lines: [
+      '直接用表单当前值（含未保存的修改）真实检索一次，不需要先保存。',
+      'Key 是打码值时按已保存的 Key 实测；不会保存任何配置。',
+      '验证通过与当前保存一致时，「最近验证」时间会自动更新。',
+      '服务商、服务地址或 Key 变更后，旧验证作废，需要重新测试。'
+    ]
   }
 }
 
@@ -788,7 +1085,7 @@ const load = async () => {
   loading.value = true
   try {
     const { data } = await api.get('/config/ai')
-    form.value = data
+    form.value = withExternalDefaults(data)
     baseline.value = JSON.stringify(configPayload())
   } finally { loading.value = false }
 }
@@ -914,7 +1211,7 @@ const applyPresetById = async (id, fromManage = false) => {
   applyingPreset.value = true
   try {
     const { data } = await api.post(`/config/ai/presets/${id}/apply`)
-    form.value = data
+    form.value = withExternalDefaults(data)
     baseline.value = JSON.stringify(configPayload())
     selectedPresetId.value = id
     if (fromManage) managePresetDialog.value = false
@@ -1006,4 +1303,28 @@ onMounted(async () => {
 }
 .probe-progress-main { flex: 1; min-width: 0; }
 .probe-progress-main code { font-size: 12px; }
+/* 独立搜索服务卡片：浅色内嵌块，与服务商内建通道（上方「联网搜索」）区分 */
+.es-box {
+  width: 100%; border: 1px solid var(--el-border-color-lighter); border-radius: 6px;
+  padding: 12px 16px 10px; background: var(--el-fill-color-extra-light);
+}
+.es-head { display: flex; align-items: flex-start; gap: 12px; }
+.es-head-main { flex: 1; min-width: 0; }
+.es-title { font-weight: 600; font-size: 13px; color: var(--el-text-color-primary); }
+.es-sub { display: block; color: #909399; font-size: 12px; line-height: 1.6; margin-top: 4px; }
+.es-field { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.es-label { flex: none; width: 84px; text-align: right; color: var(--el-text-color-regular); font-size: 13px; }
+.es-inline-label { color: var(--el-text-color-regular); font-size: 13px; }
+.es-hint-inset { padding-left: 92px; }
+.es-foot { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+/* 测试结果：判定行 + 可点击结果列表 */
+.es-verdict { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.6; }
+.es-hits { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.es-hit { display: block; padding: 8px 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; text-decoration: none; }
+.es-hit:hover { border-color: var(--el-color-primary-light-5); background: var(--el-fill-color-light); }
+.es-hit-title {
+  display: block; color: var(--el-color-primary); font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.es-hit-url { display: block; color: #909399; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

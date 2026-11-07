@@ -27,11 +27,16 @@ public sealed record AiMessage(string Role, string Text, IReadOnlyList<AiResolve
 /// 与具体厂商协议无关的请求。OpenAI 兼容 / Gemini 原生两个传输层都从这里构建请求体，
 /// 避免"探测一种形状、正式请求另一种形状"的漂移。
 /// </summary>
+/// <param name="SearchQuery">
+/// 调用方已提炼好的检索词（如择机 Phase 2 的 query / 两段式看图结果）。
+/// 非空时外搜直接用它，不再从用户文本推断；内建路线不受此字段影响。
+/// </param>
 public sealed record AiChatRequest(
     string SystemPrompt,
     IReadOnlyList<AiMessage> Messages,
     string? ResponseFormat = null,
-    AiSearchIntent Search = AiSearchIntent.Inherit)
+    AiSearchIntent Search = AiSearchIntent.Inherit,
+    string? SearchQuery = null)
 {
     public bool HasImages => Messages.Any(m => m.Images.Count > 0);
 
