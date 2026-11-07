@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -223,37 +224,66 @@ internal static partial class RuntimeChecks
         using (var scope = env.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            db.AiCallRecords.AddRange(Call("old-call", now.AddDays(-91)), Call("recent-call", now.AddDays(-89)));
+            var failed = Call("old-failed", now.AddDays(-91));
+            failed.State = "network_error";
+            failed.CompletionTokens = null;
+            db.AiCallRecords.AddRange(Call("old-call", now.AddDays(-91)), failed, Call("recent-call", now.AddDays(-89)));
             db.ActiveMessageAttempts.AddRange(
                 new ActiveMessageAttempt { Key = "old", Scope = "group", AttemptedAt = now.AddDays(-91) },
                 new ActiveMessageAttempt { Key = "recent", Scope = "group", AttemptedAt = now.AddDays(-89) });
             db.OutgoingReplies.AddRange(
                 Reply("old-reply", DeliveryStates.Sent, now.AddDays(-91)),
+                Reply("old-paired", DeliveryStates.Sent, now.AddDays(-91)),
                 Reply("recent-reply", DeliveryStates.Sent, now.AddDays(-89)),
                 Reply("old-pending", DeliveryStates.Pending, now.AddDays(-91)));
+            db.ChatMessages.AddRange(
+                new ChatMessage { MessageId = "modern-chat", IsBotMessage = true, AiModelUsed = "synthetic",
+                    AiOperationId = "old-call", PromptTokens = 3, CompletionTokens = 2, CreatedAt = now.AddDays(-91) },
+                new ChatMessage { MessageId = "old-paired", IsBotMessage = true, AiModelUsed = "synthetic",
+                    PromptTokens = 3, CompletionTokens = 2, CreatedAt = now.AddDays(-91) });
             await db.SaveChangesAsync();
         }
 
         var retention = new DataRetentionService(env.Services.GetRequiredService<IServiceScopeFactory>(),
             env.Clock, NullLogger<DataRetentionService>.Instance);
-        await retention.CleanupAsync(default);
-
         using var read = env.Services.CreateScope();
         var check = read.ServiceProvider.GetRequiredService<AppDbContext>();
+        var queries = new Mutter.Infrastructure.Repositories.AiUsageQueries(check);
+        var before = JsonSerializer.Serialize(await queries.SummaryAsync(null, default));
+        var recentBefore = JsonSerializer.Serialize(await queries.SummaryAsync(now.AddDays(-90), default));
+
+        env.Faults.FailRetentionDelete = true;
+        var rolledBack = false;
+        try { await retention.CleanupAsync(default); }
+        catch (InvalidOperationException) { rolledBack = true; }
+        finally { env.Faults.FailRetentionDelete = false; }
+        Require(rolledBack && !await check.AiUsageArchives.AnyAsync() && await check.AiCallRecords.CountAsync() == 3,
+            "a failed delete must roll back both the archive increment and the detail deletion");
+
+        await retention.CleanupAsync(default);
+        await retention.CleanupAsync(default);
         Require(await check.AiCallRecords.CountAsync() == 1
             && await check.ActiveMessageAttempts.CountAsync() == 1
             && await check.OutgoingReplies.CountAsync() == 2
-            && await check.OutgoingReplies.AnyAsync(r => r.Id == "old-pending"),
+            && await check.OutgoingReplies.AnyAsync(r => r.Id == "old-pending") && await check.ChatMessages.CountAsync() == 2,
             "retention must remove only expired terminal records");
+        Require(JsonSerializer.Serialize(await queries.SummaryAsync(null, default)) == before,
+            "cumulative calls, failures, unknown usage and tokens must survive cleanup without double counting legacy replies");
+        Require(JsonSerializer.Serialize(await queries.SummaryAsync(now.AddDays(-90), default)) == recentBefore,
+            "archived totals must not enter a recent-date report");
+        var archive = await check.AiUsageArchives.SingleAsync();
+        Require(archive is { CallCount: 2, FailedCount: 1, UnknownUsageCount: 1, LegacyCount: 1 },
+            "repeated cleanup must not archive the same usage twice");
 
         static AiCallRecord Call(string id, DateTime at) => new()
         {
             Id = id, OperationId = id, Model = "synthetic", Transport = "openai",
-            StartedAt = at, CompletedAt = at, ElapsedMs = 1, State = "success"
+            StartedAt = at, CompletedAt = at, ElapsedMs = 1, State = "success", PromptTokens = 3, CompletionTokens = 2
         };
         static OutgoingReply Reply(string id, string state, DateTime at) => new()
         {
-            Id = id, BotId = "BOT", Content = "synthetic", State = state, CreatedAt = at
+            Id = id, BotId = "BOT", Content = "synthetic", State = state, CreatedAt = at,
+            Model = state == DeliveryStates.Pending ? null : "synthetic", PromptTokens = 3, CompletionTokens = 2
         };
     }
 

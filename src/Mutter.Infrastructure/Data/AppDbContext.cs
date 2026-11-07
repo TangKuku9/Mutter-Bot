@@ -10,6 +10,7 @@ public class AppDbContext : DbContext
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
     public DbSet<OutgoingReply> OutgoingReplies => Set<OutgoingReply>();
     public DbSet<AiCallRecord> AiCallRecords => Set<AiCallRecord>();
+    public DbSet<AiUsageArchiveEntity> AiUsageArchives => Set<AiUsageArchiveEntity>();
     public DbSet<ActiveMessageAttempt> ActiveMessageAttempts => Set<ActiveMessageAttempt>();
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<GroupInfo> GroupInfos => Set<GroupInfo>();
@@ -677,6 +678,12 @@ public class AppDbContext : DbContext
                 && ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }
         }
         await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "AiUsageArchives" (
+                "Id" INTEGER NOT NULL PRIMARY KEY,
+                "CallCount" INTEGER NOT NULL, "FailedCount" INTEGER NOT NULL,
+                "UnknownUsageCount" INTEGER NOT NULL, "LegacyCount" INTEGER NOT NULL,
+                "PromptTokens" INTEGER NOT NULL, "CompletionTokens" INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS "AiCallRecords" (
                 "Id" TEXT NOT NULL PRIMARY KEY, "OperationId" TEXT NOT NULL,
                 "TriggerMessageId" TEXT, "GroupId" TEXT, "RequesterId" TEXT, "RequesterName" TEXT,

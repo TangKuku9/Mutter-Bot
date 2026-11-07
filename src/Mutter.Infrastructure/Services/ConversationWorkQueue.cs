@@ -10,7 +10,7 @@ namespace Mutter.Infrastructure.Services;
 /// <summary>会话公平调度：每次取一项，再将仍有工作的会话放回队尾。</summary>
 public sealed class ConversationWorkQueue(
     ILogger<ConversationWorkQueue> logger, TimeProvider clock,
-    int capacity = 256, int parallelism = 3) : BackgroundService, IConversationWorkQueue
+    int capacity = 256, int parallelism = 3, IHostApplicationLifetime? lifetime = null) : BackgroundService, IConversationWorkQueue
 {
     private sealed record Work(Func<CancellationToken, Task> Run, bool Background, DateTimeOffset ExpiresAt,
         Func<CancellationToken, Task>? OnExpired, ConversationTaskTrace Trace);
@@ -70,6 +70,7 @@ public sealed class ConversationWorkQueue(
         // 宿主停机时 ApplicationStopping 早于 StopAsync 触发。这里只停止接纳新工作，
         // worker 继续使用队列自己的令牌，把已接纳的任务排空。
         using var registration = stoppingToken.Register(StopAccepting);
+        using var hostRegistration = lifetime?.ApplicationStopping.Register(StopAccepting) ?? default;
         await Task.WhenAll(Enumerable.Range(0, parallelism).Select(_ => WorkerAsync(_workCts.Token)));
     }
 

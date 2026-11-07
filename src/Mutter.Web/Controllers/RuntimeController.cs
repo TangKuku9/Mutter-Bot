@@ -22,7 +22,8 @@ public sealed class RuntimeController(IConversationWorkQueue queue, AppDbContext
         // 列表只需要状态摘要；步骤只随 /operations/{id} 返回，避免每 5 秒轮询重复搬运过程明细。
         var queueView = snapshot with
         {
-            Tasks = snapshot.Tasks.Take(60)
+            Tasks = snapshot.Tasks.OrderByDescending(t => t.State == "running" ? 2 : t.State == "queued" ? 1 : 0)
+                .ThenByDescending(t => t.EnqueuedAt).Take(60)
                 .Select(t => t with { Steps = Array.Empty<RuntimeStep>() }).ToArray()
         };
         return Ok(new

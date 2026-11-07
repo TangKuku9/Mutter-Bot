@@ -51,10 +51,17 @@ public sealed class GatewayHostedService(
         catch (Exception ex) { logger.LogError(ex, "QQ 网关启动失败"); }
         finally
         {
-            gateway.DispatchReceived -= messages.HandleDispatchAsync;
-            gateway.ConnectionStateChanged -= OnConnectionStateChanged;
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            await gateway.DisconnectAsync(deadline.Token);
+            // 先让已接纳事件完成交接，再解除处理器；否则排空只会读走事件而不落库。
+            try
+            {
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                await gateway.DisconnectAsync(deadline.Token);
+            }
+            finally
+            {
+                gateway.DispatchReceived -= messages.HandleDispatchAsync;
+                gateway.ConnectionStateChanged -= OnConnectionStateChanged;
+            }
         }
     }
 

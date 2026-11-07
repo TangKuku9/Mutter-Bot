@@ -1,7 +1,9 @@
+export const DEFAULT_INPUT_BUDGET = 24576
+
 export function tokenBudget(form) {
   const context = Number(form.contextWindowTokens ?? 32768)
   const output = Number(form.maxTokens ?? 2048)
-  const input = Number(form.maxInputTokens ?? 16384)
+  const input = Number(form.maxInputTokens ?? DEFAULT_INPUT_BUDGET)
   const reserve = 1024
   const availableInput = context - output - reserve
   let error = ''
