@@ -30,6 +30,8 @@ public class MessageEventHandler
     private readonly RichUiCapability _richUi;
     private readonly ProactiveObserveService _observe;
     private readonly GroupMessageGate _groupGate;
+    private readonly UpstreamHealthTracker _health;
+    private readonly RuntimeOptions _runtime;
     private readonly ILogger<MessageEventHandler> _logger;
     private string _botId = string.Empty;
 
@@ -59,6 +61,8 @@ public class MessageEventHandler
         RichUiCapability richUi,
         ProactiveObserveService observe,
         GroupMessageGate groupGate,
+        UpstreamHealthTracker health,
+        RuntimeOptions runtime,
         ILogger<MessageEventHandler> logger)
     {
         _parser = parser;
@@ -75,6 +79,8 @@ public class MessageEventHandler
         _richUi = richUi;
         _observe = observe;
         _groupGate = groupGate;
+        _health = health;
+        _runtime = runtime;
         _logger = logger;
     }
 
@@ -413,8 +419,7 @@ public class MessageEventHandler
 
         if (mention)
         {
-            await EnqueueAsync(chatMsg, token => ProcessAiReplyAsync(
-                evt.GroupOpenid, null, senderId, senderName, parsed, evt.Id, token), ct);
+            await EnqueueAiReplyAsync(chatMsg, parsed, ct);
         }
         else if (route.ShouldObserve)
         {
@@ -483,8 +488,7 @@ public class MessageEventHandler
             }
         }
 
-        await EnqueueAsync(chatMsg, token => ProcessAiReplyAsync(
-            null, senderId, senderId, senderName, parsed, evt.Id, token), ct);
+        await EnqueueAiReplyAsync(chatMsg, parsed, ct);
     }
 
     private async Task SaveIncomingAsync(ChatMessage message, CancellationToken ct)
@@ -495,16 +499,42 @@ public class MessageEventHandler
             await repo.SaveMessageAsync(message, ct);
     }
 
-    private async Task EnqueueAsync(ChatMessage incoming, Func<CancellationToken, Task> work, CancellationToken ct)
+    private Task EnqueueAiReplyAsync(ChatMessage incoming, ParsedMessage parsed, CancellationToken ct)
+    {
+        var batch = new ConversationReplyBatch(incoming, parsed);
+        return EnqueueAsync(incoming, token =>
+        {
+            var latest = batch.Latest;
+            return ProcessAiReplyAsync(latest.GroupId, latest.GroupId is null ? latest.UserId : null,
+                latest.UserId, latest.UserName, batch.Input, latest.MessageId, token);
+        }, ct, batch);
+    }
+
+    private async Task EnqueueAsync(ChatMessage incoming, Func<CancellationToken, Task> work, CancellationToken ct,
+        ConversationReplyBatch? replyBatch = null)
     {
         var conversation = incoming.GroupId is not null ? $"g:{incoming.GroupId}" : $"u:{incoming.UserId}";
-        if (_workQueue.TryEnqueue(conversation, async token =>
+        // AI 回复允许合并进同会话已有的排队回复（热点群多条 @ 不再逐条串行）；
+        // 上游降级时同步缩短队龄：早点给一句诚实的提示，而不是让消息排到自然超时。
+        var result = _workQueue.TryEnqueue(conversation, async token =>
         {
-            using var turn = new ConversationTurnScope(incoming.MessageId, incoming.CreatedAt,
-                incoming.Id > 0 ? incoming.Id : null);
+            var latest = replyBatch?.Latest ?? incoming;
+            using var turn = new ConversationTurnScope(latest.MessageId, latest.CreatedAt,
+                latest.Id > 0 ? latest.Id : null, replyBatch?.Messages);
             await work(token);
         }, onExpired: token => SendReplyAsync(incoming.GroupId, incoming.GroupId is null ? incoming.UserId : null,
-            incoming.MessageId, "等待回复超时，请稍后再试。", token), description: incoming.UserName)) return;
+            replyBatch?.Latest.MessageId ?? incoming.MessageId, "等待回复超时，请稍后再试。", token), description: incoming.UserName,
+            coalesce: replyBatch is not null, replyBatch: replyBatch,
+            maxQueueAge: replyBatch is not null && _health.IsDegraded
+                ? TimeSpan.FromSeconds(_runtime.DegradedQueueAgeSeconds) : null);
+        if (result == EnqueueResult.Accepted) return;
+        if (result == EnqueueResult.Coalesced)
+        {
+            // 实际输入已加入排队批次，执行时统一构建上下文，不再单独发送提示。
+            _logger.LogInformation("会话已有排队回复，合并本次消息 conversation={Conversation} msg={MessageId}",
+                conversation, incoming.MessageId);
+            return;
+        }
         await SendReplyAsync(incoming.GroupId, incoming.GroupId is null ? incoming.UserId : null,
             incoming.MessageId, "AI 繁忙，请稍后再试。", ct);
     }

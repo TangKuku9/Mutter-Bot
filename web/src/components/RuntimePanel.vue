@@ -9,8 +9,13 @@
       <el-descriptions-item label="成功调用平均耗时">{{ seconds(runtime.averageMs) }}</el-descriptions-item>
       <el-descriptions-item label="95% 成功调用耗时不超过">{{ seconds(runtime.p95Ms) }}</el-descriptions-item>
       <el-descriptions-item label="近期失败 / 取消">{{ runtime.failureCount ?? 0 }} 次</el-descriptions-item>
+      <el-descriptions-item label="上游 AI 状态">
+        <el-tag size="small" :type="upstream.degraded ? 'warning' : 'success'">{{ upstream.degraded ? '降级' : '正常' }}</el-tag>
+        <span style="margin-left: 6px">{{ upstream.reason || '正常' }}</span>
+      </el-descriptions-item>
     </el-descriptions>
-    <p class="note">耗时取最近 {{ runtime.sampleCount ?? 0 }} 次已完成模型请求中的成功样本，不含排队与图片准备。队列计数自本次启动累计：繁忙拒绝 {{ queue.rejected ?? 0 }}，排队超时 {{ queue.expired ?? 0 }}。</p>
+    <p class="note">耗时取最近 {{ runtime.sampleCount ?? 0 }} 次已完成模型请求中的成功样本，不含排队与图片准备。队列计数自本次启动累计：繁忙拒绝 {{ queue.rejected ?? 0 }}，排队超时 {{ queue.expired ?? 0 }}，重复 @ 合并 {{ queue.coalesced ?? 0 }}。</p>
+    <p class="note">上游 AI 滚动窗口（最近 {{ (upstream.windowSuccess ?? 0) + (upstream.windowFailure ?? 0) }} 次调用）：成功 {{ upstream.windowSuccess ?? 0 }} / 失败 {{ upstream.windowFailure ?? 0 }}，延迟 P50 {{ seconds(upstream.p50Ms) }} / P95 {{ seconds(upstream.p95Ms) }}。上游连续失败时机器人降级：暂停主动发言评估、缩短排队等待并加快放弃挂起的请求。</p>
     <p class="note">图片缓存 {{ megabytes(runtime.imageCache?.bytes) }} / {{ megabytes(runtime.imageCache?.byteLimit) }} MB，{{ runtime.imageCache?.entries ?? 0 }} 项；正在下载 {{ runtime.imageCache?.downloads ?? 0 }} 张。</p>
 
     <el-table :data="tasks" size="small" max-height="340" empty-text="暂无会话任务">
@@ -66,6 +71,7 @@ import { runtimeLabel, runtimeType, formatTime } from '../runtimeLabels'
 
 const props = defineProps({ runtime: { type: Object, default: () => ({}) }, stale: Boolean })
 const queue = computed(() => props.runtime.queue || {})
+const upstream = computed(() => props.runtime.upstream || {})
 const tasks = computed(() => [...(queue.value.tasks || [])].sort((a, b) => {
   const active = (t) => t.state === 'running' ? 2 : t.state === 'queued' ? 1 : 0
   return active(b) - active(a) || new Date(b.enqueuedAt) - new Date(a.enqueuedAt)

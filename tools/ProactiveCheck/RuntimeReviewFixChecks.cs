@@ -104,7 +104,7 @@ internal static partial class RuntimeChecks
         {
             await started.Task;
             host.Services.GetRequiredService<IHostApplicationLifetime>().StopApplication();
-            Require(!queue.Snapshot().Accepting && !queue.TryEnqueue("late", _ => Task.CompletedTask),
+            Require(!queue.Snapshot().Accepting && queue.TryEnqueue("late", _ => Task.CompletedTask) == EnqueueResult.Rejected,
                 "the real ApplicationStopping event must immediately close admission");
             release.SetResult();
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
@@ -145,7 +145,8 @@ internal static partial class RuntimeChecks
             await userStarted.Task;
             using var scope = env.Services.CreateScope();
             var response = (OkObjectResult)await new RuntimeController(queue,
-                scope.ServiceProvider.GetRequiredService<AppDbContext>(), env.Images).Get(default);
+                scope.ServiceProvider.GetRequiredService<AppDbContext>(), env.Images,
+                new UpstreamHealthTracker(TimeProvider.System)).Get(default);
             var tasks = JsonSerializer.SerializeToElement(response.Value).GetProperty("Queue").GetProperty("Tasks")
                 .EnumerateArray().ToArray();
             Require(tasks.Length == 60 && tasks.Any(t => t.GetProperty("ConversationId").GetString() == "g:SYNTHETIC-USER")

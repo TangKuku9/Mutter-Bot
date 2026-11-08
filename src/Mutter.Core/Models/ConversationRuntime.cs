@@ -5,7 +5,7 @@ public sealed record ConversationTaskSnapshot(string Id, string ConversationId, 
     bool Background, DateTimeOffset EnqueuedAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt,
     string State, string? Outcome, IReadOnlyList<RuntimeStep> Steps);
 public sealed record ConversationQueueSnapshot(int Capacity, int Parallelism, int Waiting, int Running,
-    long Rejected, long Expired, bool Accepting, IReadOnlyList<ConversationTaskSnapshot> Tasks);
+    long Rejected, long Expired, long Coalesced, bool Accepting, IReadOnlyList<ConversationTaskSnapshot> Tasks);
 
 /// <summary>仅保留最近任务的有限步骤；调用与发送回执另行持久化。</summary>
 public sealed class ConversationTaskTrace(string conversationId, string description, bool background,
@@ -14,6 +14,8 @@ public sealed class ConversationTaskTrace(string conversationId, string descript
     private readonly object _gate = new();
     private readonly List<RuntimeStep> _steps = [new(enqueuedAt, "queued", null)];
     public string Id { get; } = Guid.NewGuid().ToString("N");
+    /// <summary>该项是否已开始执行，仅用于运行观测；领取/合并由队列锁内的状态决定。</summary>
+    public bool Started { get; private set; }
     private DateTimeOffset? _startedAt;
     private DateTimeOffset? _completedAt;
     private string _state = "queued";
@@ -21,7 +23,7 @@ public sealed class ConversationTaskTrace(string conversationId, string descript
 
     public void Start()
     {
-        lock (_gate) { _startedAt = clock.GetUtcNow(); _state = "running"; Mark("started"); }
+        lock (_gate) { Started = true; _startedAt = clock.GetUtcNow(); _state = "running"; Mark("started"); }
     }
     public void Mark(string stage, string? detail = null)
     {
