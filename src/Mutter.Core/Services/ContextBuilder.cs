@@ -216,7 +216,7 @@ public class ContextBuilder : IContextBuilder
 
         foreach (var msg in history)
         {
-            if (ConversationTurnScope.Current is { } turn && msg.MessageId == turn.MessageId)
+            if (ConversationTurnScope.Current is { } turn && turn.MessageIds.Contains(msg.MessageId))
                 continue;
             if (string.IsNullOrWhiteSpace(msg.PlainText))
                 continue;
@@ -251,7 +251,7 @@ public class ContextBuilder : IContextBuilder
         // 本条消息在建上下文前就已落库，会原样出现在 history 末尾；不去掉就拼两遍，
         // 模型会把同一句话读成"对方连着追问两次"。是否重复取决于后台写库有没有跑赢这次查询，
         // 时好时坏的毛病多半就是这么来的。
-        var current = $"[{senderName}]: {currentMessage}";
+        var current = ConversationTurnScope.Current?.CombinedInput ?? $"[{senderName}]: {currentMessage}";
         if (conversation.Count > 0 && conversation[^1].Content == current)
             conversation.RemoveAt(conversation.Count - 1);
 

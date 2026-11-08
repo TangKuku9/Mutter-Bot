@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Data.Common;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -9,6 +10,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Mutter.Core;
+using Mutter.Core.Configuration;
 using Mutter.Core.EventHandlers;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
@@ -32,6 +34,13 @@ internal static partial class RuntimeChecks
         {
             ("会话顺序、跨会话并行、有界接纳与排空", QueueOrderAsync),
             ("主动任务优先级、过期与停机取消", QueueLifecycleAsync),
+            ("上游健康降级、滞回与恢复", UpstreamHealthAsync),
+            ("同会话排队回复合并", CoalescingAsync),
+            ("合并消息的真实上下文、图片与投递关联", CoalescedInputsAsync),
+            ("过期任务领取与满队列合并", CoalescingAdmissionAsync),
+            ("协议回退健康判定与 Retry-After 两种格式", UpstreamTransportHealthAsync),
+            ("主动评估冷却探测与无前台流量恢复", ProactiveRecoveryAsync),
+            ("单次尝试预算与健康上报", AttemptBudgetAsync),
             ("模型协议、结构化用量与错误重试政策", ModelContractsAsync),
             ("多模态搜索、配置快照和取消", ModelMultimodalAsync),
             ("最终请求预算与超长当前消息", BudgetAsync),
@@ -78,10 +87,10 @@ internal static partial class RuntimeChecks
         Require(queue.TryEnqueue("a", async ct =>
         {
             order.Enqueue("a1-start"); first.SetResult(); await release.Task.WaitAsync(ct); order.Enqueue("a1-end");
-        }), "first accepted");
-        Require(queue.TryEnqueue("a", _ => { order.Enqueue("a2"); second.SetResult(); return Task.CompletedTask; }), "second accepted");
-        Require(queue.TryEnqueue("b", _ => { other.SetResult(); return Task.CompletedTask; }), "other accepted");
-        Require(!queue.TryEnqueue("c", _ => Task.CompletedTask), "capacity must include running and pending work");
+        }) == EnqueueResult.Accepted, "first accepted");
+        Require(queue.TryEnqueue("a", _ => { order.Enqueue("a2"); second.SetResult(); return Task.CompletedTask; }) == EnqueueResult.Accepted, "second accepted");
+        Require(queue.TryEnqueue("b", _ => { other.SetResult(); return Task.CompletedTask; }) == EnqueueResult.Accepted, "other accepted");
+        Require(queue.TryEnqueue("c", _ => Task.CompletedTask) == EnqueueResult.Rejected, "capacity must include running and pending work");
         await queue.StartAsync(default);
         await Task.WhenAll(first.Task, other.Task).WaitAsync(TimeSpan.FromSeconds(3));
         Require(!second.Task.IsCompleted, "same conversation must not run concurrently");
@@ -89,7 +98,7 @@ internal static partial class RuntimeChecks
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         await queue.StopAsync(deadline.Token);
         Require(order.ToArray().SequenceEqual(new[] { "a1-start", "a1-end", "a2" }), "conversation order");
-        Require(!queue.TryEnqueue("d", _ => Task.CompletedTask), "stop must close admission");
+        Require(queue.TryEnqueue("d", _ => Task.CompletedTask) == EnqueueResult.Rejected, "stop must close admission");
     }
 
     private static async Task QueueLifecycleAsync()
@@ -158,7 +167,7 @@ internal static partial class RuntimeChecks
             // 宿主停机先触发 ApplicationStopping，然后才调用 StopAsync。
             host.Cancel();
             await Task.Delay(50);
-            Require(!queue.TryEnqueue("late", _ => Task.CompletedTask), "host stop must close admission");
+            Require(queue.TryEnqueue("late", _ => Task.CompletedTask) == EnqueueResult.Rejected, "host stop must close admission");
             release.SetResult();
 
             using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(3));
@@ -166,6 +175,161 @@ internal static partial class RuntimeChecks
             Require(queuedRan && !inFlightCancelled && !queuedCancelled,
                 "accepted work must drain with the queue-owned token");
         }
+    }
+
+    private static Task UpstreamHealthAsync()
+    {
+        var clock = new TestClock();
+        var options = new RuntimeOptions().Normalize();   // 默认阈值：窗口 10，失败阈值 3，恢复 4/5
+        var health = new UpstreamHealthTracker(clock, options);
+        health.Record(false, 40_000);
+        health.Record(true, 20_000);
+        health.Record(false, 50_000);
+        Require(!health.IsDegraded, "零星失败（夹着成功）不降级");
+        health.Record(true, 15_000);
+        health.Record(false, 60_000);
+        Require(health.IsDegraded, "窗口内失败达到阈值判定降级");
+        clock.Advance(TimeSpan.FromSeconds(61));
+        Require(health.IsDegraded, "没有足够成功样本时不自动恢复（滞回）");
+        health.Record(true, 16_000);
+        health.Record(true, 16_000);
+        Require(health.IsDegraded, "近 5 次成功不足 4 次不恢复");
+        health.Record(true, 17_000);
+        health.Record(true, 17_000);
+        Require(!health.IsDegraded, "近 5 次中成功 4 次后恢复");
+        var snapshot = health.Snapshot();
+        Require(!snapshot.Degraded && snapshot.WindowSuccess > 0 && snapshot.P50Ms > 0 && snapshot.P95Ms >= snapshot.P50Ms,
+            "快照带窗口成败计数与延迟分位（面板展示用）");
+
+        var spread = new UpstreamHealthTracker(clock, options);
+        spread.Record(false, 1);
+        spread.Record(false, 1);
+        Require(spread.IsDegraded, "连续两次失败立即降级（不等窗口攒满）");
+
+        var rate = new UpstreamHealthTracker(clock, options);
+        rate.Record(false, 100, 429, TimeSpan.FromSeconds(5));
+        Require(rate.Snapshot() is { Degraded: true, DegradedUntil: { } until1 }
+            && (until1 - clock.GetUtcNow()).TotalSeconds is > 58 and < 61,
+            "429 的 Retry-After 低于下限时按最短降级时长兜底");
+        rate.Record(false, 100, 500);
+        clock.Advance(TimeSpan.FromMinutes(5));   // 远超最短降级时长：恢复只看近期成功样本
+        rate.Record(true, 10);
+        rate.Record(true, 10);
+        rate.Record(true, 10);
+        Require(rate.IsDegraded, "过了最短降级时长，近 5 次成功仍不足 4 次不恢复");
+        rate.Record(true, 10);
+        Require(!rate.IsDegraded, "近 5 次中成功 4 次后恢复");
+        return Task.CompletedTask;
+    }
+
+    private static async Task CoalescingAsync()
+    {
+        var clock = new TestClock();
+        // 阶段一：排队中的回复吸收后续 @，并刷新过期时间；被合并的 @ 不产生任何超时提示。
+        using (var queue = new ConversationWorkQueue(NullLogger<ConversationWorkQueue>.Instance, clock, 4, 1))
+        {
+            var expiredNotice = 0;
+            Require(queue.TryEnqueue("g:hot", _ => Task.CompletedTask, maxQueueAge: TimeSpan.FromSeconds(100),
+                onExpired: _ => { expiredNotice++; return Task.CompletedTask; }, coalesce: true) == EnqueueResult.Accepted,
+                "第一条 @ 正常排队");
+            clock.Advance(TimeSpan.FromSeconds(90));
+            Require(queue.TryEnqueue("g:hot", _ => Task.CompletedTask, maxQueueAge: TimeSpan.FromSeconds(100), coalesce: true)
+                == EnqueueResult.Coalesced, "第二条 @ 合并进已有排队回复");
+            clock.Advance(TimeSpan.FromSeconds(90));   // t=180：早已越过原始 100s 有效期，靠刷新才活着
+            await queue.StartAsync(default);
+            using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await queue.StopAsync(stop.Token);
+            Require(expiredNotice == 0, "合并刷新过期时间：排队回复仍被执行，且没有多余的超时提示");
+            Require(queue.Snapshot() is { Coalesced: 1, Rejected: 0 }, "合并计数进快照");
+        }
+        // 阶段二：管理员指令不可合并。
+        using (var queue = new ConversationWorkQueue(NullLogger<ConversationWorkQueue>.Instance, clock, 4, 1))
+        {
+            Require(queue.TryEnqueue("g:x", _ => Task.CompletedTask) == EnqueueResult.Accepted, "管理员指令入队");
+            Require(queue.TryEnqueue("g:x", _ => Task.CompletedTask, coalesce: true) == EnqueueResult.Accepted,
+                "会话最新排队项不可合并时，AI 回复照常单独排队");
+            Require(queue.Snapshot().Coalesced == 0, "管理员指令不会被吸收");
+        }
+        // 阶段三：正在执行的一项不能被并进去。
+        using (var queue = new ConversationWorkQueue(NullLogger<ConversationWorkQueue>.Instance, clock, 4, 1))
+        {
+            var running = Signal(); var release = Signal();
+            queue.TryEnqueue("g:y", async ct => { running.SetResult(); await release.Task.WaitAsync(ct); }, coalesce: true);
+            await queue.StartAsync(default);
+            await running.Task;
+            Require(queue.TryEnqueue("g:y", _ => Task.CompletedTask, coalesce: true) == EnqueueResult.Accepted,
+                "正在执行的回复不能被合并，新 @ 正常排队");
+            release.TrySetResult();
+            using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await queue.StopAsync(stop.Token);
+        }
+    }
+
+    private static async Task AttemptBudgetAsync()
+    {
+        // 挂死的上游：尝试在单次预算处中断并按失败上报，而不是耗光整条根期限。
+        AiCallScope.Configure(TimeSpan.FromSeconds(120));
+        try
+        {
+            var health = new UpstreamHealthTracker(new TestClock(), new RuntimeOptions
+            {
+                HealthMinDegradeSeconds = 0
+            });
+            var hanging = new FakeHttp
+            {
+                Handler = async (_, _, token) =>
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                    return null!;
+                }
+            };
+            var transport = new HttpModelTransport(new HttpClient(hanging), NullLogger<HttpModelTransport>.Instance,
+                health: health, runtime: new RuntimeOptions
+                {
+                    AiTimeoutSeconds = 120, AiPerAttemptTimeoutSeconds = 3, DegradedPerAttemptTimeoutSeconds = 1
+                });
+            var config = new AiConfig { ApiBaseUrl = "https://upstream.test", ModelName = "synthetic-model", ApiKey = "k" };
+            var request = new AiChatRequest("system", new[] { new AiMessage("user", "hello", []) });
+
+            var firstAt = Stopwatch.GetTimestamp();
+            var firstError = await CaptureAsync(() => transport.SendOpenAiAsync(request, config, null, CancellationToken.None));
+            Require(firstError?.Message.Contains("timeout") == true, "挂起的尝试按超时分类");
+            Require(Stopwatch.GetElapsedTime(firstAt) < TimeSpan.FromSeconds(10),
+                "尝试预算在单次上限处中断（而不是耗光 120s 根期限）");
+            Require(!health.IsDegraded, "单次挂起只是失败，未达降级条件");
+
+            await CaptureAsync(() => transport.SendOpenAiAsync(request, config, null, CancellationToken.None));
+            Require(health.IsDegraded, "连续两次挂起判定上游降级");
+
+            var degradedAt = Stopwatch.GetTimestamp();
+            await CaptureAsync(() => transport.SendOpenAiAsync(request, config, null, CancellationToken.None));
+            Require(Stopwatch.GetElapsedTime(degradedAt) < TimeSpan.FromSeconds(2.5),
+                "降级期间单次尝试上限进一步收紧，坏尝试更快腾出槽位");
+            Require(health.Snapshot() is { WindowSuccess: 0, WindowFailure: 3 }, "每次尝试都如实进健康窗口");
+        }
+        finally
+        {
+            AiCallScope.Configure(TimeSpan.FromSeconds(120));
+        }
+
+        // 根期限剩余预算可读，且随时间消耗（给单次尝试取 min(上限, 剩余) 用）。
+        AiCallScope.Configure(TimeSpan.FromSeconds(30));
+        using (var scope = AiCallScope.Begin(CancellationToken.None, "reply"))
+        {
+            Require(scope.Remaining > TimeSpan.FromSeconds(28), "根期限剩余预算可读");
+        }
+        AiCallScope.Configure(TimeSpan.FromSeconds(120));
+        using (AiCallScope.Begin(CancellationToken.None, "reply"))
+        {
+            Require(AiCallScope.Current!.Remaining > TimeSpan.FromSeconds(118), "配置下发能改变根期限");
+        }
+        AiCallScope.Configure(TimeSpan.FromSeconds(120));
+    }
+
+    private static async Task<Exception?> CaptureAsync(Func<Task> action)
+    {
+        try { await action(); return null; }
+        catch (Exception ex) { return ex; }
     }
 
     private static async Task ModelContractsAsync()
