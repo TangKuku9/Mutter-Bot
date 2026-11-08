@@ -316,7 +316,8 @@ internal static partial class RuntimeChecks
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         Require((await db.AiCallRecords.SingleAsync()).OperationId == id && (await db.OutgoingReplies.SingleAsync()).AiOperationId == id,
             "queue, model and delivery share an operation identifier");
-        var detail = await new RuntimeController(queue, db, env.Images).GetOperation(id, default);
+        var detail = await new RuntimeController(queue, db, env.Images,
+            new UpstreamHealthTracker(TimeProvider.System)).GetOperation(id, default);
         Require(detail is OkObjectResult, "operation detail endpoint");
     }
 }
