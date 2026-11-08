@@ -194,7 +194,7 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
     /// <summary>
     /// 单次尝试预算：min(配置的尝试上限, 根期限剩余)。上游挂死时最多烧掉一个尝试份额，
     /// 不再把整条生成期限耗在一根悬空连接上——降级链的后续阶段因此总有预算可用。
-    /// 结束后按结果向健康追踪上报一次（取消不算上游故障；非 2xx 带上状态码，429 连 Retry-After 一起交）。
+    /// 结束后按结果向健康追踪上报一次；路径/格式等确定性拒绝不代表上游不可用。
     /// </summary>
     private async Task<HttpResponseMessage> SendWithBudgetAsync(HttpRequestMessage request, AiConfig config,
         string transport, bool search, CancellationToken ct)
@@ -212,9 +212,15 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
                 attempt.Token, callStore, logger, clock, stage: search ? "search" : null);
             if (response.IsSuccessStatusCode)
                 _health?.Record(true, ElapsedMs());
-            else
+            else if (response.StatusCode == HttpStatusCode.RequestTimeout
+                || response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500)
+            {
+                var retry = response.Headers.RetryAfter;
+                var retryAfter = retry?.Delta
+                    ?? (retry?.Date is { } date ? date - (clock ?? TimeProvider.System).GetUtcNow() : (TimeSpan?)null);
                 _health?.Record(false, ElapsedMs(), (int)response.StatusCode,
-                    retryAfter: response.Headers.RetryAfter?.Delta);
+                    retryAfter: retryAfter);
+            }
             return response;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)

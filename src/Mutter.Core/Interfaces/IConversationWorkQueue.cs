@@ -12,10 +12,11 @@ public interface IConversationWorkQueue
 {
     /// <summary>有界接纳；同会话按入队顺序执行，主动工作只在无排队应答时调度。
     /// coalesce=true（AI 回复路径）且会话已有可合并的排队回复时，新条目被吸收：
-    /// 刷新那条排队的过期时间即可，不单独排队、不发任何提示——回复执行时构建的上下文会看到这条晚到的消息。</summary>
+    /// 合并 replyBatch 的实际输入并刷新过期时间，不单独排队、不发任何提示。</summary>
     EnqueueResult TryEnqueue(string conversationId, Func<CancellationToken, Task> work,
         bool background = false, TimeSpan? maxQueueAge = null,
-        Func<CancellationToken, Task>? onExpired = null, string? description = null, bool coalesce = false);
+        Func<CancellationToken, Task>? onExpired = null, string? description = null, bool coalesce = false,
+        Mutter.Core.Models.ConversationReplyBatch? replyBatch = null);
 
     Mutter.Core.Models.ConversationQueueSnapshot Snapshot();
 }

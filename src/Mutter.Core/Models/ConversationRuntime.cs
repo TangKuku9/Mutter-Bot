@@ -14,7 +14,7 @@ public sealed class ConversationTaskTrace(string conversationId, string descript
     private readonly object _gate = new();
     private readonly List<RuntimeStep> _steps = [new(enqueuedAt, "queued", null)];
     public string Id { get; } = Guid.NewGuid().ToString("N");
-    /// <summary>该项是否已开始执行。合并判定用它区分「正在执行的一项」（不能并进去）和真正在排队的项。</summary>
+    /// <summary>该项是否已开始执行，仅用于运行观测；领取/合并由队列锁内的状态决定。</summary>
     public bool Started { get; private set; }
     private DateTimeOffset? _startedAt;
     private DateTimeOffset? _completedAt;

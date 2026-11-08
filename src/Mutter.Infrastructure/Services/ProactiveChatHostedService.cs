@@ -39,18 +39,17 @@ public sealed class ProactiveChatHostedService(
 
     private async Task TickAsync(CancellationToken ct)
     {
-        // 上游降级时暂停主动评估：可丢弃的锦上添花让路给用户应答，也停止给坏掉的上游添负载。
-        // 观察窗口原样保留，恢复后的下一个 tick 照常评估。
+        // 上游降级时保留观察窗口，冷却后只放行一个受限探测，避免无人 @ 时永远无法恢复。
         if (health.IsDegraded)
         {
             if (!_lastSeenDegraded)
             {
                 _lastSeenDegraded = true;
-                logger.LogWarning("上游 AI 降级，暂停主动发言评估（观察窗口保留，恢复后继续）");
+                logger.LogWarning("上游 AI 降级，暂停常规主动评估（保留观察窗口，冷却后受限探测）");
             }
-            return;
+            if (!health.CanScheduleBackground) return;
         }
-        if (_lastSeenDegraded)
+        else if (_lastSeenDegraded)
         {
             _lastSeenDegraded = false;
             logger.LogInformation("上游 AI 恢复，继续主动发言评估");
@@ -65,6 +64,9 @@ public sealed class ProactiveChatHostedService(
             {
                 try
                 {
+                    // 排队期间健康状态可能已变化，必须在取走观察窗口前再次检查。
+                    if (!health.TryBeginBackgroundCall(out var probe)) return;
+                    using var lease = probe;
                     var window = observe.Take(group, config.WindowMaxMessages);
                     if (window is null) return;
                     observe.MarkEvaluated(group, clock.GetUtcNow().UtcDateTime);
@@ -77,6 +79,7 @@ public sealed class ProactiveChatHostedService(
                 return Task.CompletedTask;
             });
             if (result == EnqueueResult.Rejected) _scheduled.TryRemove(group, out _);
+            else if (health.IsDegraded) break;
         }
     }
 }

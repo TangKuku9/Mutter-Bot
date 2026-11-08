@@ -27,11 +27,64 @@ public sealed class UpstreamHealthTracker(TimeProvider clock, RuntimeOptions? ru
     private DateTimeOffset _degradedUntil = DateTimeOffset.MinValue;
     private DateTimeOffset? _lastFailureAt;
     private int? _lastFailureStatus;
+    private bool _probeInFlight;
+    private DateTimeOffset _nextProbeAt = DateTimeOffset.MinValue;
+    private readonly TimeSpan _probeInterval = TimeSpan.FromSeconds(Math.Max(10, runtime?.HealthMinDegradeSeconds ?? 60));
 
     /// <summary>当前是否降级。读取时会顺带评估恢复条件（过了最短降级时长后按近期成功样本判定）。</summary>
     public bool IsDegraded
     {
         get { lock (_gate) return EvaluateLocked(clock.GetUtcNow()); }
+    }
+
+    /// <summary>冷却后允许调度一个后台探测；真正执行时仍须领取探测租约。</summary>
+    public bool CanScheduleBackground
+    {
+        get
+        {
+            lock (_gate)
+            {
+                var now = clock.GetUtcNow();
+                return !EvaluateLocked(now) || ProbeDueLocked(now);
+            }
+        }
+    }
+
+    /// <summary>后台工作执行前调用；降级时最多一个探测在途，跳过/失败也必须释放租约。</summary>
+    public bool TryBeginBackgroundCall(out IDisposable? probe)
+    {
+        lock (_gate)
+        {
+            probe = null;
+            var now = clock.GetUtcNow();
+            if (!EvaluateLocked(now)) return true;
+            if (!ProbeDueLocked(now)) return false;
+            _probeInFlight = true;
+            probe = new ProbeLease(this);
+            return true;
+        }
+    }
+
+    private bool ProbeDueLocked(DateTimeOffset now) =>
+        !_probeInFlight && now >= _degradedUntil && now >= _nextProbeAt;
+
+    private void ReleaseProbe()
+    {
+        lock (_gate)
+        {
+            _probeInFlight = false;
+            _nextProbeAt = clock.GetUtcNow() + _probeInterval;
+        }
+    }
+
+    private sealed class ProbeLease(UpstreamHealthTracker owner) : IDisposable
+    {
+        private int _disposed;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            owner.ReleaseProbe();
+        }
     }
 
     /// <summary>每次模型调用结束上报一次结果。retryAfter 用于 429：上游给了明确的重试间隔就尊重它（但不低于最短降级时长）。</summary>

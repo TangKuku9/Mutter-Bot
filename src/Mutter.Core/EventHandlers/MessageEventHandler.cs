@@ -419,8 +419,7 @@ public class MessageEventHandler
 
         if (mention)
         {
-            await EnqueueAsync(chatMsg, token => ProcessAiReplyAsync(
-                evt.GroupOpenid, null, senderId, senderName, parsed, evt.Id, token), ct, coalesce: true);
+            await EnqueueAiReplyAsync(chatMsg, parsed, ct);
         }
         else if (route.ShouldObserve)
         {
@@ -489,8 +488,7 @@ public class MessageEventHandler
             }
         }
 
-        await EnqueueAsync(chatMsg, token => ProcessAiReplyAsync(
-            null, senderId, senderId, senderName, parsed, evt.Id, token), ct, coalesce: true);
+        await EnqueueAiReplyAsync(chatMsg, parsed, ct);
     }
 
     private async Task SaveIncomingAsync(ChatMessage message, CancellationToken ct)
@@ -501,26 +499,38 @@ public class MessageEventHandler
             await repo.SaveMessageAsync(message, ct);
     }
 
+    private Task EnqueueAiReplyAsync(ChatMessage incoming, ParsedMessage parsed, CancellationToken ct)
+    {
+        var batch = new ConversationReplyBatch(incoming, parsed);
+        return EnqueueAsync(incoming, token =>
+        {
+            var latest = batch.Latest;
+            return ProcessAiReplyAsync(latest.GroupId, latest.GroupId is null ? latest.UserId : null,
+                latest.UserId, latest.UserName, batch.Input, latest.MessageId, token);
+        }, ct, batch);
+    }
+
     private async Task EnqueueAsync(ChatMessage incoming, Func<CancellationToken, Task> work, CancellationToken ct,
-        bool coalesce = false)
+        ConversationReplyBatch? replyBatch = null)
     {
         var conversation = incoming.GroupId is not null ? $"g:{incoming.GroupId}" : $"u:{incoming.UserId}";
         // AI 回复允许合并进同会话已有的排队回复（热点群多条 @ 不再逐条串行）；
         // 上游降级时同步缩短队龄：早点给一句诚实的提示，而不是让消息排到自然超时。
         var result = _workQueue.TryEnqueue(conversation, async token =>
         {
-            using var turn = new ConversationTurnScope(incoming.MessageId, incoming.CreatedAt,
-                incoming.Id > 0 ? incoming.Id : null);
+            var latest = replyBatch?.Latest ?? incoming;
+            using var turn = new ConversationTurnScope(latest.MessageId, latest.CreatedAt,
+                latest.Id > 0 ? latest.Id : null, replyBatch?.Messages);
             await work(token);
         }, onExpired: token => SendReplyAsync(incoming.GroupId, incoming.GroupId is null ? incoming.UserId : null,
-            incoming.MessageId, "等待回复超时，请稍后再试。", token), description: incoming.UserName,
-            coalesce: coalesce,
-            maxQueueAge: coalesce && _health.IsDegraded
+            replyBatch?.Latest.MessageId ?? incoming.MessageId, "等待回复超时，请稍后再试。", token), description: incoming.UserName,
+            coalesce: replyBatch is not null, replyBatch: replyBatch,
+            maxQueueAge: replyBatch is not null && _health.IsDegraded
                 ? TimeSpan.FromSeconds(_runtime.DegradedQueueAgeSeconds) : null);
         if (result == EnqueueResult.Accepted) return;
         if (result == EnqueueResult.Coalesced)
         {
-            // 会话里已有排队中的回复，它执行时构建的上下文会看到这条晚到的 @，一并回应；不发任何打扰性提示。
+            // 实际输入已加入排队批次，执行时统一构建上下文，不再单独发送提示。
             _logger.LogInformation("会话已有排队回复，合并本次消息 conversation={Conversation} msg={MessageId}",
                 conversation, incoming.MessageId);
             return;

@@ -24,11 +24,13 @@ public sealed class ConversationWorkQueue(
         runtime is null ? TimeSpan.FromMinutes(3) : TimeSpan.FromSeconds(runtime.WorkDeadlineSeconds);
 
     private sealed class Work(Func<CancellationToken, Task> Run, bool Background, bool Coalesceable,
-        Func<CancellationToken, Task>? OnExpired, ConversationTaskTrace Trace)
+        Func<CancellationToken, Task>? OnExpired, ConversationTaskTrace Trace, ConversationReplyBatch? ReplyBatch)
     {
         public Func<CancellationToken, Task> Run { get; } = Run;
         public bool Background { get; } = Background;
         public bool Coalesceable { get; } = Coalesceable;
+        public bool Claimed { get; set; }
+        public ConversationReplyBatch? ReplyBatch { get; } = ReplyBatch;
         /// <summary>可变：同会话的后续 @ 合并进来时刷新，给这条回复多争取一次执行机会。</summary>
         public DateTimeOffset ExpiresAt { get; set; }
         public Func<CancellationToken, Task>? OnExpired { get; } = OnExpired;
@@ -57,38 +59,43 @@ public sealed class ConversationWorkQueue(
 
     public EnqueueResult TryEnqueue(string conversationId, Func<CancellationToken, Task> work,
         bool background = false, TimeSpan? maxQueueAge = null,
-        Func<CancellationToken, Task>? onExpired = null, string? description = null, bool coalesce = false)
+        Func<CancellationToken, Task>? onExpired = null, string? description = null, bool coalesce = false,
+        ConversationReplyBatch? replyBatch = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
         lock (_gate)
         {
-            if (!_accepting || _outstanding >= _capacity) { _rejected++; return EnqueueResult.Rejected; }
-            if (!_sessions.TryGetValue(conversationId, out var queue))
-            {
-                queue = new Queue<Work>();
-                _sessions.Add(conversationId, queue);
-                (background ? _background : _foreground).Enqueue(conversationId);
-                _ready.Writer.TryWrite(true);
-            }
-            // 防止一个会话占满全局队列；包含正在执行的一项。
-            if (queue.Count >= _perConversationCap) { _rejected++; return EnqueueResult.Rejected; }
-            if (coalesce)
+            if (!_accepting) { _rejected++; return EnqueueResult.Rejected; }
+            _sessions.TryGetValue(conversationId, out var queue);
+            if (coalesce && !background && queue is not null)
             {
                 // 热点群收敛：同会话已有可合并的排队回复时，这条 @ 不再单独排队。
                 // 上下文是执行时构建的，那条回复会看到本次 @ 并一并回应；刷新过期时间多给它争取一次机会。
-                // 正在执行的一项（Started=true）不能并，管理员指令（Coalesceable=false）不并。
+                // 领取与合并使用同一把锁；过期提示仍在发送时也不能再合并。
                 Work? newestPending = null;
                 foreach (var pending in queue)
-                    if (!pending.Trace.Started) newestPending = pending;
-                if (newestPending is { Coalesceable: true })
+                    if (!pending.Claimed) newestPending = pending;
+                if (newestPending is { Coalesceable: true, Background: false }
+                    && (replyBatch is null ? newestPending.ReplyBatch is null
+                        : newestPending.ReplyBatch?.TryMerge(replyBatch) == true))
                 {
                     newestPending.ExpiresAt = clock.GetUtcNow() + (maxQueueAge ?? _defaultQueueAge);
                     _coalesced++;
                     return EnqueueResult.Coalesced;
                 }
             }
+            // 合并不增加容量占用，满队列时仍可吸收同会话输入。
+            if (_outstanding >= _capacity || queue?.Count >= _perConversationCap)
+            { _rejected++; return EnqueueResult.Rejected; }
+            if (queue is null)
+            {
+                queue = new Queue<Work>();
+                _sessions.Add(conversationId, queue);
+                (background ? _background : _foreground).Enqueue(conversationId);
+                _ready.Writer.TryWrite(true);
+            }
             queue.Enqueue(new Work(work, background, coalesce, onExpired,
-                new(conversationId, description ?? (background ? "主动评估" : "会话任务"), background, clock.GetUtcNow(), clock))
+                new(conversationId, description ?? (background ? "主动评估" : "会话任务"), background, clock.GetUtcNow(), clock), replyBatch)
             {
                 ExpiresAt = clock.GetUtcNow() + (maxQueueAge ?? _defaultQueueAge)
             });
@@ -138,6 +145,7 @@ public sealed class ConversationWorkQueue(
                 if (_foreground.Count == 0 && (_background.Count == 0 || _backgroundInFlight >= 1)) continue;
                 id = (_foreground.Count > 0 ? _foreground : _background).Dequeue();
                 work = _sessions[id].Peek();
+                work.Claimed = true;
                 _running++;
                 if (work.Background) _backgroundInFlight++;
             }
