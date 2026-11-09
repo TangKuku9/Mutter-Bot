@@ -139,7 +139,7 @@
         <el-card shadow="never" class="fill">
           <template #header><b>面板设置</b></template>
 
-          <div class="setting-row">
+          <div class="setting-row setting-row-theme">
             <div class="setting-main">
               <div class="setting-name">主题色</div>
               <div class="setting-desc">按钮、链接与选中态</div>
@@ -924,9 +924,10 @@ onUnmounted(() => {
 .setting-row:first-child { padding-top: 2px; }
 .setting-name { font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); }
 .setting-desc { margin-top: 2px; font-size: 12px; color: var(--el-text-color-secondary); }
-.color-options { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; max-width: 230px; }
+.setting-row-theme { flex-wrap: wrap; row-gap: 14px; }
+.color-options { display: flex; flex-wrap: nowrap; flex: 0 0 auto; justify-content: flex-end; gap: 10px; max-width: 100%; }
 .color-dot {
-  width: 26px; height: 26px; padding: 0; border: 2px solid transparent; border-radius: 50%;
+  flex: 0 0 26px; width: 26px; height: 26px; padding: 0; border: 2px solid transparent; border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
   color: var(--panel-on-primary); transition: transform 0.15s, box-shadow 0.15s;
 }
@@ -978,7 +979,6 @@ onUnmounted(() => {
 @media (max-width: 600px) {
   .feature-grid, .footer-grid, .stack-grid { grid-template-columns: minmax(0, 1fr); }
   .setting-row { flex-wrap: wrap; }
-  .color-options { max-width: 100%; }
   .hero-actions { flex-wrap: wrap; }
   .hero-lockup { width: 160px; height: 40px; }
   .setting-foot { flex-wrap: wrap; gap: 10px; }
