@@ -24,7 +24,10 @@ public static class ExternalSearchProbe
             return failure.Kind switch
             {
                 WebSearchFailureKind.Auth => ("auth_failed",
+                    // 只有 SearXNG 的 403 才可能是「实例没开 JSON 输出」；
+                    // 其他服务商的 403 一律按 Key/地址问题提示，避免误导。
                     failure.HttpStatus == 403 && failure.Reason.Contains("JSON")
+                    && providerId == "searxng"
                         ? "实例未开启 JSON 输出：请在 SearXNG 的 settings.yml 中给 search.formats 加上 json"
                         : providerId == "searxng"
                             ? "实例拒绝访问：请检查地址、反向代理鉴权，以及实例是否允许 JSON 输出"

@@ -4,11 +4,11 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
+using Mutter.Core;
 using Mutter.Web.Models;
 
 namespace Mutter.Web.Services;
@@ -1343,8 +1343,7 @@ public sealed class UpdateApplier
         }
     }
 
-    private static string GetCurrentVersion() =>
-        Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown";
+    private static string GetCurrentVersion() => AppVersion.Current;
 
     private static string GetAppDirectory() =>
         AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -1359,9 +1358,10 @@ public sealed class UpdateApplier
 
     private static bool SameVersion(string? left, string? right)
     {
-        static string Normalize(string? value) => (value ?? string.Empty).Trim().TrimStart('v', 'V');
-        var a = Normalize(left);
-        var b = Normalize(right);
+        // 清单可能给纯日期 261109，包内清单可能给补零形式；统一归一化后再比较，
+        // 避免同一版本因写法不同被误判。
+        var a = AppVersion.Normalize(left);
+        var b = AppVersion.Normalize(right);
         return a.Length > 0 && b.Length > 0 && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     }
 

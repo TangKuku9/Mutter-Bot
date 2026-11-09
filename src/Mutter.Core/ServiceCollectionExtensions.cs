@@ -24,15 +24,19 @@ public static class ServiceCollectionExtensions
             .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(25));
         // 独立搜索服务（预检索注入）：typed client 独立成池，超时钳制在 Provider 基座内按配置生效。
         // AddHttpClient<T> 只注册具体类型，这里再补 IWebSearchProvider 转发，
-        // ExternalSearchService 才能通过 IEnumerable<IWebSearchProvider> 收齐四家。
+        // ExternalSearchService 才能通过 IEnumerable<IWebSearchProvider> 收齐全部 Provider。
         services.AddHttpClient<SearxngProvider>();
         services.AddHttpClient<TavilyProvider>();
         services.AddHttpClient<BochaProvider>();
         services.AddHttpClient<BraveProvider>();
+        services.AddHttpClient<DeepseekProvider>();
+        services.AddHttpClient<CustomProvider>();
         services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<SearxngProvider>());
         services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<TavilyProvider>());
         services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<BochaProvider>());
         services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<BraveProvider>());
+        services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<DeepseekProvider>());
+        services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<CustomProvider>());
         services.AddSingleton<ExternalSearchService>();
         services.AddSingleton<IContextBuilder, ContextBuilder>();
         services.AddSingleton<MessageRouter>();

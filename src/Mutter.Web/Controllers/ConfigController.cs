@@ -99,8 +99,10 @@ public class ConfigController : ControllerBase
                 Enabled = external.Enabled ?? false,
                 Provider = external.Provider,
                 BaseUrl = external.BaseUrl,
-                // SearXNG 不使用 Key：不回显旧服务商的残留 Key；其余服务打码回显。
-                ApiKey = external.Provider == "searxng" ? string.Empty : MaskApiKey(external.ApiKey),
+                // SearXNG 不使用 Key：不回显旧服务商的残留 Key；其余服务（含自定义通道）打码回显。
+                ApiKey = ExternalSearchConfig.SupportsApiKey(external.Provider)
+                    ? MaskApiKey(external.ApiKey)
+                    : string.Empty,
                 MaxResults = external.MaxResults,
                 TimeoutSeconds = external.TimeoutSeconds,
                 FallbackToBuiltin = external.FallbackToBuiltin
@@ -392,18 +394,18 @@ public class ConfigController : ControllerBase
                 if (!Uri.TryCreate(external.BaseUrl, UriKind.Absolute, out var uri)
                     || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
                     return "搜索服务地址必须是 http/https 开头的完整 URL";
-                // 启用时校验配置完整性；SearXNG 免 Key，其余必须有 Key（打码值视为已配置）
-                if (external.Enabled
-                    && external.Provider != "searxng"
-                    && external.ApiKey.Length == 0)
-                    return $"{external.Provider} 需要 API Key";
             }
-            else if (external.Enabled)
+
+            if (external.Enabled)
             {
-                // Tavily/Brave/博查留空 BaseUrl 时有官方默认端点，允许为空；SearXNG 必须填实例地址
-                if (external.Provider == "searxng")
-                    return "SearXNG 必须填写实例地址";
-                if (external.ApiKey.Length == 0)
+                // 地址必填项：SearXNG 要实例根地址，自定义通道要完整端点；
+                // 内置商用服务留空时使用官方默认端点。
+                if (ExternalSearchConfig.RequiresBaseUrl(external.Provider) && external.BaseUrl.Length == 0)
+                    return external.Provider == "custom"
+                        ? "自定义搜索通道必须填写服务地址"
+                        : "SearXNG 必须填写实例地址";
+                // Key 必填项：SearXNG 免 Key，自定义通道选填，其余必须有 Key（打码值视为已配置）。
+                if (ExternalSearchConfig.RequiresApiKey(external.Provider) && external.ApiKey.Length == 0)
                     return $"{external.Provider} 需要 API Key";
             }
             external.MaxResults = Math.Clamp(external.MaxResults, 1, ExternalSearchConfig.CeilingMaxResults);
@@ -495,8 +497,9 @@ public class ConfigController : ControllerBase
         if (dto is null) return;
 
         var current = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
-        // SearXNG 免 Key，落库清空，避免旧服务商的 Key 残留；其余服务沿用「打码值=未修改」。
-        var resolvedKey = dto.Provider == "searxng"
+        // SearXNG 免 Key，落库清空，避免旧服务商的 Key 残留；其余服务（含自定义通道）
+        // 沿用「打码值=未修改」。
+        var resolvedKey = !ExternalSearchConfig.SupportsApiKey(dto.Provider)
             ? string.Empty
             : string.IsNullOrEmpty(dto.ApiKey) && current.ApiKey.Length > 0
                 ? current.ApiKey
@@ -755,7 +758,8 @@ public class ConfigController : ControllerBase
         dto.MaxResults = Math.Clamp(dto.MaxResults, 1, ExternalSearchConfig.CeilingMaxResults);
         dto.TimeoutSeconds = Math.Clamp(dto.TimeoutSeconds, 1, ExternalSearchConfig.CeilingTimeoutSeconds);
 
-        // 探测也要求配置完整：SearXNG 必须有地址，其余必须有 Key（打码值视为未修改，回库里取）
+        // 探测也要求配置完整：地址必填项与 Key 必填项按服务商能力判断
+        //（打码值视为未修改，回库里取）。
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync(ct);
         var current = ExternalSearchJsonCodec.Decode(entity?.ExternalSearchJson);
         var apiKey = ResolveSubmittedApiKey(current.ApiKey, dto.ApiKey);
@@ -779,8 +783,10 @@ public class ConfigController : ControllerBase
         if (!ExternalSearchConfig.IsConfigured(probeConfig.ExternalSearch.Normalized()))
             return BadRequest(new
             {
-                error = dto.Provider == "searxng"
-                    ? "SearXNG 需要填写实例地址"
+                error = ExternalSearchConfig.RequiresBaseUrl(dto.Provider)
+                    ? (dto.Provider == "custom"
+                        ? "自定义搜索通道需要填写服务地址"
+                        : "SearXNG 需要填写实例地址")
                     : $"{dto.Provider} 需要填写 API Key"
             });
 

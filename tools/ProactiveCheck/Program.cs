@@ -798,8 +798,9 @@ Check(normCard.Provider == "searxng", $"未知服务商归一化回 searxng（{n
 Check(normCard.BaseUrl == "https://sx.example/" && normCard.ApiKey == "k", "实例地址与 Key 先 trim 再使用");
 Check(normCard.MaxResults == ExternalSearchConfig.CeilingMaxResults && normCard.TimeoutSeconds == 1,
     $"条数 99 → {normCard.MaxResults}（上限 10）、超时 0 → {normCard.TimeoutSeconds}（下限 1）");
-Check(ExternalSearchConfig.ProviderIds.SequenceEqual(new[] { "searxng", "tavily", "bocha", "brave" }),
-    "服务商白名单固定四家：searxng / tavily / bocha / brave");
+Check(ExternalSearchConfig.ProviderIds.SequenceEqual(
+        new[] { "searxng", "tavily", "bocha", "brave", "deepseek", "custom" }),
+    "服务商白名单：searxng / tavily / bocha / brave / deepseek / custom");
 Check(!ExternalSearchConfig.IsValidProvider("openai") && ExternalSearchConfig.IsValidProvider("bocha"),
     "白名单之外的 id 一律拒绝");
 Check(ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "searxng", BaseUrl = "https://sx" }),
@@ -814,8 +815,18 @@ Check(ExternalSearchConfig.IsConfigured(new ExternalSearchConfig
 }), "Tavily 地址 + Key 齐全当然已配置");
 Check(ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "tavily", ApiKey = "k" })
       && ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "bocha", ApiKey = "k" })
-      && ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "brave", ApiKey = "k" }),
-    "Tavily/博查/Brave 有 Key 即已配置：BaseUrl 留空走官方默认端点");
+      && ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "brave", ApiKey = "k" })
+      && ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "deepseek", ApiKey = "k" }),
+    "Tavily/博查/Brave/DeepSeek 有 Key 即已配置：BaseUrl 留空走官方默认端点");
+Check(ExternalSearchConfig.IsConfigured(new ExternalSearchConfig
+      {
+          Provider = "custom", BaseUrl = "https://search.example/api"
+      })
+      && !ExternalSearchConfig.IsConfigured(new ExternalSearchConfig { Provider = "custom" }),
+    "自定义通道必须有服务地址；Key 选填");
+Check(ExternalSearchConfig.RequiresBaseUrl("custom") && !ExternalSearchConfig.RequiresApiKey("custom")
+      && ExternalSearchConfig.RequiresApiKey("deepseek") && !ExternalSearchConfig.SupportsApiKey("searxng"),
+    "必填规则按服务商能力收敛，面板/控制器/运行时共用同一条判据");
 var secretCard = new ExternalSearchConfig
 {
     Provider = "brave", BaseUrl = "https://api.search.brave.com/res/v1/web/search", ApiKey = "super-secret"
@@ -866,9 +877,13 @@ Check(ExternalSearchProbe.Judge(WebSearchOutcome.Empty, null).Verdict == "no_res
     "连通但 0 条判 no_results（提示换词或查实例质量）");
 var (authVerdict, authDetail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
     new WebSearchFailure(WebSearchFailureKind.Auth, 403,
-        "SearXNG 实例未开启 JSON 输出（settings.yml 的 search.formats 需含 json）"));
+        "SearXNG 实例未开启 JSON 输出（settings.yml 的 search.formats 需含 json）"), "searxng");
 Check(authVerdict == "auth_failed" && authDetail.Contains("settings.yml"),
     "SearXNG 403(JSON) 给出 settings.yml 加 json 的部署修复提示，而不是笼统的鉴权失败");
+var (deepseekAuthVerdict, deepseekAuthDetail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
+    new WebSearchFailure(WebSearchFailureKind.Auth, 403, "JSON body"), "deepseek");
+Check(deepseekAuthVerdict == "auth_failed" && !deepseekAuthDetail.Contains("settings.yml"),
+    "非 SearXNG 的 403(JSON) 不误报 SearXNG 配置问题");
 var (auth401Verdict, auth401Detail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
     new WebSearchFailure(WebSearchFailureKind.Auth, 401, "auth rejected 401"));
 Check(auth401Verdict == "auth_failed" && auth401Detail.Contains("鉴权"),
@@ -1037,7 +1052,8 @@ catch (WebSearchRequestException ex) { searx403 = ex; }
 Check(searx403 is { Kind: WebSearchFailureKind.Auth, HttpStatus: 403 } && searx403.Message.Contains("JSON 输出"),
     "SearXNG 403 且响应体提到 JSON：归类为鉴权失败并点名 JSON format 未开启（部署问题而非凭据问题）");
 var (searxVerdict, searxDetail) = ExternalSearchProbe.Judge(WebSearchOutcome.Empty,
-    searx403 is null ? null : new WebSearchFailure(searx403.Kind, searx403.HttpStatus, searx403.Message));
+    searx403 is null ? null : new WebSearchFailure(searx403.Kind, searx403.HttpStatus, searx403.Message),
+    "searxng");
 Check(searxVerdict == "auth_failed" && searxDetail.Contains("settings.yml"),
     "真实 SearXNG 403(JSON) 异常穿过 Judge 得到 settings.yml 修复指引");
 // 空响应体的 403 是普通实例鉴权，不能误导用户去改 settings.yml
@@ -1200,12 +1216,14 @@ await legacyChat.ChatAsync("系统",
 Check(legacyProvider.Calls == 0 && legacyExecutor.Last?.Search == AiSearchIntent.Inherit,
     "外搜卡片关闭时不碰 Provider，行为与升级前一致");
 
-Console.WriteLine("== 2m. 独立搜索服务（外搜）：Tavily/博查/Brave Provider 契约（假 HTTP，不出网） ==");
+Console.WriteLine("== 2m. 独立搜索服务（外搜）：Tavily/博查/Brave/DeepSeek/自定义 Provider 契约（假 HTTP，不出网） ==");
 var contractHandler = new StubHttpHandler();
 using var contractHttp = new HttpClient(contractHandler);
 var tavily = new TavilyProvider(contractHttp, NullLogger<TavilyProvider>.Instance);
 var bocha = new BochaProvider(contractHttp, NullLogger<BochaProvider>.Instance);
 var brave = new BraveProvider(contractHttp, NullLogger<BraveProvider>.Instance);
+var deepseek = new DeepseekProvider(contractHttp, NullLogger<DeepseekProvider>.Instance);
+var custom = new CustomProvider(contractHttp, NullLogger<CustomProvider>.Instance);
 
 contractHandler.Body = """{"results":[{"title":"T 标题","url":"https://t.example/1","content":"正文摘要"}]}""";
 var tavilyOutcome = await tavily.SearchAsync(
@@ -1255,6 +1273,53 @@ Check(braveOutcome.Hits.Count == 1 && braveOutcome.Hits[0].Snippet == "Brave 摘
 await brave.SearchAsync(new ExternalSearchConfig { ApiKey = "k", BaseUrl = "https://gw.example/brave" }, "查询", default);
 Check(contractHandler.LastUrl!.StartsWith("https://gw.example/brave?"),
     "Brave 非空 BaseUrl 覆盖官方默认端点");
+
+contractHandler.Body = """
+    {"results":[{"title":"DS 标题","url":"https://ds.example/1",
+      "snippet":"短摘要","summary":"长摘要","content":"正文"}]}
+    """;
+var deepseekOutcome = await deepseek.SearchAsync(
+    new ExternalSearchConfig { ApiKey = "k-ds", MaxResults = 4 }, "测试 检索", default);
+Check(contractHandler.LastMethod == "POST"
+      && contractHandler.LastUrl == "https://api.deepseek.com/v1/tools/search",
+    "DeepSeek 留空 BaseUrl 时 POST 官方默认端点 /v1/tools/search");
+Check(contractHandler.LastHeaders["Authorization"] == "Bearer k-ds",
+    "DeepSeek 用 Authorization: Bearer 携带 Key");
+Check(contractHandler.LastRequestBody!.Contains("\"query\":")
+      && contractHandler.LastRequestBody.Contains("\"count\":4"),
+    "DeepSeek 请求体带 query 与 count");
+Check(deepseekOutcome.Hits.Count == 1 && deepseekOutcome.Hits[0].Snippet == "长摘要",
+    "DeepSeek 优先解析信息量更大的 summary");
+await deepseek.SearchAsync(
+    new ExternalSearchConfig { ApiKey = "k", BaseUrl = "https://api.deepseek.com" }, "查询", default);
+Check(contractHandler.LastUrl == "https://api.deepseek.com/v1/tools/search",
+    "DeepSeek BaseUrl 填站点根时自动补全 /v1/tools/search");
+await deepseek.SearchAsync(
+    new ExternalSearchConfig { ApiKey = "k", BaseUrl = "https://gw.example/ds/v1/tools/search" },
+    "查询", default);
+Check(contractHandler.LastUrl == "https://gw.example/ds/v1/tools/search",
+    "DeepSeek 完整端点原样使用，不重复拼路径");
+
+contractHandler.Body = """
+    {"results":[{"name":"C 标题","link":"https://c.example/1","summary":"C 摘要"}]}
+    """;
+var customOutcome = await custom.SearchAsync(
+    new ExternalSearchConfig { BaseUrl = "https://search.example/api", MaxResults = 2 }, "测试 检索", default);
+Check(contractHandler.LastMethod == "POST" && contractHandler.LastUrl == "https://search.example/api",
+    "自定义通道 POST 用户填写的完整端点");
+Check(!contractHandler.LastHeaders.ContainsKey("Authorization"),
+    "自定义通道不填 Key 时不发鉴权头");
+Check(contractHandler.LastRequestBody!.Contains("\"query\":")
+      && contractHandler.LastRequestBody.Contains("\"count\":2"),
+    "自定义通道请求体带 query 与 count");
+Check(customOutcome.Hits.Count == 1 && customOutcome.Hits[0].Title == "C 标题"
+      && customOutcome.Hits[0].Url == "https://c.example/1"
+      && customOutcome.Hits[0].Snippet == "C 摘要",
+    "自定义通道兼容 name/link/summary 别名");
+await custom.SearchAsync(
+    new ExternalSearchConfig { BaseUrl = "https://search.example/api", ApiKey = "k-custom" }, "查询", default);
+Check(contractHandler.LastHeaders["Authorization"] == "Bearer k-custom",
+    "自定义通道填了 Key 则用 Bearer 发送");
 
 Console.WriteLine("== 3g. 面板口令哈希（PBKDF2 迭代升级与旧格式兼容） ==");
 var panelHash = PanelPasswordHasher.Hash("s3cret-pass");
@@ -1369,6 +1434,24 @@ var badManifestJson = manifestJson.Replace(
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "bad", StringComparison.Ordinal);
 Check(UpdateManifest.TryParse(Encoding.UTF8.GetBytes(badManifestJson), out _) is null,
     "SHA256 非法的 update.json 被拒绝");
+var dateManifestJson = manifestJson.Replace(
+    "\"version\":\"2.0.5\"", "\"version\":\"261109\"", StringComparison.Ordinal);
+Check(UpdateManifest.TryParse(Encoding.UTF8.GetBytes(dateManifestJson), out _) is not null,
+    "日期版本清单（261109）可解析：AppVersion 负责补齐 System.Version 所需的 major.minor");
+
+Check(AppVersion.Normalize("v261109.0.0") == "261109"
+      && AppVersion.Normalize("261109") == "261109"
+      && AppVersion.Normalize("2.4.0") == "2.4.0",
+    "版本归一化：日期版本去掉补零段，旧格式 x.y.z 保持不变");
+Check(AppVersion.TryParse("261109", out var dateVersion) && dateVersion == new Version(261109, 0, 0),
+    "纯日期版本 261109 补齐后可比较（System.Version 至少要求 major.minor）");
+Check(AppVersion.TryParse("v2.4.0", out var legacyVersion) && legacyVersion == new Version(2, 4, 0)
+      && !AppVersion.TryParse("not-a-version", out _),
+    "旧格式仍可解析，非法版本号明确失败");
+Check(AppVersion.Normalize("261109.1.0") == "261109.1",
+    "同日再发布追加序号时保留 .1（261109.1.0 → 261109.1）");
+Check(AppVersion.Current != "unknown" && !AppVersion.Current.Contains('+'),
+    $"当前构建版本可展示且不泄漏提交元数据（{AppVersion.Current}）");
 
 Console.WriteLine("== 3i. Linux 更新文件替换（运行中的可执行文件） ==");
 if (!OperatingSystem.IsLinux())

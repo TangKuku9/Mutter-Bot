@@ -1,11 +1,11 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Mutter.Core;
 using Mutter.Web.Models;
 
 namespace Mutter.Web.Services;
@@ -581,17 +581,12 @@ public sealed class UpdateService
         return value is "app" or "full" ? value : null;
     }
 
-    private static string GetCurrentVersion() =>
-        Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown";
+    private static string GetCurrentVersion() => AppVersion.Current;
 
-    private static string NormalizeVersion(string value) =>
-        value.Trim().TrimStart('v', 'V');
+    private static string NormalizeVersion(string value) => AppVersion.Normalize(value);
 
-    private static Version? ParseVersion(string value)
-    {
-        var core = NormalizeVersion(value).Split('-', '+')[0];
-        return Version.TryParse(core, out var parsed) ? parsed : null;
-    }
+    private static Version? ParseVersion(string value) =>
+        AppVersion.TryParse(value, out var parsed) ? parsed : null;
 
     private static string GetAppDirectory() =>
         AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
