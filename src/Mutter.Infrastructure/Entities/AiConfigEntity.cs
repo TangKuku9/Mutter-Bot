@@ -37,4 +37,8 @@ public class AiConfigEntity
 
     /// <summary>图文组合的验证时间。</summary>
     public DateTime? WebSearchImageVerifiedAt { get; set; }
+
+    /// <summary>独立搜索服务整卡配置（JSON 单列）：Enabled/Provider/BaseUrl/Key/…。
+    /// Key 存在这个 JSON 里，与主 ApiKey 同为敏感字段，出入面板一律打码。</summary>
+    public string ExternalSearchJson { get; set; } = string.Empty;
 }

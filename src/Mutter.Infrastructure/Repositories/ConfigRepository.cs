@@ -41,7 +41,8 @@ public class ConfigRepository : IConfigRepository
             WebSearchVerifiedAt = entity.WebSearchVerifiedAt,
             WebSearchImageMode = entity.WebSearchImageMode,
             WebSearchImageCapable = entity.WebSearchImageCapable,
-            WebSearchImageVerifiedAt = entity.WebSearchImageVerifiedAt
+            WebSearchImageVerifiedAt = entity.WebSearchImageVerifiedAt,
+            ExternalSearch = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson)
         };
     }
 
@@ -90,7 +91,8 @@ public class ConfigRepository : IConfigRepository
                 WebSearchVerifiedAt = config.WebSearchVerifiedAt,
                 WebSearchImageMode = config.WebSearchImageMode,
                 WebSearchImageCapable = config.WebSearchImageCapable,
-                WebSearchImageVerifiedAt = config.WebSearchImageVerifiedAt
+                WebSearchImageVerifiedAt = config.WebSearchImageVerifiedAt,
+                ExternalSearchJson = ExternalSearchJsonCodec.Encode(config.ExternalSearch)
             };
             _dbContext.AiConfigs.Add(entity);
         }
@@ -115,6 +117,7 @@ public class ConfigRepository : IConfigRepository
             entity.WebSearchImageMode = config.WebSearchImageMode;
             entity.WebSearchImageCapable = config.WebSearchImageCapable;
             entity.WebSearchImageVerifiedAt = config.WebSearchImageVerifiedAt;
+            entity.ExternalSearchJson = ExternalSearchJsonCodec.Encode(config.ExternalSearch);
         }
 
         await _dbContext.SaveChangesAsync(ct);
