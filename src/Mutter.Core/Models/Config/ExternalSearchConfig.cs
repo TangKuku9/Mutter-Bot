@@ -12,7 +12,7 @@ public record ExternalSearchConfig
     /// <summary>本卡片自身开关；null 表示从未配置过（区别于显式关闭）。</summary>
     public bool? Enabled { get; set; }
 
-    /// <summary>搜索服务商 id：searxng / tavily / bocha / brave。</summary>
+    /// <summary>搜索服务商 id：searxng / tavily / bocha / brave / deepseek / custom。</summary>
     public string Provider { get; set; } = "searxng";
 
     /// <summary>搜索服务 API 地址。SearXNG 必须是开了 JSON format 的实例地址。</summary>
@@ -36,18 +36,29 @@ public record ExternalSearchConfig
     /// <summary>「测试搜索」成功时间；为空表示未测/未通过。</summary>
     public DateTime? VerifiedAt { get; set; }
 
-    public static readonly string[] ProviderIds = ["searxng", "tavily", "bocha", "brave"];
+    public static readonly string[] ProviderIds =
+        ["searxng", "tavily", "bocha", "brave", "deepseek", "custom"];
 
     public static bool IsValidProvider(string? provider) =>
         provider is not null && ProviderIds.Contains(provider);
 
+    /// <summary>该服务商必须填 API Key：SearXNG 免 Key，自定义通道 Key 选填。</summary>
+    public static bool RequiresApiKey(string? provider) => provider is not ("searxng" or "custom");
+
+    /// <summary>该服务商必须填服务地址：SearXNG 要实例根地址，自定义通道要完整端点。</summary>
+    public static bool RequiresBaseUrl(string? provider) => provider is "searxng" or "custom";
+
+    /// <summary>该服务商是否使用 Key（SearXNG 不使用，面板不回显也不保留）。</summary>
+    public static bool SupportsApiKey(string? provider) => provider is not "searxng";
+
     /// <summary>
-    /// SearXNG 必须填实例地址且免 Key；其余服务可使用官方默认端点，但必须有 Key。
-    /// 抽成纯函数供自检、面板校验与运行时共用，避免三处判据漂移。
+    /// SearXNG 必须有实例地址且免 Key；内置商用服务有官方默认端点但必须有 Key；
+    /// 自定义通道必须有端点，Key 选填。抽成纯函数供自检、面板校验与运行时共用，
+    /// 避免多处判据漂移。
     /// </summary>
     public static bool IsConfigured(ExternalSearchConfig config) =>
-        (config.Provider != "searxng" || !string.IsNullOrWhiteSpace(config.BaseUrl))
-        && (config.Provider == "searxng" || !string.IsNullOrWhiteSpace(config.ApiKey));
+        (!RequiresBaseUrl(config.Provider) || !string.IsNullOrWhiteSpace(config.BaseUrl))
+        && (!RequiresApiKey(config.Provider) || !string.IsNullOrWhiteSpace(config.ApiKey));
 
     public ExternalSearchConfig Normalized() => this with
     {

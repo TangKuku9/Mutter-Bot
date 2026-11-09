@@ -1,4 +1,3 @@
-using System.Reflection;
 using Microsoft.AspNetCore.Mvc;
 using Mutter.Core.Interfaces;
 using Mutter.Web.Models;
@@ -26,7 +25,8 @@ public class StatusController : ControllerBase
 
         return Task.FromResult<ActionResult<BotStatusDto>>(Ok(new BotStatusDto
         {
-            Version = Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown",
+            // AssemblyInformationalVersion 带提交元数据（261109+hash），展示时归一化为 261109。
+            Version = Mutter.Core.AppVersion.Current,
             IsConnected = _connection.IsConnected,
             BotQQ = _apiService.BotId,
             BotNickname = _apiService.BotName,

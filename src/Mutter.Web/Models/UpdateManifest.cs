@@ -53,7 +53,9 @@ public sealed class UpdateManifest
             return false;
         }
 
-        if (!System.Version.TryParse(Version.Trim().TrimStart('v', 'V'), out _))
+        // 日期版本（261109）在清单里是纯数字；交给 AppVersion 补齐后再校验，
+        // 旧格式 x.y.z 不受影响。
+        if (!Mutter.Core.AppVersion.TryParse(Version, out _))
         {
             error = $"更新清单版本号无效：{Version}";
             return false;

@@ -326,7 +326,9 @@ npm run build
 ### 7.6 版本号与 Release（维护者）
 
 - **版本号唯一来源**：仓库根目录 `Directory.Build.props` 的 `<Version>`。`web/package.json` 的 `version` 必须同步，CI 会校验两者一致；不要在代码中另写版本常量。
-- **发布标签**：在 `main` 的发布提交上打 `vX.Y.Z` 标签并推送。标签必须与 `<Version>` 完全对应（`v2.0.0` ↔ `2.0.0`），发布流水线会先校验再打包。
+- **版本命名**：发布版本采用日期命名 `YYMMDD`（例如 2026-11-09 发布即 `261109`）；同日需要再次发布时追加序号 `.1`、`.2`。不要再使用 `x.y.z` 语义化版本。
+- **发布标签**：在 `main` 的发布提交上打 `vYYMMDD` 标签并推送。标签必须与 `<Version>` 完全对应（`v261109` ↔ `261109`），发布流水线会先校验再打包。
+- **首次日期版本的升级说明**：旧版更新器用 `System.Version` 解析清单与标签，无法识别纯日期 `261109`。从 2.4.0 及更早版本升级到第一个日期版本时，面板内一键更新不可用，发布说明必须提示手动下载安装；从该版本起，新旧格式（`261109` / `261109.0.0` / 旧 `x.y.z`）均由 `AppVersion` 统一归一化。
 - **产物**：工作流在 Windows 与 Linux runner 上分别构建 `win-x64`、`linux-x64` 的 self-contained 与 framework-dependent 包，附带 `SHA256SUMS.txt`。自包含包额外生成 `*-app.zip` 应用层包和 `update.json` 清单；配置了 `UPDATE_SIGNING_KEY` 时还会生成 `update.json.sig`。工作流创建 **draft** Release。
 - **应用层包**：CI 用 `tools/packaging/make_update_assets.py` 对比发布目录与 .NET 运行时包，只打包程序文件；`update.json` 记录运行时版本与 SHA256。修改打包逻辑时必须保证运行时文件不被误归入应用层，否则安装校验会拒绝。
 - **签名密钥**：镜像/自定义更新源依赖 ECDSA P-256 签名。私钥只放在 GitHub Actions Secret `UPDATE_SIGNING_KEY`，公钥由用户在面板填写；不要把私钥提交到仓库或写进 `appsettings.json`。
