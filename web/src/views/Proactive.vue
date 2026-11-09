@@ -44,7 +44,7 @@
         </template>
       </el-alert>
 
-      <el-descriptions :column="4" border size="small">
+      <el-descriptions :column="singleColumn ? 1 : 4" border size="small">
         <el-descriptions-item label="启动以来收到">
           全量 {{ status.fullModeArrived ?? 0 }} 条 / @ {{ status.atModeArrived ?? 0 }} 条
         </el-descriptions-item>
@@ -53,7 +53,7 @@
         <el-descriptions-item label="静默时段">{{ quietText }}</el-descriptions-item>
       </el-descriptions>
 
-      <el-descriptions :column="4" border size="small" style="margin-top: 10px">
+      <el-descriptions :column="singleColumn ? 1 : 4" border size="small" style="margin-top: 10px">
         <el-descriptions-item label="今日评估">{{ status.todayEvaluations ?? '-' }}</el-descriptions-item>
         <el-descriptions-item label="今日已发言">{{ status.todaySent ?? '-' }}</el-descriptions-item>
         <el-descriptions-item label="今日带记忆">{{ status.todayMemoryInjections ?? '-' }} 次</el-descriptions-item>
@@ -255,6 +255,7 @@ import { subscribeRealtime } from '../realtime'
 import { LatestRequest } from '../latestRequest'
 import { useUnsavedChanges } from '../useUnsavedChanges'
 import api from '../api'
+import { useMediaQuery } from '../useMediaQuery'
 import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
@@ -284,6 +285,7 @@ const outcomeMap = {
 const outcomeOptions = Object.entries(outcomeMap).map(([value, v]) => ({ value, label: v[0] }))
 
 const form = ref(emptyForm())
+const singleColumn = useMediaQuery('(max-width: 600px)')
 const status = ref({})
 const ceilings = ref({ groupPerMinute: 20, groupPerDay: 1000, accountPerMinute: 60, attachedImages: 10 })
 const logs = ref([])
@@ -585,5 +587,5 @@ onUnmounted(disconnectHub)
 <style scoped>
 .card-head { display: flex; justify-content: space-between; align-items: center; }
 .master { display: flex; align-items: center; gap: 12px; }
-.hint { color: #909399; font-size: 12px; margin-left: 10px; }
+.hint { color: var(--el-text-color-secondary); font-size: 12px; margin-left: 10px; }
 </style>

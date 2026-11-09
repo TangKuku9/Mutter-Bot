@@ -1,23 +1,26 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { panelPages } from './panelNavigation'
 
 // hash 路由：无需服务端 SPA fallback 配置
-const routes = [
-  { path: '/', redirect: '/dashboard' },
-  { path: '/dashboard', component: () => import('./views/Dashboard.vue'), meta: { title: '仪表盘' } },
-  { path: '/chat', component: () => import('./views/ChatHistory.vue'), meta: { title: '聊天记录' } },
-  { path: '/ai-stats', component: () => import('./views/AiStats.vue'), meta: { title: 'AI 统计' } },
-  { path: '/ai-settings', component: () => import('./views/AiSettings.vue'), meta: { title: 'AI 设置' } },
-  { path: '/groups', component: () => import('./views/Groups.vue'), meta: { title: '群管理' } },
-  { path: '/proactive', component: () => import('./views/Proactive.vue'), meta: { title: '择机发言' } },
-  { path: '/private-chats', component: () => import('./views/PrivateChats.vue'), meta: { title: '私聊管理' } },
-  { path: '/logs', component: () => import('./views/Logs.vue'), meta: { title: '实时日志' } },
-  { path: '/account', component: () => import('./views/Account.vue'), meta: { title: '账号中心' } },
-  { path: '/about', component: () => import('./views/About.vue'), meta: { title: '关于' } }
-]
+const components = {
+  '/dashboard': () => import('./views/Dashboard.vue'),
+  '/chat': () => import('./views/ChatHistory.vue'),
+  '/ai-stats': () => import('./views/AiStats.vue'),
+  '/ai-settings': () => import('./views/AiSettings.vue'),
+  '/groups': () => import('./views/Groups.vue'),
+  '/proactive': () => import('./views/Proactive.vue'),
+  '/private-chats': () => import('./views/PrivateChats.vue'),
+  '/logs': () => import('./views/Logs.vue'),
+  '/account': () => import('./views/Account.vue'),
+  '/about': () => import('./views/About.vue')
+}
 
 const router = createRouter({
   history: createWebHashHistory(),
-  routes
+  routes: [
+    { path: '/', redirect: '/dashboard' },
+    ...panelPages.map(page => ({ path: page.path, component: components[page.path], meta: page }))
+  ]
 })
 
 router.afterEach((to) => {

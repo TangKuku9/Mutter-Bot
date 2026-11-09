@@ -12,7 +12,7 @@
         <el-select v-model="selectedPresetId" placeholder="选择已保存的预设" clearable style="width: 260px">
           <el-option v-for="p in presets" :key="p.id" :label="p.name" :value="p.id">
             <span>{{ p.name }}</span>
-            <span style="float: right; color: #909399; font-size: 12px">{{ p.modelName || '未填模型' }}</span>
+            <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px">{{ p.modelName || '未填模型' }}</span>
           </el-option>
         </el-select>
         <el-button style="margin-left: 12px" :disabled="!selectedPresetId" :loading="applyingPreset"
@@ -30,7 +30,7 @@
         <el-select v-model="presetId" placeholder="选择服务商自动填充" clearable style="width: 320px" @change="applyPreset">
           <el-option v-for="p in form.availableProviders" :key="p.id" :label="p.name" :value="p.id">
             <span>{{ p.name }}</span>
-            <span style="float: right; color: #909399; font-size: 12px">{{ p.defaultModel }}</span>
+            <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px">{{ p.defaultModel }}</span>
           </el-option>
         </el-select>
         <ParamHelpButton :label="helpLabel('presetId')" @click="openHelp('presetId')" />
@@ -52,7 +52,7 @@
         <el-select v-model="form.personality" clearable placeholder="选择角色人设" style="width: 320px">
           <el-option v-for="c in form.availableCharacters" :key="c.name" :label="c.displayName" :value="c.name">
             <span>{{ c.displayName }}<el-tag v-if="c.isCustom" size="small" type="warning" style="margin-left: 6px">自定义</el-tag></span>
-            <span style="float: right; color: #909399; font-size: 12px">{{ c.description }}</span>
+            <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px">{{ c.description }}</span>
           </el-option>
         </el-select>
         <el-button style="margin-left: 12px" @click="manageDialog = true">管理人设</el-button>
@@ -378,7 +378,7 @@
           </div>
           <div v-for="item in probeProgress" :key="item.shape" class="probe-progress-item">
             <el-icon v-if="!item.done" class="is-loading"><Loading /></el-icon>
-            <el-icon v-else :color="item.status === 'verified' ? '#67c23a' : '#909399'"><CircleCheck /></el-icon>
+            <el-icon v-else :color="item.status === 'verified' ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'"><CircleCheck /></el-icon>
             <div class="probe-progress-main">
               <code>{{ item.shape }}</code>
               <div class="probe-desc">{{ item.description }}</div>
@@ -1315,13 +1315,13 @@ onMounted(async () => {
 <style scoped>
 .card-head { display: flex; justify-content: space-between; align-items: center; }
 /* 预设提示是选中后才知道的结果，留在原地更醒目；width 100% 保证它独占一行 */
-.hint { width: 100%; color: #909399; font-size: 12px; margin-top: 4px; }
+.hint { width: 100%; color: var(--el-text-color-secondary); font-size: 12px; margin-top: 4px; }
 /* 整行控件给右边的「?」留出位置，否则宽度占满会把按钮挤到下一行 */
 .el-form-item__content > .el-input,
 .el-form-item__content > .el-textarea { width: calc(100% - 32px); }
 .probe-summary { margin-bottom: 12px; font-size: 13px; line-height: 1.6; }
-.probe-desc { color: #909399; font-size: 12px; }
-.probe-footnote { color: #909399; font-size: 12px; line-height: 1.6; margin-top: 10px; }
+.probe-desc { color: var(--el-text-color-secondary); font-size: 12px; }
+.probe-footnote { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; margin-top: 10px; }
 .probe-progress { display: flex; flex-direction: column; gap: 8px; }
 .probe-progress-item {
   display: flex; align-items: center; gap: 10px;
@@ -1337,7 +1337,7 @@ onMounted(async () => {
 .es-head { display: flex; align-items: flex-start; gap: 12px; }
 .es-head-main { flex: 1; min-width: 0; }
 .es-title { font-weight: 600; font-size: 13px; color: var(--el-text-color-primary); }
-.es-sub { display: block; color: #909399; font-size: 12px; line-height: 1.6; margin-top: 4px; }
+.es-sub { display: block; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; margin-top: 4px; }
 .es-field { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .es-label { flex: none; width: 84px; text-align: right; color: var(--el-text-color-regular); font-size: 13px; }
 .es-inline-label { color: var(--el-text-color-regular); font-size: 13px; }
@@ -1349,8 +1349,15 @@ onMounted(async () => {
 .es-hit { display: block; padding: 8px 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; text-decoration: none; }
 .es-hit:hover { border-color: var(--el-color-primary-light-5); background: var(--el-fill-color-light); }
 .es-hit-title {
-  display: block; color: var(--el-color-primary); font-size: 13px;
+  display: block; color: var(--panel-accent-text); font-size: 13px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.es-hit-url { display: block; color: #909399; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.es-hit-url { display: block; color: var(--el-text-color-secondary); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) {
+  .es-box { padding: 14px 12px; }
+  .es-label { width: 100%; text-align: left; }
+  .es-hint-inset { padding-left: 0; }
+  .es-foot { flex-wrap: wrap; }
+  .es-head { gap: 8px; }
+}
 </style>

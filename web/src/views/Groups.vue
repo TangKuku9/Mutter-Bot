@@ -80,7 +80,7 @@
           <el-select v-model="form.activeCharacter" clearable placeholder="留空用全局默认" style="width: 260px">
             <el-option v-for="c in characters" :key="c.name" :label="c.displayName" :value="c.name">
               <span>{{ c.displayName }}<el-tag v-if="c.isCustom" size="small" type="warning" style="margin-left: 6px">自定义</el-tag></span>
-              <span style="float: right; color: #909399; font-size: 12px">{{ c.name }}</span>
+              <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px">{{ c.name }}</span>
             </el-option>
           </el-select>
           <ParamHelpButton :label="helpLabel('activeCharacter')" @click="openHelp('activeCharacter')" />
@@ -366,7 +366,7 @@ onMounted(load)
 .card-head { display: flex; justify-content: space-between; align-items: center; }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; }
 /* 摘要读取失败与上次更新是当前状态，不是参数说明 */
-.sub-hint { color: #909399; font-size: 12px; line-height: 1.5; }
+.sub-hint { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }
 /* 整行控件给右边的「?」留出位置，否则宽度占满会把按钮挤到下一行 */
 .el-form-item__content > .el-input,
 .el-form-item__content > .el-textarea { width: calc(100% - 32px); }
