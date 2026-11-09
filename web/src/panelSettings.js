@@ -3,6 +3,7 @@ import { reactive, watch } from 'vue'
 const STORAGE_KEY = 'mutter-panel-settings'
 
 export const colorPresets = [
+  { name: 'Mutter 靛紫', value: '#4f46e5' },
   { name: '拂晓蓝', value: '#409eff' },
   { name: '松石绿', value: '#13c2c2' },
   { name: '薄荷绿', value: '#67c23a' },
@@ -11,7 +12,7 @@ export const colorPresets = [
   { name: '罗兰紫', value: '#8b5cf6' }
 ]
 
-const DEFAULTS = { primaryColor: '#409eff', darkMode: false, compact: false }
+const DEFAULTS = { primaryColor: '#4f46e5', darkMode: false, compact: false }
 
 const load = () => {
   try {
