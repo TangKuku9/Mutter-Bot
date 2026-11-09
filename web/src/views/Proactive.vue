@@ -1,83 +1,21 @@
 <template>
   <div>
-    <el-card shadow="never">
-      <template #header>
-        <div class="card-head">
-          <b>择机主动发言</b>
-          <div>
-            <el-tag :type="status.enabled ? 'success' : 'info'" size="small" style="margin-right: 8px">
-              {{ status.enabled ? '运行中' : '已关闭' }}
-            </el-tag>
-            <el-button size="small" @click="loadAll">刷新</el-button>
-          </div>
-        </div>
+    <ProactiveOverview v-model:enabled="form.enabled" :config="savedConfig" :status="status"
+      :dirty="dirty" :saving="saving" :refreshing="refreshing" :stale="statusStale"
+      @change="markDirty" @save="save" @refresh="loadAll" @help="openHelp('enabled')" />
+
+    <el-alert v-if="form.webSearchEnabled && status.aiWebSearchEnabled === false" type="warning"
+      :closable="false" show-icon style="margin-top: 16px">
+      <template #title>
+        择机联网核实已打开，但「AI 设置」里没有开启联网搜索，改写阶段不会真的检索。
       </template>
-
-      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 14px">
-        <template #title>
-          机器人在没被 @ 时围观群聊，攒满一个窗口后由 AI 判断要不要自然接一句。
-          总开关是唯一熔断点：关掉后不再采集消息、不再调用 AI、不再主动发言。
-        </template>
-      </el-alert>
-
-      <div class="master">
-        <el-switch v-model="form.enabled" active-text="启用择机发言" size="large" @change="markDirty" />
-        <ParamHelpButton :label="helpLabel('enabled')" @click="openHelp('enabled')" />
-        <el-button v-if="dirty" size="small" type="warning" plain @click="save">保存后生效</el-button>
-      </div>
-
-      <el-alert v-if="status.deliveryHint" :type="status.fullModeArrived > 0 ? 'success' : 'warning'"
-        :closable="false" show-icon style="margin-bottom: 12px">
-        <template #title>{{ status.deliveryHint }}</template>
-      </el-alert>
-
-      <el-alert v-if="form.webSearchEnabled && status.aiWebSearchEnabled === false" type="warning"
-        :closable="false" show-icon style="margin-bottom: 12px">
-        <template #title>
-          择机联网核实已打开，但「AI 设置」里没有开启联网搜索，改写阶段不会真的检索。
-        </template>
-      </el-alert>
-      <el-alert v-else-if="form.webSearchEnabled && status.aiWebSearchConfigured === false" type="warning"
-        :closable="false" show-icon style="margin-bottom: 12px">
-        <template #title>
-          联网搜索已开启，但还没有可用的搜索通道：请回「AI 设置」完成探测并选用，否则改写会退化成普通请求。
-        </template>
-      </el-alert>
-
-      <el-descriptions :column="singleColumn ? 1 : 4" border size="small">
-        <el-descriptions-item label="启动以来收到">
-          全量 {{ status.fullModeArrived ?? 0 }} 条 / @ {{ status.atModeArrived ?? 0 }} 条
-        </el-descriptions-item>
-        <el-descriptions-item label="围观落库">{{ observeCount }} 条</el-descriptions-item>
-        <el-descriptions-item label="Bot 插话">{{ status.todaySent ?? '-' }} 条（今日）</el-descriptions-item>
-        <el-descriptions-item label="静默时段">{{ quietText }}</el-descriptions-item>
-      </el-descriptions>
-
-      <el-descriptions :column="singleColumn ? 1 : 4" border size="small" style="margin-top: 10px">
-        <el-descriptions-item label="今日评估">{{ status.todayEvaluations ?? '-' }}</el-descriptions-item>
-        <el-descriptions-item label="今日已发言">{{ status.todaySent ?? '-' }}</el-descriptions-item>
-        <el-descriptions-item label="今日带记忆">{{ status.todayMemoryInjections ?? '-' }} 次</el-descriptions-item>
-        <el-descriptions-item label="参与群数">{{ status.participatingGroups ?? '-' }}</el-descriptions-item>
-        <el-descriptions-item label="待评估窗口">{{ pendingText }}</el-descriptions-item>
-      </el-descriptions>
-
-      <el-table v-if="status.quotas && status.quotas.length" :data="status.quotas" size="small" style="margin-top: 12px">
-        <el-table-column label="群" min-width="140">
-          <template #default="{ row }">{{ row.name || row.groupId }}</template>
-        </el-table-column>
-        <el-table-column prop="usedToday" label="今日主动" width="100" />
-        <el-table-column prop="quota" label="每日上限" width="100" />
-        <el-table-column prop="sentLastMinute" label="本分钟" width="90" />
-        <el-table-column prop="minuteQuota" label="分钟上限" width="100" />
-        <el-table-column label="接收状态" width="110">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.rejected ? 'danger' : 'success'">
-              {{ row.rejected ? '已被关闭' : '正常' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
+    </el-alert>
+    <el-alert v-else-if="form.webSearchEnabled && status.aiWebSearchConfigured === false" type="warning"
+      :closable="false" show-icon style="margin-top: 16px">
+      <template #title>
+        联网搜索已开启，但还没有可用的搜索通道：请回「AI 设置」完成探测并选用，否则改写会退化成普通请求。
+      </template>
+    </el-alert>
 
     <el-card shadow="never" style="margin-top: 16px">
       <template #header>
@@ -86,7 +24,7 @@
           <el-button size="small" @click="openHelp('enabled')">参数说明</el-button>
         </div>
       </template>
-      <el-form :model="form" label-width="160px" style="max-width: 760px">
+      <el-form :model="form" :disabled="saving" label-width="160px" style="max-width: 760px">
         <el-divider content-position="left">时机</el-divider>
         <el-form-item label="攒批窗口（秒）">
           <el-input-number v-model="form.windowSeconds" :min="15" :max="600" :step="5" @change="markDirty" />
@@ -173,7 +111,7 @@
         </el-form-item>
 
         <el-form-item>
-          <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
+          <el-button type="primary" :loading="saving" :disabled="!savedConfig || refreshing" @click="save">保存配置</el-button>
           <span v-if="form.updatedAt" class="hint">上次更新 {{ fmt(form.updatedAt) }}</span>
         </el-form-item>
       </el-form>
@@ -249,16 +187,16 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { subscribeRealtime } from '../realtime'
 import { LatestRequest } from '../latestRequest'
 import { useUnsavedChanges } from '../useUnsavedChanges'
 import api from '../api'
-import { useMediaQuery } from '../useMediaQuery'
 import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
+import ProactiveOverview from '../components/ProactiveOverview.vue'
 
 const outcomeMap = {
   sent_passive: ['已插话（被动）', 'success'],
@@ -285,8 +223,10 @@ const outcomeMap = {
 const outcomeOptions = Object.entries(outcomeMap).map(([value, v]) => ({ value, label: v[0] }))
 
 const form = ref(emptyForm())
-const singleColumn = useMediaQuery('(max-width: 600px)')
+const savedConfig = ref(null)
 const status = ref({})
+const statusStale = ref(false)
+const refreshing = ref(false)
 const ceilings = ref({ groupPerMinute: 20, groupPerDay: 1000, accountPerMinute: 60, attachedImages: 10 })
 const logs = ref([])
 const logTotal = ref(0)
@@ -296,16 +236,6 @@ const filterOutcome = ref('')
 const saving = ref(false)
 const logsLoading = ref(false)
 const dirty = ref(false)
-
-const observeCount = computed(() => {
-  const rows = status.value.todayByOutcome || []
-  return rows.reduce((n, r) => n + r.count, 0)
-})
-
-const quietText = computed(() => {
-  const a = form.value.quietStartHour, b = form.value.quietEndHour
-  return a === b ? '不静默' : `${a}:00 - ${b}:00`
-})
 
 const HELP_ORDER = [
   'enabled',
@@ -469,13 +399,6 @@ const {
   lines: helpLines, current: helpCurrent, label: helpLabel, open: openHelp, step: stepHelp
 } = useParamHelp(HELP, HELP_ORDER, () => form.value)
 
-const pendingText = computed(() => {
-  const w = status.value.pendingWindows || []
-  return w.length
-    ? w.map((x) => `${x.name || `${x.groupId.slice(0, 6)}…`}:${x.pending}`).join('  ')
-    : '无'
-})
-
 function emptyForm() {
   return {
     enabled: false, windowSeconds: 60, windowMaxMessages: 12, cooldownMinutes: 45,
@@ -497,7 +420,11 @@ const logRequest = new LatestRequest()
 const statusRequest = new LatestRequest()
 
 const loadConfig = async () => {
+  if (dirty.value) return
   const { data } = await api.get('/proactive/config')
+  // 刷新期间也可能开始编辑，返回的配置不能覆盖本地草稿。
+  savedConfig.value = { ...emptyForm(), ...data }
+  if (dirty.value) return
   form.value = { ...emptyForm(), ...data }
   if (data.ceilingGroupPerMinute) {
     ceilings.value = {
@@ -511,7 +438,15 @@ const loadConfig = async () => {
 }
 
 const loadStatus = async () => {
-  await statusRequest.run((signal) => api.get('/proactive/status', { signal }), ({ data }) => { status.value = data })
+  try {
+    await statusRequest.run((signal) => api.get('/proactive/status', { signal }), ({ data }) => {
+      status.value = data
+      statusStale.value = false
+    })
+  } catch (error) {
+    if (!disposed) statusStale.value = true
+    throw error
+  }
 }
 
 const loadLogs = async () => {
@@ -532,11 +467,13 @@ const reloadLogs = () => { page.value = 1; loadLogs() }
 const onPage = (p) => { page.value = p; loadLogs() }
 
 const save = async () => {
+  if (saving.value || refreshing.value || !savedConfig.value) return
   saving.value = true
   try {
     const { data } = await api.put('/proactive/config', form.value)
     ElMessage.success(data.message)
     form.value = { ...emptyForm(), ...data.config }
+    savedConfig.value = { ...form.value }
     dirty.value = false
     await loadStatus()
   } finally {
@@ -545,7 +482,13 @@ const save = async () => {
 }
 
 const loadAll = async () => {
-  await Promise.all([loadConfig(), loadStatus(), loadLogs()])
+  if (refreshing.value) return
+  refreshing.value = true
+  try {
+    // 等所有刷新请求结束再开放保存；某个请求失败也不提前解除保护。
+    await Promise.allSettled([loadConfig(), loadStatus(), loadLogs()])
+  }
+  finally { refreshing.value = false }
 }
 
 // 后端每写一行决策留痕（说与不说都算）就推一次 ProactiveEvaluated，
@@ -586,6 +529,5 @@ onUnmounted(disconnectHub)
 
 <style scoped>
 .card-head { display: flex; justify-content: space-between; align-items: center; }
-.master { display: flex; align-items: center; gap: 12px; }
 .hint { color: var(--el-text-color-secondary); font-size: 12px; margin-left: 10px; }
 </style>
