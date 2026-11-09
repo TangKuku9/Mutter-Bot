@@ -251,27 +251,10 @@
     }
 
     .brand { display: flex; align-items: center; gap: 12px; }
-    .brand-mark {
-      display: grid;
-      place-items: center;
-      width: 42px;
-      height: 42px;
-      flex: none;
-      border-radius: 13px;
-      color: #ffffff;
-      background: linear-gradient(145deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.05));
-      border: 1px solid rgba(255, 255, 255, 0.18);
-      box-shadow: 0 10px 26px rgba(3, 7, 18, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2);
-      -webkit-backdrop-filter: blur(10px);
-      backdrop-filter: blur(10px);
-    }
-    .brand-mark img { width: 22px; height: 22px; display: block; }
-    .brand-name {
-      font-size: 24px;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      line-height: 1;
-    }
+    .brand-lockup { width: 160px; height: 40px; display: block; flex: none; }
+    .brand-lockup-dark { display: none; }
+    html.dark .brand-lockup-light { display: none; }
+    html.dark .brand-lockup-dark { display: block; }
     .brand-sub {
       margin-left: 2px;
       padding-left: 14px;
@@ -356,10 +339,9 @@
       flex: none;
       border-radius: 12px;
       color: #ffffff;
-      background: linear-gradient(140deg, rgba(129, 140, 248, 0.95), rgba(34, 211, 238, 0.8));
-      box-shadow: 0 8px 22px rgba(56, 189, 248, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+      background: #4f46e5;
     }
-    .bot-avatar svg { width: 20px; height: 20px; }
+    .bot-avatar img { width: 34px; height: 34px; display: block; }
     .chat-name { display: block; font-size: 14px; font-weight: 600; letter-spacing: 0.01em; }
     .chat-state {
       display: flex;
@@ -566,16 +548,7 @@
     }
 
     .mobile-brand { display: none; align-items: center; gap: 11px; margin-bottom: 26px; }
-    .mobile-brand .brand-mark {
-      width: 40px;
-      height: 40px;
-      border-radius: 12px;
-      border: 0;
-      color: #ffffff;
-      background: linear-gradient(140deg, #4f46e5, #7c3aed);
-      box-shadow: 0 10px 24px -8px rgba(79, 70, 229, 0.8);
-    }
-    .mobile-brand .brand-name { color: var(--text); font-size: 20px; }
+    .mobile-brand .brand-lockup { width: 144px; height: 36px; }
     .mobile-brand .brand-sub {
       color: var(--muted);
       border-color: var(--card-border);
@@ -928,10 +901,7 @@
 
       <div class="visual-inner">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true">
-            <img src="/logo-mark-mono-white.svg" alt="" />
-          </span>
-          <span class="brand-name">Mutter</span>
+          <img src="/logo-lockup-mono-reverse.svg" alt="Mutter" class="brand-lockup" width="160" height="40" />
           <span class="brand-sub">管理面板</span>
         </div>
 
@@ -945,12 +915,7 @@
           <div class="chat-card">
             <div class="chat-head">
               <span class="bot-avatar">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false">
-                  <path d="M12 2.8v3.4" />
-                  <rect x="4.6" y="6.2" width="14.8" height="12.2" rx="3.6" />
-                  <path d="M9 12h.01M15 12h.01" />
-                  <path d="M9.4 15.4h5.2" />
-                </svg>
+                <img src="/logo-mark-mono-white.svg" alt="" width="34" height="34" />
               </span>
               <div class="chat-id">
                 <span class="chat-name">Mutter</span>
@@ -987,10 +952,8 @@
       <div class="panel-shell">
         <div class="card">
           <div class="mobile-brand">
-            <span class="brand-mark" aria-hidden="true">
-              <img src="/logo-mark-mono-white.svg" alt="" />
-            </span>
-            <span class="brand-name">Mutter</span>
+            <img src="/logo-lockup.svg" alt="Mutter" class="brand-lockup brand-lockup-light" width="144" height="36" />
+            <img src="/logo-lockup-dark.svg" alt="Mutter" class="brand-lockup brand-lockup-dark" width="144" height="36" />
             <span class="brand-sub">管理面板</span>
           </div>
 
@@ -1178,7 +1141,7 @@
         </div>
 
         <!-- 版本号与 Directory.Build.props / web/package.json 保持一致（静态页不经过 Vite 注入） -->
-        <p class="panel-foot">Mutter 管理面板<span>·</span>v2.1.0</p>
+        <p class="panel-foot">Mutter 管理面板<span>·</span>v__APP_VERSION__</p>
       </div>
     </main>
   </div>

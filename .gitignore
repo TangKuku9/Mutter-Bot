@@ -47,6 +47,10 @@ secrets.json
 update-settings.json
 app-layer.json
 
+# 本地代理工作区与容量压测台架（仅本机使用，不入库）
+.zcode/
+tools/LoadCheck/
+
 # Logs
 logs/
 *.log
