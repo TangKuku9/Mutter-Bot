@@ -158,7 +158,7 @@
             <span class="es-label">API Key</span>
             <el-input v-model="form.externalSearch.apiKey" type="password" show-password
               :disabled="form.externalSearch.provider === 'searxng'"
-              :placeholder="form.externalSearch.provider === 'searxng' ? 'SearXNG 免 Key' : '留空或保持打码值表示不修改'"
+              :placeholder="esApiKeyPlaceholder"
               style="width: 380px" />
             <ParamHelpButton :label="helpLabel('externalSearchApiKey')" @click="openHelp('externalSearchApiKey')" />
           </div>
@@ -763,20 +763,33 @@ const ES_PROVIDERS = [
   { id: 'searxng', name: 'SearXNG（自建，免 Key）' },
   { id: 'tavily', name: 'Tavily' },
   { id: 'bocha', name: '博查 Bocha' },
-  { id: 'brave', name: 'Brave Search' }
+  { id: 'brave', name: 'Brave Search' },
+  { id: 'deepseek', name: 'DeepSeek 搜索' },
+  { id: 'custom', name: '自定义（JSON API）' }
 ]
 const esProviderName = (id) => ES_PROVIDERS.find((p) => p.id === id)?.name || id
+// 与后端 ExternalSearchConfig.RequiresBaseUrl / RequiresApiKey 保持一致
+const esNeedsBaseUrl = (id) => id === 'searxng' || id === 'custom'
+const esNeedsApiKey = (id) => id !== 'searxng' && id !== 'custom'
 const esBaseUrlPlaceholder = computed(() => ({
   searxng: 'https://searx.example.com（实例根地址）',
   tavily: '留空 = 官方端点 https://api.tavily.com',
   bocha: '留空 = 官方端点 https://api.bochaai.com/v1/web-search',
-  brave: '留空 = 官方端点 https://api.search.brave.com/res/v1/web/search'
+  brave: '留空 = 官方端点 https://api.search.brave.com/res/v1/web/search',
+  deepseek: '留空 = 官方端点 https://api.deepseek.com/v1/tools/search',
+  custom: '必填：完整搜索端点，如 https://api.example.com/search'
 }[form.value.externalSearch?.provider] || ''))
+const esApiKeyPlaceholder = computed(() => ({
+  searxng: 'SearXNG 免 Key',
+  custom: '选填；填写后以 Bearer 发送'
+}[form.value.externalSearch?.provider] || '留空或保持打码值表示不修改'))
 const esProviderHint = computed(() => ({
   searxng: '免 Key。填写实例根地址即可；实例需在 settings.yml 的 search.formats 中启用 json 输出。',
   tavily: 'Key 必填；服务地址留空使用官方端点，也可指向自建网关。',
   bocha: 'Key 必填；服务地址留空使用官方端点。',
-  brave: 'Key 必填；服务地址留空使用官方端点。'
+  brave: 'Key 必填；服务地址留空使用官方端点。',
+  deepseek: 'Key 必填（DeepSeek API Key）；服务地址可留空或指向兼容网关。',
+  custom: '按固定契约接入：POST JSON {query,count}，返回 results[]（title/url/snippet）；Key 选填，填了则以 Bearer 发送。'
 }[form.value.externalSearch?.provider] || ''))
 
 const esVerdictLabel = (v) => ({
@@ -796,10 +809,12 @@ let esProbeAbort = null
 
 const probeExternalSearch = async () => {
   const es = form.value.externalSearch
-  // 与后端校验同判据的前置检查：SearXNG 必须有实例地址，其余必须有 Key（打码值视为已配置）
-  const missing = es.provider === 'searxng'
-    ? (!es.baseUrl.trim() ? 'SearXNG 需要填写实例地址' : '')
-    : (!es.apiKey.trim() ? `${esProviderName(es.provider)} 需要填写 API Key` : '')
+  // 与后端校验同判据的前置检查：地址必填项与 Key 必填项按服务商能力判断
+  let missing = ''
+  if (esNeedsBaseUrl(es.provider) && !es.baseUrl.trim())
+    missing = es.provider === 'custom' ? '自定义通道需要填写服务地址' : 'SearXNG 需要填写实例地址'
+  else if (esNeedsApiKey(es.provider) && !es.apiKey.trim())
+    missing = `${esProviderName(es.provider)} 需要填写 API Key`
   if (missing) {
     ElMessage.warning(missing)
     return
@@ -1020,10 +1035,14 @@ const HELP = {
   },
   externalSearchProvider: {
     title: '搜索服务商',
-    value: (f) => ({ searxng: 'SearXNG', tavily: 'Tavily', bocha: '博查 Bocha', brave: 'Brave Search' }[f.externalSearch?.provider] || '未选择'),
+    value: (f) => ({
+      searxng: 'SearXNG', tavily: 'Tavily', bocha: '博查 Bocha', brave: 'Brave Search',
+      deepseek: 'DeepSeek 搜索', custom: '自定义（JSON API）'
+    }[f.externalSearch?.provider] || '未选择'),
     lines: [
       'SearXNG：自建元搜索引擎，免 Key，需一个开了 JSON format 的实例。',
-      'Tavily / 博查 / Brave：商用搜索 API，Key 必填，服务地址可留空用官方端点。',
+      'Tavily / 博查 / Brave / DeepSeek：商用搜索 API，Key 必填，服务地址可留空用官方端点。',
+      '自定义：填完整搜索端点，按固定 JSON 契约（POST {query,count} → results[]）接入；Key 选填。',
       '换服务商后需重新「测试搜索」获得新的验证时间。'
     ]
   },
@@ -1033,15 +1052,22 @@ const HELP = {
     lines: [
       'SearXNG 必填：实例根地址（不含 /search 路径），例如 https://searx.example.com。',
       '实例需在 settings.yml 的 search.formats 中加上 json，否则测试会提示未开启 JSON 输出。',
+      '自定义通道必填：完整搜索端点；客户端按 POST JSON 契约请求。',
       '其余服务商留空即用官方默认端点；填了则指向自建网关，必须是 http/https 开头的完整 URL。'
     ]
   },
   externalSearchApiKey: {
     title: '搜索服务 API Key',
-    value: (f) => (f.externalSearch?.provider === 'searxng' ? '免 Key' : (f.externalSearch?.apiKey ? '已配置' : '未配置')),
+    value: (f) => {
+      const provider = f.externalSearch?.provider
+      if (provider === 'searxng') return '免 Key'
+      if (provider === 'custom') return f.externalSearch?.apiKey ? '已配置（选填）' : '未填写（选填）'
+      return f.externalSearch?.apiKey ? '已配置' : '未配置'
+    },
     lines: [
       'SearXNG 免 Key，输入框禁用。',
-      '其余服务商必填；只存在本机数据库，页面不回显明文。',
+      'Tavily / 博查 / Brave / DeepSeek 必填；自定义通道选填，填了则以 Bearer 发送。',
+      '只存在本机数据库，页面不回显明文。',
       '留空或保持打码值表示不修改；填新值会直接覆盖。'
     ]
   },

@@ -65,7 +65,7 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 - **群级与专属人设**：支持群聊独立提示词、个性化人设切换（`/char`）。
 - **多模态图文识别**：群消息图片自动下载转存并送入视觉模型，内置 GIF 动图嗅探剥离与张数上限保护。
 - **容错与修复机制**：内置 CJK 异常断行修复器与 JSON 结构化输出容错提取器。
-- **独立搜索服务（预检索注入）**：可选接入 SearXNG / Tavily / 博查 / Brave，先检索再把资料注入对话，不依赖模型服务商内建搜索；任意 OpenAI 兼容端点（含中转站）都能联网，失败自动降级且不影响回复。配置见面板「AI 设置 → 独立搜索服务」，运行时边界见 [AI 与消息运行时](docs/ai-runtime.md)。
+- **独立搜索服务（预检索注入）**：可选接入 SearXNG / Tavily / 博查 / Brave / DeepSeek 搜索，也可用「自定义（JSON API）」按固定契约接入其他搜索端点；先检索再把资料注入对话，不依赖模型服务商内建搜索；任意 OpenAI 兼容端点（含中转站）都能联网，失败自动降级且不影响回复。配置见面板「AI 设置 → 独立搜索服务」，运行时边界见 [AI 与消息运行时](docs/ai-runtime.md)。
 - **会话运行时**：同会话顺序执行、跨会话并行，使用有界队列与统一投递账本；模型调用通过 `IChatClient` 适配，设计与兼容边界见 [AI 与消息运行时](docs/ai-runtime.md)。
 - **运行监控与面板体验**：实际模型请求记账、数据库汇总与短期缓存、任务处理过程、共用群记忆及配置编辑保护，详见 [性能与管理面板改进](docs/panel-improvements.md)。
 
@@ -145,8 +145,8 @@ Mutter-Bot/
 
 | 平台 | 推荐包（无需 .NET） | 已装 .NET 运行时 |
 | --- | --- | --- |
-| Windows x64 | `mutter-bot-vX.Y.Z-win-x64-self-contained.zip` | `mutter-bot-vX.Y.Z-win-x64-framework-dependent.zip` |
-| Linux x64 | `mutter-bot-vX.Y.Z-linux-x64-self-contained.tar.gz` | `mutter-bot-vX.Y.Z-linux-x64-framework-dependent.tar.gz` |
+| Windows x64 | `mutter-bot-vYYMMDD-win-x64-self-contained.zip` | `mutter-bot-vYYMMDD-win-x64-framework-dependent.zip` |
+| Linux x64 | `mutter-bot-vYYMMDD-linux-x64-self-contained.tar.gz` | `mutter-bot-vYYMMDD-linux-x64-framework-dependent.tar.gz` |
 
 - **self-contained**：内置 .NET 9 运行时，解压即用；**framework-dependent**：体积更小，需预装 [ASP.NET Core 9 Runtime](https://dotnet.microsoft.com/download/dotnet/9.0)。
 - **Windows**：解压后编辑同目录的 `appsettings.json`（填入 `Mutter:AppId`、`Mutter:ClientSecret` 与面板口令），运行 `mutter-bot.exe` 进入 TUI；后台运行用 `mutter-bot.exe --headless`。
@@ -154,7 +154,7 @@ Mutter-Bot/
 - Linux 自包含包仍依赖系统 ICU，精简发行版请先安装 `libicu`。
 - 校验下载：`sha256sum -c SHA256SUMS.txt`（Windows 可用 `Get-FileHash` 对照文件中的 SHA256）。
 
-> 版本号唯一来源是仓库根目录 [`Directory.Build.props`](Directory.Build.props) 的 `<Version>`。程序集、前端构建与 `/api/status` 都从这里取值；发布标签必须与之一致（例如 `2.0.0` 对应 `v2.0.0`），CI 会校验版本一致性。
+> 版本号唯一来源是仓库根目录 [`Directory.Build.props`](Directory.Build.props) 的 `<Version>`。发布版本采用日期命名（`YYMMDD`，例如 `261109`）；同日再次发布可追加 `.1`。程序集、前端构建与 `/api/status` 都从这里取值；发布标签必须与之一致（例如 `261109` 对应 `v261109`），CI 会校验版本一致性。
 
 ### 面板内一键更新
 
@@ -170,6 +170,7 @@ Mutter-Bot/
 - **分层更新**：自包含包会把 .NET 运行时与程序文件分开。运行时版本一致时只下载约 **5–6MB** 的 `*-app.zip` 应用层包；运行时版本变化时才使用完整包。框架依赖包本身只有 5MB 左右，直接走完整包。
 - 「关于 → 更新设置」可选更新方式：**自动**（优先应用层）、**仅完整包**、**仅检查**；也可切换更新源：GitHub 官方、镜像或自定义清单。镜像/自定义源必须配置清单签名公钥，否则无法防止镜像篡改更新包。
 - 更新清单是 Release 里的 `update.json`，签名文件是 `update.json.sig`。旧版本客户端仍按 `SHA256SUMS.txt` 下载完整包，不受影响。
+- **首次日期版本升级**：2.4.0 及更早版本的更新器无法解析纯日期版本号（如 `261109`）。升级到首个日期版本时请手动下载安装一次；安装后即可继续在面板内一键更新后续版本。
 - 更新偏好保存在安装目录的 `update-settings.json`，它和 `appsettings*.json`、数据库、日志一样不会被更新覆盖或删除。
 - 下载完成后不会自动安装；只有确认安装时才写入待更新标记并触发重启。下载期间面板会显示实时进度条与已下载大小。
 - **下载在后台进行**：切换面板页面、刷新或关闭浏览器都不会中断；回到「关于」页会恢复显示当前进度与暂存状态。
@@ -177,9 +178,9 @@ Mutter-Bot/
 - 下载不设总时长上限，只对连接与读取停滞做超时保护（连接 90 秒、读取 60 秒无数据即重试）；连续 5 次没有进展才会暂停，之后可手动继续。
 - 更新包必须能在 `SHA256SUMS.txt` 中找到校验值，校验失败会删除损坏文件并终止本次更新。
 - `appsettings*.json`、`mutter-bot.db*`、`logs/`、`update-settings.json` 不会被覆盖或删除。
-- 旧版本程序文件备份在安装目录的 `.backup/vX.Y.Z-<时间戳>/`，仅保留最近一份。
+- 旧版本程序文件备份在安装目录的 `.backup/v<版本>-<时间戳>/`，仅保留最近一份。
 - 更新完成后服务自动重启，面板会话失效，需要重新登录。
-- 手动回滚：停止程序，将 `.backup/vX.Y.Z-<时间戳>/` 内的文件复制回安装目录覆盖同名文件（**不要删除** `appsettings*.json` 与数据库），再重新启动。
+- 手动回滚：停止程序，将 `.backup/v<版本>-<时间戳>/` 内的文件复制回安装目录覆盖同名文件（**不要删除** `appsettings*.json` 与数据库），再重新启动。
 
 > **发布者签名（镜像源必需）**：用 ECDSA P-256 私钥对 `update.json` 的原始字节签名，CI 从仓库 Secret `UPDATE_SIGNING_KEY` 读取 PEM 私钥；把公钥填到面板「更新设置 → 签名公钥」。未配置 Secret 时官方 GitHub 源仍可更新，但镜像/自定义源会拒绝未签名清单。
 >
