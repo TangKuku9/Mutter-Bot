@@ -1,6 +1,6 @@
 {
   "name": "mutter-panel",
-  "version": "2.3.1",
+  "version": "2.4.0",
   "private": true,
   "type": "module",
   "description": "Mutter 管理面板前端源码工程",
