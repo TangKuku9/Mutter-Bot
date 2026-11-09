@@ -27,6 +27,7 @@ public static class WebServiceExtensions
         // 注册 SignalR 通知服务
         services.AddSingleton<INotificationService, SignalRNotificationService>();
         services.AddSingleton<PanelStatisticsService>();
+        services.AddSingleton<PanelPasswordStore>();
 
         // 自更新：检查最新正式版、下载校验并替换程序文件。
         // 更新包下载不设总超时（慢链路可能要几十分钟），只靠连接/读取停滞超时与自动重试兜底。

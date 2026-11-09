@@ -1338,6 +1338,7 @@ var legacyHash = $"sha256${Convert.ToBase64String(legacySalt)}$" +
 Check(PanelPasswordHasher.Verify(legacyHash, "s3cret-pass"), "旧格式哈希（无迭代数段）仍可校验通过");
 Check(!PanelPasswordHasher.Verify(legacyHash, "wrong-pass"), "旧格式哈希校验错误口令失败");
 Check(PanelPasswordHasher.NeedsRehash(legacyHash), "旧格式哈希标记为需要重哈希");
+PanelPasswordStoreChecks.Run(Check);
 
 Console.WriteLine("== 3h. 分层更新、清单与签名（纯逻辑） ==");
 var defaultUpdate = new UpdateSettings();
