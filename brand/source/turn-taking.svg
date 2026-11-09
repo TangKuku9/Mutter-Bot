@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 264">
+  <title>Mutter — 接话</title>
+  <desc>Two offset curved strokes leaving room for a thoughtful reply.</desc>
+  <g fill="currentColor">
+    <path d="M30 264C13 264 0 251 0 234V146C0 65 63 0 141 0C183 0 223 23 235 62C239 76 232 82 220 78C199 70 179 68 159 74C121 83 96 112 96 150V234C96 251 83 264 66 264Z"/>
+    <path d="M338 264C321 264 308 251 308 234V188C308 157 288 141 264 142C239 141 216 154 199 169C189 180 182 172 187 158C205 106 244 74 295 74C353 74 398 119 398 176V234C398 251 385 264 368 264Z"/>
+  </g>
+</svg>
