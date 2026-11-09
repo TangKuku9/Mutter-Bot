@@ -9,7 +9,8 @@ namespace Mutter.Web.Controllers;
 
 [ApiController]
 [Route("api/runtime")]
-public sealed class RuntimeController(IConversationWorkQueue queue, AppDbContext db, IAiImageResolver images) : ControllerBase
+public sealed class RuntimeController(IConversationWorkQueue queue, AppDbContext db, IAiImageResolver images,
+    UpstreamHealthTracker health) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Get(CancellationToken ct)
@@ -22,12 +23,14 @@ public sealed class RuntimeController(IConversationWorkQueue queue, AppDbContext
         // 列表只需要状态摘要；步骤只随 /operations/{id} 返回，避免每 5 秒轮询重复搬运过程明细。
         var queueView = snapshot with
         {
-            Tasks = snapshot.Tasks.Take(60)
+            Tasks = snapshot.Tasks.OrderByDescending(t => t.State == "running" ? 2 : t.State == "queued" ? 1 : 0)
+                .ThenByDescending(t => t.EnqueuedAt).Take(60)
                 .Select(t => t with { Steps = Array.Empty<RuntimeStep>() }).ToArray()
         };
         return Ok(new
         {
             Queue = queueView, Calls = calls.Take(20), GroupNames = names, ImageCache = images.Snapshot(),
+            Upstream = health.Snapshot(),
             SampleCount = calls.Count, FailureCount = calls.Count(c => c.State != "success"),
             AverageMs = successful.Length == 0 ? 0 : (long)successful.Average(),
             P95Ms = successful.Length == 0 ? 0 : successful[(int)Math.Ceiling(successful.Length * .95) - 1]

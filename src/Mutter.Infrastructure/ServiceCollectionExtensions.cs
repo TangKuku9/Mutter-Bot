@@ -1,8 +1,11 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Mutter.Core.Configuration;
 using Mutter.Core.Interfaces;
+using Mutter.Core.Services;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Repositories;
 using Mutter.Infrastructure.Services;
@@ -19,11 +22,17 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IConfigRepository, ConfigRepository>();
         services.AddScoped<IGroupMemoryRepository, GroupMemoryRepository>();
         services.AddSingleton<IStructuredAiService, StructuredAiService>();
-        services.AddHttpClient<HttpModelTransport>(c => c.Timeout = TimeSpan.FromSeconds(120));
+        // HttpClient.Timeout 只是兜底；真正的预算在每次尝试内（min(尝试上限, 根期限剩余)）。
+        services.AddHttpClient<HttpModelTransport>()
+            .ConfigureHttpClient((sp, c) => c.Timeout = TimeSpan.FromSeconds(
+                sp.GetRequiredService<IOptions<MutterOptions>>().Value.Runtime.AiTimeoutSeconds + 5));
         services.AddSingleton<IAiModelExecutor, AiModelExecutor>();
         services.AddSingleton<IOutgoingReplyStore, OutgoingReplyStore>();
         services.AddSingleton<IAiCallStore, AiCallStore>();
-        services.AddSingleton<ConversationWorkQueue>();
+        services.AddSingleton<ConversationWorkQueue>(sp => new ConversationWorkQueue(
+            sp.GetRequiredService<ILogger<ConversationWorkQueue>>(), sp.GetRequiredService<TimeProvider>(),
+            runtime: sp.GetRequiredService<RuntimeOptions>(),
+            lifetime: sp.GetService<IHostApplicationLifetime>()));
         services.AddSingleton<IConversationWorkQueue>(sp => sp.GetRequiredService<ConversationWorkQueue>());
 
         // QQ 官方开放平台通信层
@@ -41,7 +50,16 @@ public static class ServiceCollectionExtensions
         services.AddHostedService<DataRetentionService>();
 
         // Mutter 官方开放平台 access_token
-        services.AddOptions<MutterOptions>().Configure<IConfiguration>((o, cfg) => cfg.GetSection("Mutter").Bind(o));
+        services.AddOptions<MutterOptions>().Configure<IConfiguration>((o, cfg) =>
+        {
+            cfg.GetSection("Mutter").Bind(o);
+            o.Runtime.Normalize();
+            AiCallScope.Configure(TimeSpan.FromSeconds(o.Runtime.AiTimeoutSeconds));
+        });
+        // 运行时参数以普通单例下发，Core 侧服务（如 MessageEventHandler）不必依赖 IOptions。
+        services.AddSingleton(sp => sp.GetRequiredService<IOptions<MutterOptions>>().Value.Runtime);
+        // 上游健康追踪：失败驱动的降级信号源，队列、择机调度与模型传输都读它
+        services.AddSingleton<UpstreamHealthTracker>();
         services.AddHttpClient<AccessTokenManager>();
         services.AddSingleton<AccessTokenManager>();
         services.AddHostedService<GatewayHostedService>();

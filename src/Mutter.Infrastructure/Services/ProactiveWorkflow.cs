@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Mutter.Core.Configuration;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
@@ -23,6 +24,7 @@ public sealed class ProactiveWorkflow
     private readonly IContextBuilder _contextBuilder;
     private readonly ILogger<ProactiveWorkflow> _logger;
     private readonly TimeProvider _clock;
+    private readonly RuntimeOptions _runtime;
 
     public ProactiveWorkflow(
         IServiceScopeFactory scopeFactory,
@@ -31,7 +33,7 @@ public sealed class ProactiveWorkflow
         IStructuredAiService structuredAi,
         IAiChatService ai,
         IContextBuilder contextBuilder,
-        ILogger<ProactiveWorkflow> logger, TimeProvider clock)
+        ILogger<ProactiveWorkflow> logger, TimeProvider clock, RuntimeOptions runtime)
     {
         _scopeFactory = scopeFactory;
         _observe = observe;
@@ -41,6 +43,7 @@ public sealed class ProactiveWorkflow
         _contextBuilder = contextBuilder;
         _logger = logger;
         _clock = clock;
+        _runtime = runtime;
     }
 
     public async Task RunAsync(ProactiveWindow window, CancellationToken ct)
@@ -182,27 +185,38 @@ public sealed class ProactiveWorkflow
 
         if (ProactiveSpeech.ShouldSearch(config, context.EffectiveConfig, line, searchQuery))
         {
-            if (AiCallScope.Current is { } operation) operation.Stage = "rewrite";
-            searchUsed = true;
-            var speech = await RewriteWithSearchAsync(
-                window, context, data, line, searchQuery!, nowUtc, aiToken);
-            speechPromptTokens = speech.PromptTokens;
-            speechCompletionTokens = speech.CompletionTokens;
-
-            if (speech.Declined)
+            // 判定与改写共享同一条根期限。上游慢时剩余预算可能不够再撑一次完整调用，
+            // 与其让改写撞死在期限上（连带把这次发言整个打成超时），不如直接发草稿——改写只是锦上添花。
+            if (AiCallScope.Current is { } scope && scope.Remaining < TimeSpan.FromSeconds(_runtime.RewriteMinRemainingSeconds))
             {
-                await WriteLogAsync(window,
-                    new LogNote(ProactiveOutcomes.SkippedAfterSearch, data, null,
-                        "联网核实后模型选择不说", null, outcome,
-                        memoryCount, memoryChars, searchQuery, searchUsed,
-                        speechPromptTokens, speechCompletionTokens), ct);
-                return;
+                _logger.LogInformation(
+                    "生成剩余预算 {Seconds}s 不足以联网改写，直接发草稿 group={GroupId}",
+                    (int)scope.Remaining.TotalSeconds, window.GroupId);
             }
-
-            if (speech.Line is not null)
-                line = speech.Line;
             else
-                searchDetail = $"联网改写失败，已发草稿：{Truncate(speech.Error, 160)}";
+            {
+                if (AiCallScope.Current is { } operation) operation.Stage = "rewrite";
+                searchUsed = true;
+                var speech = await RewriteWithSearchAsync(
+                    window, context, data, line, searchQuery!, nowUtc, aiToken);
+                speechPromptTokens = speech.PromptTokens;
+                speechCompletionTokens = speech.CompletionTokens;
+
+                if (speech.Declined)
+                {
+                    await WriteLogAsync(window,
+                        new LogNote(ProactiveOutcomes.SkippedAfterSearch, data, null,
+                            "联网核实后模型选择不说", null, outcome,
+                            memoryCount, memoryChars, searchQuery, searchUsed,
+                            speechPromptTokens, speechCompletionTokens), ct);
+                    return;
+                }
+
+                if (speech.Line is not null)
+                    line = speech.Line;
+                else
+                    searchDetail = $"联网改写失败，已发草稿：{Truncate(speech.Error, 160)}";
+            }
         }
 
         var usage = new AiChatResponse

@@ -501,7 +501,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading, CircleCheck } from '@element-plus/icons-vue'
 import api from '../api'
-import { tokenBudget } from '../tokenBudget'
+import { tokenBudget, DEFAULT_INPUT_BUDGET } from '../tokenBudget'
 import { useUnsavedChanges } from '../useUnsavedChanges'
 import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
@@ -553,7 +553,7 @@ const configPayload = () => ({
   maxTokens: form.value.maxTokens ?? 2048,
   maxContextMessages: form.value.maxContextMessages ?? 20,
   contextWindowTokens: form.value.contextWindowTokens ?? 32768,
-  maxInputTokens: form.value.maxInputTokens ?? 16384,
+  maxInputTokens: form.value.maxInputTokens ?? DEFAULT_INPUT_BUDGET,
   groupMemoryInjectionEnabled: form.value.groupMemoryInjectionEnabled ?? true,
   maxAttachedImages: form.value.maxAttachedImages ?? 3,
   webSearchEnabled: !!form.value.webSearchEnabled,
@@ -960,8 +960,8 @@ const HELP = {
   },
   maxInputTokens: {
     title: '输入预算',
-    value: (f) => `${f.maxInputTokens ?? 16384}`,
-    lines: ['历史、当前消息、系统提示与图片共用的本地输入预算，默认 16384。', '文本和图片使用保守估算，并额外预留输出和安全余量；超过预算时先裁掉旧历史。', '当前消息或附件本身过大时会提示缩短内容，不会静默删掉当前问题。']
+    value: (f) => `${f.maxInputTokens ?? DEFAULT_INPUT_BUDGET}`,
+    lines: [`历史、当前消息、系统提示与图片共用的本地输入预算，新配置默认 ${DEFAULT_INPUT_BUDGET}，已有配置保持原值。`, '文本和图片使用保守估算，并额外预留输出和安全余量；超过预算时先裁掉旧历史。', '当前消息或附件本身过大时会提示缩短内容，不会静默删掉当前问题。']
   },
   groupMemoryInjectionEnabled: {
     title: '群记忆用于回复',

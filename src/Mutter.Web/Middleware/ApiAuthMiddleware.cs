@@ -39,9 +39,11 @@ public class ApiAuthMiddleware
             path == "/api/auth/logout" ||
             path == "/api/auth/status" ||
             path == "/api/auth/change-password" ||
-            path == "/vite.svg" ||
             path == "/logo-mark.svg" ||
             path == "/logo-mark-mono-white.svg" ||
+            path == "/logo-lockup.svg" ||
+            path == "/logo-lockup-dark.svg" ||
+            path == "/logo-lockup-mono-reverse.svg" ||
             path == "/favicon.ico" ||
             path == "/favicon.svg" ||
             path == "/favicon-16.png" ||

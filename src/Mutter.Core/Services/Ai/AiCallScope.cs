@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Mutter.Core.Models;
 
 namespace Mutter.Core.Services;
@@ -6,10 +7,14 @@ namespace Mutter.Core.Services;
 public sealed class AiCallScope : IDisposable
 {
     private static readonly AsyncLocal<AiCallScope?> Ambient = new();
+    private static TimeSpan _defaultTimeout = TimeSpan.FromSeconds(120);
     private readonly AiCallScope? _parent;
     private readonly CancellationTokenSource? _deadline;
     private readonly CancellationToken _hostToken;
     private readonly AiCallScope _root;
+    /// <summary>根期限与起点只取值于根作用域；嵌套作用域共享同一条预算。</summary>
+    private readonly TimeSpan _timeout;
+    private readonly long _startedAt = Stopwatch.GetTimestamp();
     private int _attempts;
     private int _promptTokens;
     private int _completionTokens;
@@ -26,8 +31,9 @@ public sealed class AiCallScope : IDisposable
         Metadata = metadata ?? _parent?.Metadata ?? new();
         if (_parent is null)
         {
+            _timeout = _defaultTimeout;
             _deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            _deadline.CancelAfter(TimeSpan.FromSeconds(120));
+            _deadline.CancelAfter(_timeout);
         }
         Token = _root._deadline!.Token;
         _startPromptTokens = _root._promptTokens;
@@ -37,6 +43,20 @@ public sealed class AiCallScope : IDisposable
 
     public static AiCallScope Begin(CancellationToken ct, string? purpose = null, AiCallMetadata? metadata = null) => new(ct, purpose, metadata);
     public static AiCallScope? Current => Ambient.Value?._root;
+
+    /// <summary>宿主启动时从 RuntimeOptions 下发根期限；测试与未装配场景保持 120 秒默认。</summary>
+    public static void Configure(TimeSpan rootTimeout) =>
+        _defaultTimeout = rootTimeout > TimeSpan.Zero ? rootTimeout : TimeSpan.FromSeconds(120);
+
+    /// <summary>根期限的剩余预算。单次模型尝试取 min(尝试上限, 剩余)，让降级链的后续阶段总有预算可用。</summary>
+    public TimeSpan Remaining
+    {
+        get
+        {
+            var left = _root._timeout - Stopwatch.GetElapsedTime(_root._startedAt);
+            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+        }
+    }
     public CancellationToken Token { get; }
     /// <summary>宿主/队列传入的原始令牌；与 120 秒期限取消区分开。</summary>
     public CancellationToken HostToken => _root._hostToken;

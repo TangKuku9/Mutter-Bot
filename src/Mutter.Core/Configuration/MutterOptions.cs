@@ -9,6 +9,84 @@ public class MutterOptions
     /// <summary>富交互（markdown 卡片 / 按钮菜单 / @标签）开关与能力门控配置。
     /// 名称保留 "GameKeyboardMode" 是因为它已经是 appsettings 里的配置键值，改名会破坏现有部署。</summary>
     public RichUiOptions RichUi { get; set; } = new();
+
+    /// <summary>运行时并发与超时预算（appsettings 的 Mutter:Runtime 节）。</summary>
+    public RuntimeOptions Runtime { get; set; } = new();
+}
+
+/// <summary>
+/// 并发调度与上游延迟韧性参数。生产实测上游延迟主导吞吐（P90 47s+，偶发挂死），
+/// 这组旋钮把「多少并发、等多久、单次尝试烧多少预算、上游坏了怎么应对」交给部署按需调，而不是改代码。
+/// 全部有钳制：运维写错值也不能把进程搞挂或把队列关死。
+/// </summary>
+public class RuntimeOptions
+{
+    /// <summary>会话工作队列的执行并发数。上游是慢速外部依赖时，槽位基本都在等响应，加并发是最直接的扩容手段。</summary>
+    public int Parallelism { get; set; } = 3;
+
+    /// <summary>全局队列容量（含正在执行的部分）。</summary>
+    public int Capacity { get; set; } = 256;
+
+    /// <summary>单会话排队上限（含正在执行的一项），防止一个群占满全局队列。</summary>
+    public int PerConversationCap { get; set; } = 16;
+
+    /// <summary>排队默认有效期：超过后按「等待回复超时」提示，不再占着队列。</summary>
+    public int QueueAgeSeconds { get; set; } = 120;
+
+    /// <summary>单个工作项的执行期限（含上下文构建与模型调用）。必须放得下根期限 + 投递窗口。</summary>
+    public int WorkDeadlineSeconds { get; set; } = 240;
+
+    /// <summary>主动评估（择机判定）的排队有效期。它可丢弃，排队比用户应答短得多。</summary>
+    public int BackgroundQueueAgeSeconds { get; set; } = 45;
+
+    /// <summary>整条生成流程（含降级链各阶段）共享的根期限。</summary>
+    public int AiTimeoutSeconds { get; set; } = 120;
+
+    /// <summary>单次模型尝试的上限。上游挂死时最多烧掉一个尝试份额，而不是把整条期限耗在一根悬空连接上。</summary>
+    public int AiPerAttemptTimeoutSeconds { get; set; } = 90;
+
+    /// <summary>上游降级期间前台排队的有效期：早点给一句诚实的提示，而不是让消息排到自然超时。</summary>
+    public int DegradedQueueAgeSeconds { get; set; } = 45;
+
+    /// <summary>上游降级期间单次尝试的收紧上限，让坏掉的尝试更快腾出槽位。</summary>
+    public int DegradedPerAttemptTimeoutSeconds { get; set; } = 45;
+
+    /// <summary>上游健康追踪的滚动窗口大小（最近 N 次模型调用）。</summary>
+    public int HealthWindowSize { get; set; } = 10;
+
+    /// <summary>窗口内失败达到该数量即判定上游降级。</summary>
+    public int HealthFailureThreshold { get; set; } = 3;
+
+    /// <summary>恢复条件：最近 5 次调用中成功达到该数量。</summary>
+    public int HealthRecoveryThreshold { get; set; } = 4;
+
+    /// <summary>降级最短持续时间（滞回），避免状态在好坏之间抖动。</summary>
+    public int HealthMinDegradeSeconds { get; set; } = 60;
+
+    /// <summary>联网改写是锦上添花：根期限剩余低于该值时直接发草稿，不让改写撞死在期限上。</summary>
+    public int RewriteMinRemainingSeconds { get; set; } = 45;
+
+    public RuntimeOptions Normalize()
+    {
+        Parallelism = Math.Clamp(Parallelism, 1, 16);
+        Capacity = Math.Clamp(Capacity, 16, 2048);
+        PerConversationCap = Math.Clamp(PerConversationCap, 1, 64);
+        QueueAgeSeconds = Math.Clamp(QueueAgeSeconds, 15, 600);
+        AiTimeoutSeconds = Math.Clamp(AiTimeoutSeconds, 30, 600);
+        // 工作期限必须放得下根期限，否则还没等模型超时，队列先把工作取消了。
+        WorkDeadlineSeconds = Math.Clamp(Math.Max(WorkDeadlineSeconds, AiTimeoutSeconds + 60), 60, 900);
+        BackgroundQueueAgeSeconds = Math.Clamp(BackgroundQueueAgeSeconds, 10, 300);
+        // 单次尝试超过根期限没有意义：预算重合正是「一次挂起烧光全部」的根因。
+        AiPerAttemptTimeoutSeconds = Math.Clamp(Math.Min(AiPerAttemptTimeoutSeconds, AiTimeoutSeconds), 15, 600);
+        DegradedQueueAgeSeconds = Math.Clamp(DegradedQueueAgeSeconds, 10, 600);
+        DegradedPerAttemptTimeoutSeconds = Math.Clamp(DegradedPerAttemptTimeoutSeconds, 10, AiTimeoutSeconds);
+        HealthWindowSize = Math.Clamp(HealthWindowSize, 5, 100);
+        HealthFailureThreshold = Math.Clamp(HealthFailureThreshold, 2, HealthWindowSize);
+        HealthRecoveryThreshold = Math.Clamp(HealthRecoveryThreshold, 1, 5);
+        HealthMinDegradeSeconds = Math.Clamp(HealthMinDegradeSeconds, 0, 600);
+        RewriteMinRemainingSeconds = Math.Clamp(RewriteMinRemainingSeconds, 10, 300);
+        return this;
+    }
 }
 
 /// <summary>消息按钮键盘模式。None=纯文字链或提示；Command=指令按钮(插入输入框)；Callback=回调按钮(需 INTERACTION intent)。</summary>

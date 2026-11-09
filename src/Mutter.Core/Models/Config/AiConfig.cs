@@ -32,7 +32,7 @@ public record AiConfig
     /// <summary>模型上下文容量；未知模型使用保守默认值，可经 API 配置。</summary>
     public int ContextWindowTokens { get; set; } = 32768;
     /// <summary>本地输入预算，独立于输出 MaxTokens。</summary>
-    public int MaxInputTokens { get; set; } = 24576;
+    public int MaxInputTokens { get; set; } = Mutter.Core.Services.AiRequestBudget.DefaultInputBudget;
     /// <summary>普通群聊回复使用管理员维护的群记忆；与主动发言的全局开关独立。</summary>
     public bool GroupMemoryInjectionEnabled { get; set; } = true;
 

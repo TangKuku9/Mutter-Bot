@@ -12,7 +12,7 @@ public class AiConfigEntity
     public int MaxTokens { get; set; } = 2048;
     public int MaxContextMessages { get; set; } = 20;
     public int ContextWindowTokens { get; set; } = 32768;
-    public int MaxInputTokens { get; set; } = 16384;
+    public int MaxInputTokens { get; set; } = Mutter.Core.Services.AiRequestBudget.DefaultInputBudget;
     public bool GroupMemoryInjectionEnabled { get; set; } = true;
 
     /// <summary>@ 回复 / 私聊最多附带几张图，0=不带图。</summary>

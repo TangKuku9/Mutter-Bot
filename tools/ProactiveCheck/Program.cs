@@ -1792,9 +1792,9 @@ Check(ContextBuilder.CandidateFetchLadder(1000, 40).Last() == 200,
 Check(ContextBuilder.CandidateFetchLadder(20, 40).Distinct().Count()
         == ContextBuilder.CandidateFetchLadder(20, 40).Count,
     "阶梯是有界的：封顶后不会无限产出同一个值（否则调用方每轮都会白查一次库）");
-Check(ContextBuilder.InputTokenBudget(2048) == 16384 && ContextBuilder.InputTokenBudget(512) == 16384,
+Check(ContextBuilder.InputTokenBudget(2048) == 24576 && ContextBuilder.InputTokenBudget(512) == 24576,
     "输入预算独立于输出上限");
-Check(ContextBuilder.InputTokenBudget(0) == 16384,
+Check(ContextBuilder.InputTokenBudget(0) == 24576,
     "输出上限为零不会清空输入预算");
 
 using (var scope = sp.CreateScope())

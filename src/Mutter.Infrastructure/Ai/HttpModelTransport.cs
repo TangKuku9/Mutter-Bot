@@ -2,20 +2,28 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Mutter.Core.Models;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models.Config;
+using Mutter.Core.Configuration;
 using Mutter.Core.Services;
 
 namespace Mutter.Infrastructure.Ai;
 
 /// <summary>现有兼容协议的 HTTP 实现；不拥有搜索决策或工作流重试。</summary>
 public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelTransport> logger,
-    IAiCallStore? callStore = null, TimeProvider? clock = null)
+    IAiCallStore? callStore = null, TimeProvider? clock = null,
+    UpstreamHealthTracker? health = null, RuntimeOptions? runtime = null)
 {
     private readonly HttpClient _httpClient = httpClient;
     private readonly ILogger _logger = logger;
+    private readonly UpstreamHealthTracker? _health = health;
+    private readonly TimeSpan _attemptCap =
+        TimeSpan.FromSeconds(runtime?.AiPerAttemptTimeoutSeconds ?? 90);
+    private readonly TimeSpan _degradedAttemptCap =
+        TimeSpan.FromSeconds(runtime?.DegradedPerAttemptTimeoutSeconds ?? 45);
     public async Task<AiChatResponse> SendOpenAiAsync(
         AiChatRequest request, AiConfig config, string? searchShape, CancellationToken ct)
     {
@@ -34,7 +42,7 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
         try
         {
             AiCallScope.Current?.BeginAttempt();
-            response = await SendRecordedAsync(httpRequest, config, "openai", searchShape is not null, ct);
+            response = await SendWithBudgetAsync(httpRequest, config, "openai", searchShape is not null, ct);
         }
         catch (HttpRequestException ex)
         {
@@ -117,7 +125,7 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
             try
             {
                 AiCallScope.Current?.BeginAttempt();
-                response = await SendRecordedAsync(httpRequest, config, "gemini", requestBody.ContainsKey("tools"), ct);
+                response = await SendWithBudgetAsync(httpRequest, config, "gemini", requestBody.ContainsKey("tools"), ct);
             }
             catch (HttpRequestException ex)
             {
@@ -183,10 +191,49 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
         throw new AiRequestException(404, $"未找到 Gemini 原生端点：{lastError}");
     }
 
-    private Task<HttpResponseMessage> SendRecordedAsync(HttpRequestMessage request, AiConfig config,
-        string transport, bool search, CancellationToken ct) =>
-        AiHttpAudit.SendAsync(_httpClient, request, config.ModelName, transport, ct, callStore, logger, clock,
-            stage: search ? "search" : null);
+    /// <summary>
+    /// 单次尝试预算：min(配置的尝试上限, 根期限剩余)。上游挂死时最多烧掉一个尝试份额，
+    /// 不再把整条生成期限耗在一根悬空连接上——降级链的后续阶段因此总有预算可用。
+    /// 结束后按结果向健康追踪上报一次；路径/格式等确定性拒绝不代表上游不可用。
+    /// </summary>
+    private async Task<HttpResponseMessage> SendWithBudgetAsync(HttpRequestMessage request, AiConfig config,
+        string transport, bool search, CancellationToken ct)
+    {
+        var cap = _health is { IsDegraded: true } ? _degradedAttemptCap : _attemptCap;
+        var scope = AiCallScope.Current;
+        if (scope is not null && scope.Remaining < cap) cap = scope.Remaining;
+        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        attempt.CancelAfter(cap);
+        var started = Stopwatch.GetTimestamp();
+        long ElapsedMs() => Stopwatch.GetElapsedTime(started).Ticks / TimeSpan.TicksPerMillisecond;
+        try
+        {
+            var response = await AiHttpAudit.SendAsync(_httpClient, request, config.ModelName, transport,
+                attempt.Token, callStore, logger, clock, stage: search ? "search" : null);
+            if (response.IsSuccessStatusCode)
+                _health?.Record(true, ElapsedMs());
+            else if (response.StatusCode == HttpStatusCode.RequestTimeout
+                || response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500)
+            {
+                var retry = response.Headers.RetryAfter;
+                var retryAfter = retry?.Delta
+                    ?? (retry?.Date is { } date ? date - (clock ?? TimeProvider.System).GetUtcNow() : (TimeSpan?)null);
+                _health?.Record(false, ElapsedMs(), (int)response.StatusCode,
+                    retryAfter: retryAfter);
+            }
+            return response;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _health?.Record(false, ElapsedMs());
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            _health?.Record(false, ElapsedMs());
+            throw;
+        }
+    }
 
     private static string? ReadFinishReason(JsonElement json)
     {

@@ -3,8 +3,9 @@
   <el-container class="layout">
     <el-aside width="200px" class="aside">
       <div class="logo">
-        <img src="/logo-mark.svg" alt="" class="logo-mark" />
-        <span>Mutter 面板</span>
+        <img :src="`/logo-lockup.svg?v=${appVersion}`" alt="Mutter" class="brand-lockup brand-lockup-light" />
+        <img :src="`/logo-lockup-dark.svg?v=${appVersion}`" alt="Mutter" class="brand-lockup brand-lockup-dark" />
+        <span class="logo-caption">面板</span>
       </div>
       <el-menu :default-active="route.path" router class="menu">
         <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
@@ -52,6 +53,7 @@ import {
   ChatLineSquare, Document, Postcard, ChatDotSquare
 } from '@element-plus/icons-vue'
 import api from './api'
+import { appVersion } from './version'
 
 const route = useRoute()
 const connected = computed(() => !!botStatus.data.isConnected)
@@ -79,7 +81,11 @@ body { margin: 0; background: #f5f7fa; }
 .layout { height: 100vh; }
 .aside { background: #fff; border-right: 1px solid #e4e7ed; }
 .logo { display: flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 700; padding: 18px 16px; color: #303133; }
-.logo-mark { width: 24px; height: 24px; flex: none; display: block; }
+.brand-lockup { width: 132px; height: 33px; flex: none; display: block; }
+.brand-lockup-dark { display: none; }
+html.dark .brand-lockup-light { display: none; }
+html.dark .brand-lockup-dark { display: block; }
+.logo-caption { font-size: 12px; font-weight: 500; white-space: nowrap; }
 .menu { border-right: none; }
 .header { background: #fff; border-bottom: 1px solid #e4e7ed; display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
 .main { overflow-y: auto; }
