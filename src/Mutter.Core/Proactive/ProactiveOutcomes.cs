@@ -44,7 +44,20 @@ public static class ProactiveOutcomes
         DeliveryUnknown
     };
 
+    /// <summary>
+    /// 还没进入模型评估就被门禁挡下的结果。面板的「今日决策」与观察窗口快照只认
+    /// 真正走到模型这一步的评估；冷却、日限、开关关闭都不该算一次决策。
+    /// SkippedDuplicate 来自发送账本 PrepareAsync，模型已经评估过，故不在模型前门禁。
+    /// </summary>
+    private static readonly HashSet<string> BeforeAi = new(StringComparer.Ordinal)
+    {
+        SkippedDisabled, SkippedQuietHours, SkippedCooldown, SkippedGroupCap, SkippedGlobalCap,
+        SkippedAiUnavailable, SkippedAiBusy
+    };
+
     public static bool IsKnown(string? value) => value is not null && Known.Contains(value);
+
+    public static bool IsBeforeAi(string? value) => value is not null && BeforeAi.Contains(value);
 
     /// <summary>投递细节是已知结果码时直接沿用，否则归为平台发送失败。</summary>
     public static string FromDeliveryDetail(string? detail) =>

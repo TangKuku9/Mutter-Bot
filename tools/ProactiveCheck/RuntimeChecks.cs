@@ -23,6 +23,7 @@ using Mutter.Infrastructure.Ai;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Repositories;
 using Mutter.Infrastructure.Services;
+using Mutter.Web.Services;
 
 /// <summary>只使用合成标识符、临时 SQLite 和假 HTTP，不读取部署数据或访问外部服务。</summary>
 internal static partial class RuntimeChecks
@@ -48,11 +49,13 @@ internal static partial class RuntimeChecks
             ("发送成功后记账失败及重启恢复配额", ReceiptFailureAsync),
             ("主动消息分钟/日配额持久化", ActiveQuotaAsync),
             ("模型运行期间关闭开关/群参与/进入静默", FinalPolicyAsync),
+            ("观察窗口快照的群级隐私与门禁边界", SnapshotPolicyAsync),
             ("排队消息历史边界与上一轮回复", TurnHistoryAsync),
             ("完整消息管线串行回复与持久化", MessagePipelineAsync),
             ("跨群主动日限的原子预占", ProactiveReservationAsync),
             ("旧模型升级幂等与数据保留", SchemaAsync),
             ("聊天历史查找、稳定分页、精确决策关联与旧库兼容", ChatTimelineAsync),
+            ("10 万消息下的时间线去重规模", TimelineScaleAsync),
             ("实际调用账本、用户归属、失败和历史用量", UsageLedgerAsync),
             ("统计 SQL 聚合、缓存与大记录集", StatisticsPerformanceAsync),
             ("图片缓存容量、下载并发与取消隔离", ImageLimitsAsync),
@@ -566,6 +569,91 @@ internal static partial class RuntimeChecks
         env.Faults.FailMonthlyReceipt = true;
         Require((await Restart().SendGroupActiveAsync("GROUP", "new day")).Success, "monthly receipt failure must preserve send success");
         Require(env.Api.ActiveCalls == 3, "rate-limited attempts must not touch platform");
+    }
+
+    private static async Task SnapshotPolicyAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("{\"reason\":\"无需接话\"}"));
+        var workflow = env.Services.GetRequiredService<ProactiveWorkflow>();
+        var now = env.Clock.GetUtcNow().UtcDateTime;
+
+        // 默认群 TriggerMode=0：只回被 @ 的消息，观察窗口里的群友原话不能借决策留痕落库。
+        await workflow.RunAsync(Window("window-0", now), default);
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var log = await db.ProactiveChatLogs.SingleAsync();
+            Require(log.Outcome == ProactiveOutcomes.SkippedAiDeclined && log.WindowSnapshotJson is null,
+                "mode 0 groups must not persist observed chatter in decision snapshots");
+        }
+
+        using (var scope = env.Services.CreateScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
+            var group = (await repo.GetGroupConfigAsync("GROUP"))!;
+            group.TriggerMode = 2;
+            await repo.SaveGroupConfigAsync(group);
+        }
+        await workflow.RunAsync(Window("window-2", now), default);
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var logs = await db.ProactiveChatLogs.OrderBy(l => l.Id).ToListAsync();
+            var snapshot = logs.Count == 2 ? logs[1].WindowSnapshotJson : null;
+            Require(logs.Count == 2 && snapshot is not null && snapshot.Contains("合成窗口"),
+                "mode 2 groups keep the exact window used for a model decision");
+        }
+
+        // 附图张数应记“实际随请求附上的”，不是窗口里出现过几张图。
+        using (var scope = env.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<IConfigRepository>().SaveProactiveConfigAsync(
+                new ProactiveChatConfig { Enabled = true, QuietStartHour = 0, QuietEndHour = 0, MaxAttachedImages = 0 });
+        await workflow.RunAsync(ImageWindow("window-image", now), default);
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var log = await db.ProactiveChatLogs.OrderBy(l => l.Id).LastAsync();
+            Require(log.ImageCount == 0 && log.WindowSnapshotJson is not null,
+                "image count reflects what was actually attached, not what appeared in the window");
+        }
+
+        // 异常兜底时 images/记忆没有拿到实际值：写 DetailVersion=0，详情显示未知而不是 0。
+        using (var scope = env.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<IConfigRepository>().SaveProactiveConfigAsync(
+                new ProactiveChatConfig { Enabled = true, QuietStartHour = 0, QuietEndHour = 0, MaxAttachedImages = 1 });
+        env.Images.Handler = (_, _) => throw new InvalidOperationException("synthetic image failure");
+        await workflow.RunAsync(ImageWindow("window-error", now), default);
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var log = await db.ProactiveChatLogs.OrderBy(l => l.Id).LastAsync();
+            var detail = await new ChatTimelineReader(db).DecisionAsync(log.Id);
+            Require(log.Outcome == ProactiveOutcomes.FailedAiCall && log.DetailVersion == 0
+                && detail is { ImageCount: null, MemoryCount: null, SearchUsed: null },
+                "exception fallbacks must leave diagnostics unknown instead of inventing zeroes");
+        }
+
+        env.Services.GetRequiredService<ProactiveObserveService>().MarkSent("GROUP", now);
+        await workflow.RunAsync(Window("window-3", now), default);
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var log = await db.ProactiveChatLogs.OrderBy(l => l.Id).LastAsync();
+            Require(log.Outcome == ProactiveOutcomes.SkippedCooldown && log.WindowSnapshotJson is null,
+                "cooldown skips stay out of snapshot storage even for mode 2 groups");
+        }
+
+        static ProactiveWindow Window(string id, DateTime now) => new()
+        {
+            GroupId = "GROUP", LastMessageId = id, LastMessageUtcAt = now,
+            Messages = [new ObservedMessage("虚拟用户", "合成窗口", id, now)]
+        };
+        static ProactiveWindow ImageWindow(string id, DateTime now) => new()
+        {
+            GroupId = "GROUP", LastMessageId = id, LastMessageUtcAt = now,
+            Messages = [new ObservedMessage("虚拟用户", "合成窗口", id, now, ["https://example.invalid/a.png"])]
+        };
     }
 
     private static async Task FinalPolicyAsync()

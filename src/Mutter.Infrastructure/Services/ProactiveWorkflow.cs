@@ -70,11 +70,14 @@ public sealed class ProactiveWorkflow
             await WriteLogAsync(window, new LogNote(blocked), ct);
             return;
         }
+        // 群友原话要不要留，跟着群里的「围观并记录全部消息」走；只 @ 的群不把观察窗口
+        // 抄进决策留痕，否则等于绕过群级设置把没入库的聊天记录存了下来。
+        var recordWindow = group?.TriggerMode == 2;
         try
         {
             using var operation = AiCallScope.Begin(ct, "proactive", new(GroupId: window.GroupId));
             operation.Stage = "judge";
-            await SpeakIfAllowedAsync(window, config, ct, operation.Token);
+            await SpeakIfAllowedAsync(window, config, recordWindow, ct, operation.Token);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (OperationCanceledException ex)
@@ -91,7 +94,7 @@ public sealed class ProactiveWorkflow
     }
 
     private async Task SpeakIfAllowedAsync(ProactiveWindow window, ProactiveChatConfig config,
-        CancellationToken ct, CancellationToken aiToken)
+        bool recordWindow, CancellationToken ct, CancellationToken aiToken)
     {
         if (!await _structuredAi.IsAiConfiguredAsync(aiToken))
         {
@@ -153,7 +156,8 @@ public sealed class ProactiveWorkflow
             };
             await WriteLogAsync(window,
                 new LogNote(outcomeCode, Detail: detail, Usage: outcome,
-                    MemoryCount: memoryCount, MemoryPromptChars: memoryChars), ct);
+                    MemoryCount: memoryCount, MemoryPromptChars: memoryChars,
+                    ImageCount: images.Count, DiagnosticsKnown: true), ct, recordWindow);
             return;
         }
 
@@ -171,7 +175,8 @@ public sealed class ProactiveWorkflow
         {
             await WriteLogAsync(window,
                 new LogNote(ProactiveOutcomes.SkippedAiDeclined, data, Usage: outcome,
-                    MemoryCount: memoryCount, MemoryPromptChars: memoryChars), ct);
+                    MemoryCount: memoryCount, MemoryPromptChars: memoryChars,
+                    ImageCount: images.Count, DiagnosticsKnown: true), ct, recordWindow);
             return;
         }
 
@@ -208,7 +213,7 @@ public sealed class ProactiveWorkflow
                         new LogNote(ProactiveOutcomes.SkippedAfterSearch, data, null,
                             "联网核实后模型选择不说", null, outcome,
                             memoryCount, memoryChars, searchQuery, searchUsed,
-                            speechPromptTokens, speechCompletionTokens), ct);
+                            speechPromptTokens, speechCompletionTokens, images.Count, true), ct, recordWindow);
                     return;
                 }
 
@@ -239,7 +244,7 @@ public sealed class ProactiveWorkflow
         await WriteLogAsync(window,
             new LogNote(result.Outcome, data, line, logDetail, result.MessageId, outcome,
                 memoryCount, memoryChars, searchQuery, searchUsed,
-                speechPromptTokens, speechCompletionTokens), ct);
+                speechPromptTokens, speechCompletionTokens, images.Count, true), ct, recordWindow);
 
         if (result.Outcome is not (ProactiveOutcomes.SentPassive or ProactiveOutcomes.SentActive))
         {
@@ -344,13 +349,16 @@ public sealed class ProactiveWorkflow
         string? SearchQuery = null,
         bool SearchUsed = false,
         int SpeechPromptTokens = 0,
-        int SpeechCompletionTokens = 0);
+        int SpeechCompletionTokens = 0,
+        int ImageCount = 0,
+        bool DiagnosticsKnown = false);
 
     /// <summary>第二阶段结果。Line 与 Declined 互斥；两者都空表示调用失败，调用方退回草稿。</summary>
     private readonly record struct SpeechRewrite(
         string? Line, bool Declined, string? Error, int PromptTokens, int CompletionTokens);
 
-    private async Task WriteLogAsync(ProactiveWindow window, LogNote note, CancellationToken ct)
+    private async Task WriteLogAsync(ProactiveWindow window, LogNote note, CancellationToken ct,
+        bool captureWindow = false)
     {
         RuntimeActivity.Current?.Outcome(note.Outcome);
         try
@@ -362,9 +370,15 @@ public sealed class ProactiveWorkflow
                 GroupId = window.GroupId,
                 EvaluatedAt = _clock.GetUtcNow().UtcDateTime,
                 MessageCount = window.Messages.Count,
-                DetailVersion = 1,
-                WindowSnapshotJson = ProactiveLogSnapshot.Capture(window),
-                ImageCount = window.ImageCount,
+                // 只有走到模型评估（或明确的门禁结果）才知道诊断值；异常兜底没有 images/记忆
+                // 的实际值，写 0 会被详情当成“确实没带”，所以保持旧格式让读取端显示未知。
+                DetailVersion = note.DiagnosticsKnown || ProactiveOutcomes.IsBeforeAi(note.Outcome)
+                    ? ProactiveChatLogEntity.PrivacyGatedWindowVersion
+                    : 0,
+                // 观察窗口可能包含群里没入库的原话，只在群允许记录全部消息、
+                // 且这次真的进入模型评估时保存；冷却/日限/关闭等门禁结果不落快照。
+                WindowSnapshotJson = captureWindow ? ProactiveLogSnapshot.Capture(window) : null,
+                ImageCount = note.ImageCount,
                 MemoryCount = note.MemoryCount,
                 MemoryPromptChars = note.MemoryPromptChars,
                 Outcome = note.Outcome,

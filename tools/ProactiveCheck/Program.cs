@@ -118,6 +118,50 @@ Check(!ProactivePrompts.SystemPrompt.Contains("人工维护记忆"), "群记忆�
 // 开关默认值：注入默认开（上线时就是"有摘要就注入"，默认关等于静默改掉已填摘要的群的行为）；
 // 群级是三态，null 才表示跟随全局
 Check(new ProactiveChatConfig().MemoryInjectionEnabled, "全局记忆注入默认开");
+Check(ProactiveOutcomes.IsBeforeAi(ProactiveOutcomes.SkippedCooldown)
+      && ProactiveOutcomes.IsBeforeAi(ProactiveOutcomes.SkippedGroupCap)
+      && !ProactiveOutcomes.IsBeforeAi(ProactiveOutcomes.SkippedAiDeclined)
+      && !ProactiveOutcomes.IsBeforeAi(ProactiveOutcomes.FailedAiCall)
+      && !ProactiveOutcomes.IsBeforeAi(ProactiveOutcomes.SkippedDuplicate),
+    "今日决策只排除没进入模型的冷却/上限/关闭，保留真正评估后的说与不说（含发送账本重复）");
+
+var longSnapshot = new ProactiveWindow
+{
+    GroupId = "SNAP",
+    LastMessageId = "snap-59",
+    LastMessageUtcAt = DateTime.UtcNow,
+    Messages = Enumerable.Range(0, 60)
+        .Select(i => new ObservedMessage("用户", new string('文', 2000), $"snap-{i}", DateTime.UtcNow.AddSeconds(i)))
+        .ToArray()
+};
+var longSnapshotJson = ProactiveLogSnapshot.Capture(longSnapshot);
+Check(longSnapshotJson is not null && longSnapshotJson.Length < 100_000,
+    "观察窗口快照有总字数上限，不会把 50 条长文原样撑大");
+using (var snapshotDoc = JsonDocument.Parse(longSnapshotJson!))
+{
+    Check(snapshotDoc.RootElement.GetProperty("Messages").GetArrayLength() == 10
+          && snapshotDoc.RootElement.GetProperty("OmittedMessages").GetInt32() == 50,
+        "快照预算不够时从最旧的消息开始丢，并如实记录省略条数");
+    Check(!longSnapshotJson!.Contains("\\u"),
+        "中文快照按 UTF-8 原文保存，不膨胀成 \\uXXXX");
+}
+
+var emojiWindow = new ProactiveWindow
+{
+    GroupId = "SNAP",
+    LastMessageId = "emoji",
+    LastMessageUtcAt = DateTime.UtcNow,
+    Messages = [new ObservedMessage("用户", new string('a', 1999) + "😀", "emoji", DateTime.UtcNow)]
+};
+var emojiJson = ProactiveLogSnapshot.Capture(emojiWindow)!;
+using (var emojiDoc = JsonDocument.Parse(emojiJson))
+{
+    var emojiText = emojiDoc.RootElement.GetProperty("Messages")[0].GetProperty("Text").GetString()!;
+    Check(emojiText.Length == 1999 && !emojiText.Contains('\uFFFD'),
+        "快照按字符截断时不切开 emoji 的代理对");
+    Check(emojiDoc.RootElement.GetProperty("Messages")[0].GetProperty("Truncated").GetBoolean(),
+        "被截断的那条在详情里明确标记");
+}
 Check(new GroupConfig().MemoryInjectionEnabled is null, "群级记忆注入默认跟随全局，而不是覆盖成关");
 // 摘要是人工维护的自由文本：服务端必须自己收口长度与空白，不能指望面板的 maxlength
 Check(GroupMemoryRepository.NormalizeSummary("  群背景  ") == "群背景", "群记忆入库前 trim 首尾空白");
@@ -1531,11 +1575,11 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
     using (var fix = probe.CreateCommand())
     {
         fix.CommandText = """
-            INSERT INTO ChatMessages ("MessageId","ChatType","GroupId","UserId","UserName","PlainText","RawSegmentsJson","HasImage","HasAtBot","IsBotMessage","PromptTokens","CompletionTokens","CreatedAt")
+            INSERT INTO ChatMessages ("MessageId","ChatType","GroupId","UserId","UserName","PlainText","RawSegmentsJson","HasImage","HasAtBot","IsBotMessage","IsProactive","PromptTokens","CompletionTokens","CreatedAt")
             VALUES
-             ('fx-face-1',0,'TESTGROUP-FACE','u','某人','<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">','[]',1,0,0,0,0,'2026-10-01 00:00:00'),
-             ('fx-face-2',0,'TESTGROUP-FACE','u','某人','<faceType=1,faceId="76",ext="eyJ0ZXh0Ijoi6LWeIn0=">','[]',0,0,0,0,0,'2026-10-01 00:00:01'),
-             ('fx-face-3',0,'TESTGROUP-FACE','u','某人','[表情图]','[]',1,0,0,0,0,'2026-10-01 00:00:02');
+             ('fx-face-1',0,'TESTGROUP-FACE','u','某人','<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">','[]',1,0,0,0,0,0,'2026-10-01 00:00:00'),
+             ('fx-face-2',0,'TESTGROUP-FACE','u','某人','<faceType=1,faceId="76",ext="eyJ0ZXh0Ijoi6LWeIn0=">','[]',0,0,0,0,0,0,'2026-10-01 00:00:01'),
+             ('fx-face-3',0,'TESTGROUP-FACE','u','某人','[表情图]','[]',1,0,0,0,0,0,'2026-10-01 00:00:02');
             """;
         fix.ExecuteNonQuery();
     }
@@ -1578,7 +1622,12 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
     Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_table_info('ProactiveChatLogs') "
               + "WHERE name IN ('SearchQuery','SearchUsed','SpeechPromptTokens','SpeechCompletionTokens')") == 4,
         "留痕表补上联网改写的检索词、触发位与用量四列");
-    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_index_list('ProactiveChatLogs')") == 2, "留痕表两个索引就位");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_index_list('ProactiveChatLogs') "
+              + "WHERE name IN ('IX_ProactiveChatLogs_EvaluatedAt','IX_ProactiveChatLogs_GroupId_EvaluatedAt','IX_ProactiveChatLogs_SentMessageId_GroupId')") == 3,
+        "留痕表三个索引就位（时间线、群筛选、发送回执关联）");
+    Check(Scalar(probe, "SELECT COUNT(*) FROM pragma_index_list('OutgoingReplies') "
+              + "WHERE name='IX_OutgoingReplies_PlatformMessageId_GroupId'") == 1,
+        "发送回执按平台消息 ID 的索引就位");
     Check(Scalar(probe, "SELECT COUNT(*) FROM ChatMessages") == MessagesBefore, $"聊天历史未被迁移改动（{MessagesBefore} 条）");
     var legacyKept = ReadNumericGroupIds(probe);
     Check(legacyNumericGroupIds.All(legacyKept.Contains),
@@ -1601,7 +1650,7 @@ using (var probe = new SqliteConnection($"Data Source={targetDb}"))
     Check(legacyNumericGroupIds.All(legacyText.Contains)
           && ScalarText(probe, "SELECT typeof(GroupId) FROM GroupConfigs LIMIT 1") == "text",
         $"数字群号时代的历史配置原样保留（{legacyNumericGroupIds.Count} 条，键转为文本）");
-    Check(ScalarText(probe, "SELECT typeof(UserId) FROM PrivateChatConfigs LIMIT 1") == "text",
+    Check(ScalarText(probe, "SELECT type FROM pragma_table_info('PrivateChatConfigs') WHERE name='UserId'") == "TEXT",
         "PrivateChatConfigs.UserId 同样转为 TEXT 主键");
 }
 
@@ -2123,8 +2172,9 @@ using (var scope = sp.CreateScope())
     var expectedParticipating = (await repo.GetAllGroupConfigsAsync()).Count(g => g.AiProactiveEnabled && g.IsEnabled);
     Check(stJson.Contains($"\"participatingGroups\":{expectedParticipating}"),
         $"状态里的参与群数与群配置一致（{expectedParticipating}）");
-    Check(stJson.Contains("\"todaySent\":1") && stJson.Contains("\"todayEvaluations\":3"),
-        "今日按结论统计取的是北京日界内的留痕");
+    Check(stJson.Contains("\"todaySent\":1") && stJson.Contains("\"todayEvaluations\":3")
+          && stJson.Contains("\"todayDecisions\":3"),
+        "今日按结论统计取的是北京日界内的留痕，决策数不含门禁跳过");
     Check(stJson.Contains("\"webSearchEnabled\":") && stJson.Contains("\"aiWebSearchEnabled\":"),
         "状态回读择机联网开关与 AI 侧联网状态（面板据此提示配置不完整）");
     Check(stJson.Contains("\"todayMemoryInjections\":1"),

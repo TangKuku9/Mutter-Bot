@@ -294,6 +294,9 @@ public class ProactiveController : ControllerBase
             TodayByOutcome = sinceRows,
             TodaySent = sinceRows.Where(r => SentOutcomes.Contains(r.Outcome)).Sum(r => r.Count),
             TodayEvaluations = sinceRows.Sum(r => r.Count),
+            // “今日决策”只算真正进入模型评估的次数；开关关闭、冷却、日限等门禁结果
+            // 仍保留在 TodayByOutcome 和留痕表里，方便排查，但不冒充一次决策。
+            TodayDecisions = sinceRows.Where(r => !ProactiveOutcomes.IsBeforeAi(r.Outcome)).Sum(r => r.Count),
             Quotas = quotas,
             PendingWindows = _observe.PendingWindows()
                 .Select(p => new

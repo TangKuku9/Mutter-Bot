@@ -6,14 +6,14 @@
         <el-input v-model="groupSearch" placeholder="查找群聊" aria-label="查找群聊" :prefix-icon="Search" clearable size="small" class="group-search" />
         <div class="group-list">
           <button type="button" class="group-button all-groups" :aria-pressed="!groupId" @click="selectGroup('')"><el-icon aria-hidden="true"><Collection /></el-icon><span><b>全部记录</b><small>群聊与已保存的私聊</small></span></button>
-          <button v-for="group in filteredGroups" :key="group.groupOpenId" type="button" class="group-button" :aria-pressed="groupId === group.groupOpenId" :title="group.name || group.groupOpenId" @click="selectGroup(group.groupOpenId)"><span class="group-avatar" aria-hidden="true">{{ (group.name || '群').slice(-1) }}</span><span><b>{{ group.name || shortId(group.groupOpenId) }}</b><small>{{ group.config?.aiProactiveEnabled ? '群级择机已开启' : '按群设置响应' }}</small></span></button>
+          <button v-for="group in filteredGroups" :key="group.groupOpenId" type="button" class="group-button" :aria-pressed="groupId === group.groupOpenId" :title="group.name || group.groupOpenId" @click="selectGroup(group.groupOpenId)"><span class="group-avatar" aria-hidden="true">{{ (group.name || '群').slice(-1) }}</span><span><b>{{ group.name || shortId(group.groupOpenId) }}</b><small>{{ groupSummary(group.config) }}</small></span></button>
           <p v-if="groupSearch && !filteredGroups.length" class="group-empty">未找到对应群聊</p>
         </div>
         <div v-if="groupsError" class="group-empty"><p>暂时无法读取群列表</p><el-button link type="primary" size="small" @click="loadGroups">重试</el-button></div>
         <p class="group-note">消息与决策，围绕同一个群展开。</p>
       </aside>
       <section class="chat-conversation" aria-label="聊天记录">
-        <header class="conversation-heading"><div><h2>{{ selectedGroup?.name || (groupId ? shortId(groupId) : '全部记录') }}</h2><p>{{ groupDescription }}</p></div><el-tag v-if="selectedGroup?.config?.aiProactiveEnabled" size="small">群级择机已开启</el-tag></header>
+        <header class="conversation-heading"><div><h2>{{ selectedGroup?.name || (groupId ? shortId(groupId) : '全部记录') }}</h2><p>{{ groupDescription }}</p></div><el-tag v-if="selectedGroup?.config?.isEnabled === false" type="info" size="small">群聊已停用</el-tag><el-tag v-else-if="selectedGroup?.config?.aiProactiveEnabled" size="small">群级择机已开启</el-tag></header>
         <div class="mobile-group-picker"><el-select v-model="groupId" placeholder="选择群聊" aria-label="选择群聊" filterable @change="resetView"><el-option label="全部记录" value="" /><el-option v-for="group in groups" :key="group.groupOpenId" :value="group.groupOpenId" :label="group.name || shortId(group.groupOpenId)" /></el-select></div>
         <div class="chat-toolbar">
           <div class="source-filters" role="group" aria-label="消息来源"><button v-for="option in sources" :key="option.value" type="button" :aria-pressed="source === option.value" @click="setSource(option.value)">{{ option.label }}</button></div>
@@ -42,7 +42,7 @@ import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { Search, Collection, Clock, ArrowRight, TopRight, Check } from '@element-plus/icons-vue'
 import { subscribeRealtime, realtimeState } from '../realtime'
 import { LatestRequest, matchesChatMessage } from '../latestRequest'
-import { chatTime, chatDateTime, chatKind, senderName, timelineEntries } from '../chatHistory'
+import { chatTime, chatDateTime, chatKind, senderName, timelineEntries, groupSummary, groupRecordingNote } from '../chatHistory'
 import { runtimeLabel, runtimeType } from '../runtimeLabels'
 import HighlightedText from '../components/HighlightedText.vue'
 import ChatDecisionDrawer from '../components/ChatDecisionDrawer.vue'
@@ -58,12 +58,7 @@ const connOk = computed(() => live.value && realtimeState.connected)
 const sources = [{ value: '', label: '全部' }, { value: 'observe', label: '围观' }, { value: 'at', label: '被 @' }, { value: 'bot', label: 'Bot 应答' }, { value: 'proactive', label: 'Bot 插话' }, { value: 'decision', label: '评估记录' }]
 const selectedGroup = computed(() => groups.value.find(group => group.groupOpenId === groupId.value))
 const filteredGroups = computed(() => groups.value.filter(group => `${group.name || ''} ${group.groupOpenId}`.toLocaleLowerCase().includes(groupSearch.value.toLocaleLowerCase())))
-const groupDescription = computed(() => {
-  if (!groupId.value) return '按时间查看已保存的消息与择机评估'
-  const config = selectedGroup.value?.config
-  if (!config) return '按已保存的历史记录展示'
-  return `${config.triggerMode === 2 ? '记录全部消息' : '仅记录被 @ 的消息'} · ${config.activeCharacter ? '使用群专属人设' : '使用全局人设'}`
-})
+const groupDescription = computed(() => groupId.value ? groupRecordingNote(selectedGroup.value?.config) : '按时间查看已保存的消息与择机评估')
 const entries = computed(() => timelineEntries(items.value))
 const shortId = id => id ? `${id.slice(0, 8)}…` : '未记录群聊'
 let unsubscribe = null, timer = null, disposed = false

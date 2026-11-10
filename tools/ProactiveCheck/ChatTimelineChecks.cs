@@ -47,6 +47,8 @@ internal static partial class RuntimeChecks
         var legacy = await reader.DecisionAsync(oldId);
         Require(legacy is { Window: null, MemoryCount: null, SearchUsed: null, PromptTokens: null } && legacy.Reason == "历史理由仍然可查", "old diagnostic defaults remain unknown rather than invented zeroes");
 
+        // 直接构造一条带快照的留痕，验证读取路径；写入时的群级隐私策略由
+        // RuntimeChecks.SnapshotPolicyAsync 覆盖，不能把这里的 mode 0 群当成允许落快照。
         var window = new ProactiveWindow { GroupId = "GROUP", LastMessageId = "history-1", LastMessageUtcAt = time,
             Messages = [new ObservedMessage("甲同学", "原始窗口", "history-1", time, ["https://example.invalid/temporary-image"])] };
         db.OutgoingReplies.Add(new OutgoingReply { Id = "synthetic-outgoing", GroupId = "GROUP", IsProactive = true,
@@ -54,10 +56,21 @@ internal static partial class RuntimeChecks
         var bot = new ChatMessage { MessageId = "synthetic-outgoing", GroupId = "GROUP", UserId = "BOT", UserName = "Bot",
             IsBotMessage = true, IsProactive = true, PlainText = "实际回复", CreatedAt = time.AddMinutes(4) };
         db.ChatMessages.Add(bot);
-        var decision = new ProactiveChatLogEntity { GroupId = "GROUP", SentMessageId = "platform-sent", DetailVersion = 1,
+        var decision = new ProactiveChatLogEntity { GroupId = "GROUP", SentMessageId = "platform-sent", DetailVersion = 2,
             Outcome = ProactiveOutcomes.SentPassive, Line = "实际回复", Model = "synthetic-model", EvaluatedAt = time.AddMinutes(4),
             WindowSnapshotJson = ProactiveLogSnapshot.Capture(window), MessageCount = 1 };
         db.ProactiveChatLogs.Add(decision);
+        // 隐私门槛上线前写的 DetailVersion=1 快照不再从详情接口返回。
+        var oldSnapshotLog = new ProactiveChatLogEntity { GroupId = "GROUP", DetailVersion = 1,
+            Outcome = ProactiveOutcomes.SentPassive, Line = "旧版窗口", EvaluatedAt = time.AddMinutes(3).AddSeconds(30),
+            WindowSnapshotJson = ProactiveLogSnapshot.Capture(window), MessageCount = 1 };
+        db.ProactiveChatLogs.Add(oldSnapshotLog);
+        // 模型调用失败时 Model 还没回写，但这次确实带了 2 张图、1 条记忆；
+        // 不能因为 Model 为空就把已知值显示成“未记录”。
+        var failedCall = new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = time.AddMinutes(5),
+            DetailVersion = 1, Outcome = ProactiveOutcomes.FailedAiCall, Model = null,
+            ImageCount = 2, MemoryCount = 1, MemoryPromptChars = 30, SearchUsed = false, MessageCount = 2 };
+        db.ProactiveChatLogs.Add(failedCall);
         db.ProactiveChatLogs.Add(new ProactiveChatLogEntity { GroupId = "OTHER", SentMessageId = "platform-sent",
             Outcome = ProactiveOutcomes.SentPassive, EvaluatedAt = time.AddMinutes(4), Line = "另一个群" });
         var directBot = new ChatMessage { MessageId = "platform-legacy", GroupId = "GROUP", UserId = "BOT", UserName = "历史Bot",
@@ -80,7 +93,13 @@ internal static partial class RuntimeChecks
         var detail = await reader.DecisionAsync(decision.Id);
         Require(detail is { MemoryCount: 0, SearchUsed: false } && detail.Window?.Messages.Single().Text == "原始窗口",
             "new diagnostics distinguish recorded zeroes and preserve the exact input window");
-        Require(!decision.WindowSnapshotJson.Contains("temporary-image"), "temporary image addresses are not persisted in window snapshots");
+        var failedDetail = await reader.DecisionAsync(failedCall.Id);
+        Require(failedDetail is { ImageCount: 2, MemoryCount: 1, MemoryPromptChars: 30, SearchUsed: false, PromptTokens: null },
+            "a failed call keeps recorded diagnostics while unknown token usage stays unknown");
+        Require(await reader.DecisionAsync(oldSnapshotLog.Id) is { Window: null },
+            "windows written before the privacy gate are not returned from the detail endpoint");
+        Require(decision.WindowSnapshotJson is not null && !decision.WindowSnapshotJson.Contains("temporary-image"),
+            "temporary image addresses are not persisted in window snapshots");
         Require(await reader.DecisionAsync(long.MaxValue) is null, "missing old logs degrade without affecting messages");
         Require(!ChatTimelineReader.TrySnapshot("1:-1", out _, out _) && !ChatTimelineReader.TrySnapshot("bad", out _, out _), "invalid pagination snapshots rejected");
         Require(await db.ChatMessages.AnyAsync(m => m.MessageId == "legacy-row" && m.PlainText == "合成旧数据"), "existing database content remains unchanged");

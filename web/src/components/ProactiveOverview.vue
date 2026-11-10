@@ -23,7 +23,7 @@
 
     <dl class="overview-metrics" aria-label="择机发言概览">
       <div><dt>今日接话</dt><dd><strong>{{ number(status.todaySent) }}</strong><span>次</span></dd><p>已成功发送</p></div>
-      <div><dt>今日决策</dt><dd><strong>{{ number(status.todayEvaluations) }}</strong><span>次</span></dd><p>包含决定不发言</p></div>
+      <div><dt>今日决策</dt><dd><strong>{{ number(todayDecisionCount(status)) }}</strong><span>次</span></dd><p>AI 实际评估，含决定不发言</p></div>
       <div><dt>参与群聊</dt><dd><strong>{{ number(status.participatingGroups) }}</strong><span>个</span></dd><p>群响应与择机均已开启</p></div>
     </dl>
 
@@ -69,7 +69,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ArrowRight, Clock, Collection, Connection, Moon } from '@element-plus/icons-vue'
 import ParamHelpButton from './ParamHelpButton.vue'
-import { proactiveRuntime, quietHoursText } from '../proactiveOverview'
+import { proactiveRuntime, quietHoursText, todayDecisionCount } from '../proactiveOverview'
 
 const props = defineProps({
   status: { type: Object, required: true },

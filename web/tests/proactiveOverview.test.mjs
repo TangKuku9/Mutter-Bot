@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { isQuietNow, proactiveRuntime, quietHoursText } from '../src/proactiveOverview.js'
+import { isQuietNow, proactiveRuntime, quietHoursText, todayDecisionCount } from '../src/proactiveOverview.js'
 
 test('静默状态按北京时间判断，跨日、起止边界和同值关闭与后端一致', () => {
   const config = { quietStartHour: 23, quietEndHour: 8 }
@@ -27,4 +27,17 @@ test('接收异常、静默和正常状态有不同提示，状态取服务端�
   assert.equal(proactiveRuntime(status, config, Date.parse('2026-11-09T15:00:00Z')).label, '静默中')
   assert.equal(proactiveRuntime(status, config, Date.parse('2026-11-10T00:00:00Z')).label, '运行中')
   assert.equal(proactiveRuntime({ ...status, fullModeArrived: 0 }, config).label, '接收需检查')
+})
+
+test('今日决策优先取真正进入模型评估的计数，并兼容旧响应', () => {
+  assert.equal(todayDecisionCount({ todayDecisions: 3, todayEvaluations: 9 }), 3)
+  assert.equal(todayDecisionCount({ todayDecisions: 0, todayEvaluations: 9 }), 0)
+  assert.equal(todayDecisionCount({ todayEvaluations: 9 }), 9)
+  assert.equal(todayDecisionCount({ todayDecisions: null, todayEvaluations: 9 }), 9)
+  assert.equal(todayDecisionCount({ todayEvaluations: 0 }), 0)
+  assert.equal(todayDecisionCount({ todayDecisions: '3', todayEvaluations: 9 }), null)
+  assert.equal(todayDecisionCount({ todayEvaluations: '9' }), null)
+  assert.equal(todayDecisionCount({}), null)
+  assert.equal(todayDecisionCount(null), null)
+  assert.equal(todayDecisionCount(undefined), null)
 })

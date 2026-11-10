@@ -6,6 +6,11 @@ export function quietHoursText(config) {
   return `${hour(start)}–${hour(end)}`
 }
 
+export function todayDecisionCount(status) {
+  const value = status?.todayDecisions ?? status?.todayEvaluations
+  return Number.isFinite(value) ? value : null
+}
+
 export function isQuietNow(config, now = Date.now()) {
   if (!config || config.quietStartHour === config.quietEndHour) return false
   const hour = new Date(Number(now) + 8 * 60 * 60 * 1000).getUTCHours()

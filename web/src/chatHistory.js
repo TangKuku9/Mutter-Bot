@@ -23,6 +23,30 @@ export const chatDateTime = value => format(value, { year: 'numeric', month: '2-
 export const chatKind = row => row.isBotMessage ? (row.isProactive ? '择机接话' : 'Bot 应答') : row.chatType === 1 ? '私聊' : row.hasAtBot ? '被 @' : '围观'
 export const senderName = row => row.isBotMessage && (!row.userName || row.userName === 'Bot') ? 'Mutter' : row.userName || row.userId || '未记录发送者'
 export const decisionSent = outcome => ['sent_passive', 'sent_active'].includes(outcome)
+const sendFailed = outcome => ['failed_rejected', 'failed_rate_limited', 'failed_no_channel', 'failed_api_error'].includes(outcome)
+export function decisionTitle(outcome) {
+  if (!outcome) return '决策详情'
+  if (decisionSent(outcome)) return '接话详情'
+  if (outcome === 'delivery_unknown') return '发送未确认详情'
+  if (sendFailed(outcome)) return '发送失败详情'
+  return '未发言详情'
+}
+export function detailTitle(entry, detail) {
+  const outcome = detail?.outcome ?? (entry?.kind === 'decision' ? entry.outcome : null)
+  if (outcome) return decisionTitle(outcome)
+  if (entry?.kind === 'message') return entry.decisionId ? '接话详情' : '历史详情'
+  return '决策详情'
+}
+export function groupSummary(config) {
+  if (!config) return '按群设置响应'
+  if (config.isEnabled === false) return '群聊已停用'
+  return config.aiProactiveEnabled ? '群级择机已开启' : '按群设置响应'
+}
+export function groupRecordingNote(config) {
+  if (!config) return '按已保存的历史记录展示'
+  if (config.isEnabled === false) return '仅查看已保存记录'
+  return `${config.triggerMode === 2 ? '记录全部消息' : '仅记录被 @ 的消息'} · ${config.activeCharacter ? '使用群专属人设' : '使用全局人设'}`
+}
 export function timelineEntries(items) {
   const entries = []
   let previousDay = ''

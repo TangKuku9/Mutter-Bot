@@ -1,5 +1,5 @@
 <template>
-  <el-drawer v-model="visible" :size="narrow ? '100%' : '420px'" class="chat-decision-drawer" title="接话详情" destroy-on-close>
+  <el-drawer v-model="visible" :size="narrow ? '100%' : '420px'" class="chat-decision-drawer" :title="drawerTitle" destroy-on-close>
     <div v-if="loading" class="detail-loading" role="status">正在读取决策留痕…</div>
     <div v-else-if="error" class="detail-empty" role="status"><h3>{{ error }}</h3><p>聊天正文仍可查看。</p><el-button size="small" @click="load">重试</el-button></div>
     <div v-else-if="!detail" class="detail-empty"><span class="detail-brand" aria-hidden="true"></span><h3>未记录决策详情</h3><p>这条历史消息没有可精确关联的决策留痕。</p><p>原有聊天内容可以继续查看。</p></div>
@@ -12,7 +12,7 @@
       <section class="detail-section"><h4>本次使用</h4><dl class="detail-facts"><div><dt>群记忆</dt><dd>{{ detail.memoryCount == null ? '未记录' : `${detail.memoryCount} 条` }}<template v-if="detail.memoryPromptChars != null"> · 注入 {{ detail.memoryPromptChars }} 字</template></dd></div><div><dt>附图</dt><dd>{{ detail.imageCount == null ? '未记录' : `${detail.imageCount} 张` }}</dd></div><div><dt>联网核实</dt><dd>{{ detail.searchUsed == null ? '未记录' : detail.searchUsed ? '已发起联网改写' : '未发起' }}</dd></div><div v-if="detail.searchQuery"><dt>检索词</dt><dd>{{ detail.searchQuery }}</dd></div></dl></section>
       <details class="detail-disclosure"><summary>请求与用量<el-icon aria-hidden="true"><ArrowRight /></el-icon></summary><dl class="detail-facts"><div><dt>判定模型</dt><dd>{{ detail.model || '未记录' }}</dd></div><div><dt>判定输入 / 输出</dt><dd>{{ tokens(detail.promptTokens) }} / {{ tokens(detail.completionTokens) }}</dd></div><div><dt>改写输入 / 输出</dt><dd>{{ tokens(detail.speechPromptTokens) }} / {{ tokens(detail.speechCompletionTokens) }}</dd></div></dl></details>
       <details v-if="detail.window" class="detail-disclosure"><summary>当时的观察窗口<el-icon aria-hidden="true"><ArrowRight /></el-icon></summary><p v-if="detail.window.omittedMessages" class="snapshot-note">另有 {{ detail.window.omittedMessages }} 条未保存在快照中。</p><article v-for="(message, index) in detail.window.messages" :key="index" class="snapshot-message"><div><b>{{ message.senderName || '未记录发送者' }}</b><time>{{ chatTime(message.utcAt) }}</time></div><p>{{ message.text }}</p><small v-if="message.hasImage">含图片</small><small v-if="message.truncated">正文较长，快照仅保存前 2000 字</small></article></details>
-      <p v-else class="snapshot-note">这条历史留痕未保存观察窗口，无法还原当时完整上下文。</p>
+      <p v-else class="snapshot-note">这条留痕没有保存观察窗口：旧版本未保存、群未开启「围观并记录全部消息」、评估未进入模型，或快照已按 7 天保留策略清理。</p>
     </template>
     <section v-if="entry?.kind === 'message' && !detail && !loading" class="detail-section"><h4>聊天正文</h4><p class="detail-reply">{{ entry.plainText || (entry.hasImage ? '[图片]' : '[空消息]') }}</p></section>
     <template #footer><el-button @click="visible = false">返回会话</el-button></template>
@@ -25,7 +25,7 @@ import api from '../api'
 import { LatestRequest } from '../latestRequest'
 import { useMediaQuery } from '../useMediaQuery'
 import { runtimeLabel, runtimeType } from '../runtimeLabels'
-import { chatDateTime, chatTime, decisionSent } from '../chatHistory'
+import { chatDateTime, chatTime, decisionSent, detailTitle } from '../chatHistory'
 const props = defineProps({ modelValue: Boolean, entry: { type: Object, default: null } })
 const emit = defineEmits(['update:modelValue'])
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) })
@@ -33,6 +33,7 @@ const narrow = useMediaQuery('(max-width: 600px)')
 const detail = ref(null), error = ref(''), loading = ref(false)
 const request = new LatestRequest()
 const reply = computed(() => props.entry?.kind === 'message' ? props.entry.plainText : detail.value?.line)
+const drawerTitle = computed(() => detailTitle(props.entry, detail.value))
 const tokens = value => value == null ? '未记录' : `${value.toLocaleString('zh-CN')} Token`
 const load = async () => {
   request.cancel()
