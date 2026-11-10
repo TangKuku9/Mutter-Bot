@@ -27,7 +27,7 @@
     </el-card>
 
     <el-row :gutter="16">
-      <el-col :span="14">
+      <el-col :xs="24" :lg="14">
         <el-card shadow="never" class="fill">
           <template #header>
             <div class="card-head">
@@ -35,7 +35,7 @@
               <el-button size="small" text @click="loadStatus">刷新</el-button>
             </div>
           </template>
-          <el-descriptions :column="2" border>
+          <el-descriptions :column="singleColumn ? 1 : 2" border>
             <el-descriptions-item label="连接状态">
               <el-tag :type="status.isConnected ? 'success' : 'danger'" size="small" effect="plain">
                 {{ status.isConnected ? '已连接' : '未连接' }}
@@ -46,7 +46,6 @@
             <el-descriptions-item label="Bot QQ">{{ status.botQQ || '-' }}</el-descriptions-item>
             <el-descriptions-item label="昵称">{{ status.botNickname || '-' }}</el-descriptions-item>
             <el-descriptions-item label="面板端口">{{ status.webPanelPort || '-' }}</el-descriptions-item>
-            <el-descriptions-item label="数据来源"><span class="muted">/api/status</span></el-descriptions-item>
           </el-descriptions>
 
           <div class="quick-start">
@@ -136,11 +135,11 @@
         </el-card>
       </el-col>
 
-      <el-col :span="10">
+      <el-col :xs="24" :lg="10">
         <el-card shadow="never" class="fill">
           <template #header><b>面板设置</b></template>
 
-          <div class="setting-row">
+          <div class="setting-row setting-row-theme">
             <div class="setting-main">
               <div class="setting-name">主题色</div>
               <div class="setting-desc">按钮、链接与选中态</div>
@@ -152,6 +151,7 @@
                 type="button"
                 class="color-dot"
                 :class="{ active: isActiveColor(color.value) }"
+                :aria-pressed="isActiveColor(color.value)"
                 :style="{ backgroundColor: color.value }"
                 :title="color.name"
                 :aria-label="`主题色：${color.name}`"
@@ -163,11 +163,16 @@
           </div>
 
           <div class="setting-row">
+            <div class="setting-main"><div class="setting-name">自定义颜色</div><div class="setting-desc">文字对比度自动适配</div></div>
+            <label class="custom-color-control"><span>{{ panelSettings.primaryColor.toUpperCase() }}</span><input v-model="panelSettings.primaryColor" type="color" aria-label="自定义主题色" /></label>
+          </div>
+
+          <div class="setting-row">
             <div class="setting-main">
               <div class="setting-name">深色模式</div>
               <div class="setting-desc">切换面板明暗配色</div>
             </div>
-            <el-switch v-model="panelSettings.darkMode" />
+            <el-switch v-model="panelSettings.darkMode" aria-label="深色模式" />
           </div>
 
           <div class="setting-row">
@@ -175,14 +180,14 @@
               <div class="setting-name">紧凑模式</div>
               <div class="setting-desc">缩小菜单与卡片间距</div>
             </div>
-            <el-switch v-model="panelSettings.compact" />
+            <el-switch v-model="panelSettings.compact" aria-label="紧凑模式" />
           </div>
 
           <div class="setting-preview">
             <span class="setting-desc">效果预览</span>
             <el-button type="primary" size="small">主按钮</el-button>
             <el-tag size="small">标签</el-tag>
-            <el-link type="primary" :underline="false">链接</el-link>
+            <el-link type="primary" underline="never">链接</el-link>
           </div>
 
           <div class="setting-foot">
@@ -322,6 +327,9 @@ import { appVersion as version } from '../version'
 import { panelSettings, colorPresets, resetPanelSettings } from '../panelSettings'
 import api from '../api'
 import { botStatus } from '../botStatus'
+import { useMediaQuery } from '../useMediaQuery'
+
+const singleColumn = useMediaQuery('(max-width: 600px)')
 
 const repoUrl = 'https://github.com/TangKuku9/Mutter-Bot'
 const readmeUrl = `${repoUrl}/blob/main/README.md`
@@ -867,11 +875,7 @@ onUnmounted(() => {
 <style scoped>
 .about { display: flex; flex-direction: column; gap: 16px; }
 .hero-card {
-  border: none;
-  background: linear-gradient(135deg, #eef4ff 0%, #fdf2f8 55%, #ffffff 100%);
-}
-html.dark .hero-card {
-  background: linear-gradient(135deg, #182338 0%, #2a1c2a 55%, #1d1e1f 100%);
+  background: linear-gradient(115deg, var(--panel-accent-soft), var(--panel-surface) 75%);
 }
 .hero { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
 .hero-brand { display: flex; align-items: center; gap: 14px; }
@@ -883,7 +887,7 @@ html.dark .hero-card {
 .hero-tags { display: flex; flex-wrap: wrap; gap: 8px; }
 .hero-tag {
   padding: 4px 10px; border-radius: 999px; font-size: 12px;
-  color: var(--el-color-primary); background: var(--el-color-primary-light-9);
+  color: var(--panel-accent-text); background: var(--panel-accent-soft);
 }
 .card-head { display: flex; justify-content: space-between; align-items: center; }
 .fill { height: 100%; }
@@ -899,7 +903,7 @@ html.dark .hero-card {
 .quick-step:last-child { margin-bottom: 0; }
 .quick-index {
   flex: 0 0 20px; height: 20px; border-radius: 50%; line-height: 20px; text-align: center;
-  font-size: 12px; color: var(--el-color-primary); background: var(--el-color-primary-light-9);
+  font-size: 12px; color: var(--panel-accent-text); background: var(--panel-accent-soft);
 }
 .update-check {
   display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
@@ -907,7 +911,7 @@ html.dark .hero-card {
 }
 .update-feedback { font-size: 12px; line-height: 1.5; max-width: 280px; text-align: right; }
 .update-feedback.checking, .update-feedback.latest { color: var(--el-text-color-secondary); }
-.update-feedback.downloading, .update-feedback.installing, .update-feedback.restarting { color: var(--el-color-primary); }
+.update-feedback.downloading, .update-feedback.installing, .update-feedback.restarting { color: var(--panel-accent-text); }
 .update-feedback.error { color: var(--el-color-danger); }
 .update-action { font-size: 13px; font-weight: 600; }
 .update-action .el-icon { margin-left: 2px; }
@@ -920,19 +924,22 @@ html.dark .hero-card {
 .setting-row:first-child { padding-top: 2px; }
 .setting-name { font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); }
 .setting-desc { margin-top: 2px; font-size: 12px; color: var(--el-text-color-secondary); }
-.color-options { display: flex; gap: 8px; flex-shrink: 0; }
+.setting-row-theme { flex-wrap: wrap; row-gap: 14px; }
+.color-options { display: flex; flex-wrap: nowrap; flex: 0 0 auto; justify-content: flex-end; gap: 10px; max-width: 100%; }
 .color-dot {
-  width: 24px; height: 24px; padding: 0; border: 2px solid transparent; border-radius: 50%;
+  flex: 0 0 26px; width: 26px; height: 26px; padding: 0; border: 2px solid transparent; border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
-  color: #fff; transition: transform 0.15s, box-shadow 0.15s;
+  color: var(--panel-on-primary); transition: transform 0.15s, box-shadow 0.15s;
 }
 .color-dot:hover { transform: scale(1.1); }
 .color-dot.active {
-  box-shadow: 0 0 0 2px var(--el-bg-color-overlay), 0 0 0 4px var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--panel-surface), 0 0 0 4px var(--panel-accent-text);
 }
 .color-dot .el-icon { font-size: 13px; }
+.custom-color-control { display: flex; align-items: center; gap: 10px; color: var(--panel-text-muted); font-size: 12px; }
+.custom-color-control input { width: 36px; height: 32px; padding: 3px; border: 1px solid var(--panel-border); border-radius: 6px; background: var(--panel-surface); cursor: pointer; }
 .setting-preview {
-  display: flex; align-items: center; gap: 10px; margin-top: 14px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px;
   padding: 10px 12px; border-radius: 8px; background: var(--el-fill-color-light);
 }
 .setting-preview .setting-desc { margin-top: 0; margin-right: auto; }
@@ -945,7 +952,7 @@ html.dark .hero-card {
   display: flex; gap: 12px; padding: 14px; border-radius: 8px;
   background: var(--el-fill-color-lighter); border: 1px solid var(--el-border-color-lighter);
 }
-.feature-icon { margin-top: 2px; font-size: 22px; color: var(--el-color-primary); }
+.feature-icon { margin-top: 2px; font-size: 22px; color: var(--panel-accent-text); }
 .feature-title { font-size: 14px; font-weight: 600; color: var(--el-text-color-primary); }
 .feature-desc { margin-top: 4px; font-size: 12px; line-height: 1.6; color: var(--el-text-color-secondary); }
 .footer-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
@@ -967,5 +974,13 @@ html.dark .hero-card {
 .probe-footnote { margin-top: 12px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.7; }
 @media (max-width: 1100px) {
   .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.about > .el-row { row-gap: 20px; }
+@media (max-width: 600px) {
+  .feature-grid, .footer-grid, .stack-grid { grid-template-columns: minmax(0, 1fr); }
+  .setting-row { flex-wrap: wrap; }
+  .hero-actions { flex-wrap: wrap; }
+  .hero-lockup { width: 160px; height: 40px; }
+  .setting-foot { flex-wrap: wrap; gap: 10px; }
 }
 </style>

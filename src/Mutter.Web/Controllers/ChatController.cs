@@ -20,6 +20,11 @@ public class ChatController : ControllerBase
         _statistics = statistics;
     }
 
+    /// <summary>
+    /// 旧版聊天分页接口。面板已改用 <c>/api/chat/timeline</c>（带稳定分页快照与决策关联）；
+    /// 这里保留给仍按旧契约读取的脚本，新功能不要再接这个口。
+    /// </summary>
+    [Obsolete("面板已改用 /api/chat/timeline；此接口仅保留给旧客户端读取。")]
     [HttpGet("history")]
     public async Task<ActionResult<PagedResult<ChatMessageDto>>> GetHistory(
         [FromQuery] string? groupId = null,

@@ -1,5 +1,5 @@
 <template>
-  <el-drawer v-model="opened" :title="title" direction="rtl" size="400px" append-to-body>
+  <el-drawer v-model="opened" :title="title" direction="rtl" size="min(400px, 100vw)" append-to-body>
     <div class="help">
       <div class="help-cur"><span>当前值</span><b>{{ current }}</b></div>
       <p v-for="(line, i) in lines" :key="i">{{ line }}</p>
@@ -33,7 +33,7 @@ const opened = computed({
 </script>
 
 <style scoped>
-.help { font-size: 13px; color: var(--el-text-color-regular); line-height: 1.8; }
+.help { font-size: 14px; color: var(--el-text-color-regular); line-height: 1.8; }
 .help p { margin: 0 0 8px; }
 .help-cur {
   display: flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 8px 12px;

@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
+using Mutter.Core.Proactive;
 using Mutter.Core.Services;
 using Mutter.Core.Models.Config;
 using Mutter.Infrastructure.Data;
@@ -17,6 +18,89 @@ using Mutter.Web.Services;
 
 internal static partial class RuntimeChecks
 {
+    private static async Task TimelineScaleAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        using var scope = env.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        // 10 万条消息 + 1 万条留痕：旧的 OR/Any 去重会退化成逐留痕全表扫描，
+        // 这里用 8 秒期限把退化直接变成失败，而不是等人线上点开聊天页才发现。
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "ChatMessages"
+                ("MessageId","ChatType","GroupId","UserId","UserName","PlainText","RawSegmentsJson",
+                 "HasImage","HasAtBot","IsBotMessage","IsProactive","CreatedAt")
+            WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 100000)
+            SELECT CASE WHEN i%10=0 THEN 'bot-'||i ELSE 'm-'||i END, 0, 'GROUP-'||(i%64),
+                   CASE WHEN i%5=0 THEN 'BOT' ELSE 'u-'||(i%500) END,
+                   CASE WHEN i%5=0 THEN 'Bot' ELSE '用户'||(i%500) END,
+                   '第'||i||'条消息：这是一段用来模拟群聊内容的中文文本',
+                   '', 0, CASE WHEN i%5<>0 AND i%20=0 THEN 1 ELSE 0 END,
+                   CASE WHEN i%5=0 THEN 1 ELSE 0 END, CASE WHEN i%10=0 THEN 1 ELSE 0 END,
+                   datetime('2026-08-01 00:00:00', '+'||(i*30)||' seconds')
+            FROM n;
+            """);
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "OutgoingReplies"
+                ("Id","GroupId","BotId","Content","IsProactive","PromptTokens","CompletionTokens",
+                 "State","PlatformMessageId","CreatedAt")
+            SELECT 'bot-'||"Id", "GroupId", 'BOT', "PlainText", 1, 10, 20, 'sent',
+                   'p-'||"Id", "CreatedAt"
+            FROM "ChatMessages" WHERE "IsProactive"=1 AND "Id"%20=0;
+            """);
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "ProactiveChatLogs"
+                ("GroupId","EvaluatedAt","MessageCount","DetailVersion","WindowSnapshotJson","ImageCount",
+                 "MemoryCount","MemoryPromptChars","Outcome","ShouldSpeak","Topic","Line","Reason","Detail",
+                 "SentMessageId","Model","PromptTokens","CompletionTokens","SearchQuery","SearchUsed",
+                 "SpeechPromptTokens","SpeechCompletionTokens")
+            WITH RECURSIVE n(j) AS (SELECT 1 UNION ALL SELECT j+1 FROM n WHERE j < 10000)
+            SELECT 'GROUP-'||((20*(j/4))%64),
+                   datetime('2026-08-01 00:00:00', '+'||((20*(j/4))*30)||' seconds'),
+                   12, 1, NULL, 0, 0, 0,
+                   CASE WHEN j%4=0 THEN 'sent_active' ELSE 'skipped_cooldown' END,
+                   CASE WHEN j%4=0 THEN 1 ELSE 0 END,
+                   '话题'||j, CASE WHEN j%4=0 THEN '回复'||j ELSE NULL END,
+                   '第'||j||'条理由', NULL,
+                   CASE WHEN j%8=0 THEN 'bot-'||(20*(j/4))
+                        WHEN j%4=0 THEN 'p-'||(20*(j/4)) ELSE NULL END,
+                   'synthetic-model', 100, 50, NULL, 0, 0, 0
+            FROM n;
+            """);
+        db.ChangeTracker.Clear();
+
+        var reader = new ChatTimelineReader(db);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var elapsed = Stopwatch.StartNew();
+        var page = await reader.ReadAsync(null, null, null, 1, 50, null, cts.Token);
+        elapsed.Stop();
+        Require(page.Items.Count == 50 && page.TotalCount == 107_500,
+            "large timeline hides every sent decision through both the direct and receipt-mapped link");
+        Require(elapsed.Elapsed < TimeSpan.FromSeconds(3),
+            $"timeline dedup must stay index-friendly at 100k messages (took {elapsed.ElapsedMilliseconds} ms)");
+
+        var groupElapsed = Stopwatch.StartNew();
+        var groupPage = await reader.ReadAsync("GROUP-1", null, null, 1, 50, null, cts.Token);
+        groupElapsed.Stop();
+        Require(groupPage.Items.Count == 50 && groupElapsed.Elapsed < TimeSpan.FromSeconds(3),
+            $"group-filtered timeline must stay fast too (took {groupElapsed.ElapsedMilliseconds} ms)");
+
+        var sourceElapsed = Stopwatch.StartNew();
+        var sourcePage = await reader.ReadAsync(null, "proactive", null, 1, 50, null, cts.Token);
+        sourceElapsed.Stop();
+        Require(sourcePage.Items.Count == 50 && sourceElapsed.Elapsed < TimeSpan.FromSeconds(3),
+            $"source-filtered timeline must stay fast (took {sourceElapsed.ElapsedMilliseconds} ms)");
+
+        // 同时命中消息正文与决策理由的查找，验证 LIKE 与去重子查询组合后仍不走全表嵌套。
+        var searchElapsed = Stopwatch.StartNew();
+        var searchPage = await reader.ReadAsync(null, null, "第1", 1, 50, null, cts.Token);
+        searchElapsed.Stop();
+        Require(searchPage.Items.Count == 50 && searchElapsed.Elapsed < TimeSpan.FromSeconds(3),
+            $"searched timeline must stay bounded (took {searchElapsed.ElapsedMilliseconds} ms)");
+        Console.WriteLine(
+            $"      合成 10 万消息 + 1 万留痕：首页 {elapsed.ElapsedMilliseconds} ms；单群 {groupElapsed.ElapsedMilliseconds} ms；来源 {sourceElapsed.ElapsedMilliseconds} ms；查找 {searchElapsed.ElapsedMilliseconds} ms");
+    }
+
     private static async Task UsageLedgerAsync()
     {
         await using var env = await TestEnvironment.CreateAsync();
@@ -236,6 +320,20 @@ internal static partial class RuntimeChecks
                 Reply("old-paired", DeliveryStates.Sent, now.AddDays(-91)),
                 Reply("recent-reply", DeliveryStates.Sent, now.AddDays(-89)),
                 Reply("old-pending", DeliveryStates.Pending, now.AddDays(-91)));
+            // 旧回执仍被近期决策留痕引用时不能删：聊天时间线靠它把 Bot 消息接回决策详情。
+            // 它也不能进旧版用量归档，否则会和实时明细重复计算。
+            var referenced = Reply("old-referenced", DeliveryStates.Sent, now.AddDays(-91));
+            referenced.GroupId = "GROUP";
+            referenced.PlatformMessageId = "platform-old-ref";
+            db.OutgoingReplies.Add(referenced);
+            db.ProactiveChatLogs.AddRange(
+                new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = now.AddDays(-91),
+                    Outcome = ProactiveOutcomes.SkippedAiDeclined, WindowSnapshotJson = "expired" },
+                new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = now.AddDays(-8),
+                    Outcome = ProactiveOutcomes.SkippedAiDeclined, WindowSnapshotJson = "week-old" },
+                new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = now.AddDays(-1),
+                    Outcome = ProactiveOutcomes.SentPassive, SentMessageId = "platform-old-ref",
+                    WindowSnapshotJson = "recent" });
             db.ChatMessages.AddRange(
                 new ChatMessage { MessageId = "modern-chat", IsBotMessage = true, AiModelUsed = "synthetic",
                     AiOperationId = "old-call", PromptTokens = 3, CompletionTokens = 2, CreatedAt = now.AddDays(-91) },
@@ -264,9 +362,15 @@ internal static partial class RuntimeChecks
         await retention.CleanupAsync(default);
         Require(await check.AiCallRecords.CountAsync() == 1
             && await check.ActiveMessageAttempts.CountAsync() == 1
-            && await check.OutgoingReplies.CountAsync() == 2
-            && await check.OutgoingReplies.AnyAsync(r => r.Id == "old-pending") && await check.ChatMessages.CountAsync() == 2,
-            "retention must remove only expired terminal records");
+            && await check.OutgoingReplies.CountAsync() == 3
+            && await check.OutgoingReplies.AnyAsync(r => r.Id == "old-pending")
+            && await check.OutgoingReplies.AnyAsync(r => r.Id == "old-referenced")
+            && await check.ChatMessages.CountAsync() == 2,
+            "retention must remove only expired terminal records and keep referenced receipts");
+        Require(await check.ProactiveChatLogs.CountAsync() == 2
+            && await check.ProactiveChatLogs.CountAsync(l => l.WindowSnapshotJson != null) == 1
+            && await check.ProactiveChatLogs.AnyAsync(l => l.WindowSnapshotJson == "recent"),
+            "expired decisions are removed and week-old snapshots are cleared in the same cleanup");
         Require(JsonSerializer.Serialize(await queries.SummaryAsync(null, default)) == before,
             "cumulative calls, failures, unknown usage and tokens must survive cleanup without double counting legacy replies");
         Require(JsonSerializer.Serialize(await queries.SummaryAsync(now.AddDays(-90), default)) == recentBefore,

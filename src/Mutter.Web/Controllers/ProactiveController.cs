@@ -230,11 +230,19 @@ public class ProactiveController : ControllerBase
         // 日界按北京时间，落库时间存的是 UTC，故先取北京 00:00 再折回 UTC 时刻
         var todayUtcStart = DateTime.UtcNow.AddHours(8).Date.AddHours(-8);
 
-        var sinceRows = await _db.ProactiveChatLogs.AsNoTracking()
+        var phases = await _db.ProactiveChatLogs.AsNoTracking()
             .Where(l => l.EvaluatedAt >= todayUtcStart)
-            .GroupBy(l => l.Outcome)
-            .Select(g => new { Outcome = g.Key, Count = g.Count() })
+            .GroupBy(l => new { l.Outcome, l.AiEvaluated,
+                ModelEvidence = (l.Model != null && l.Model != "") || l.PromptTokens > 0 || l.CompletionTokens > 0
+                    || l.SearchUsed || l.SpeechPromptTokens > 0 || l.SpeechCompletionTokens > 0 })
+            .Select(g => new { g.Key.Outcome, g.Key.AiEvaluated, g.Key.ModelEvidence, Count = g.Count() })
             .ToListAsync(ct);
+        var sinceRows = phases.GroupBy(p => p.Outcome)
+            .Select(g => new { Outcome = g.Key, Count = g.Sum(p => p.Count) }).ToList();
+        // 旧记录优先采用已保存的模型/用量证据，其余沿用旧版结果码的兼容口径。
+        // 新记录以实际阶段为准，包括模型完成后被开关、静默或配额拦下的那次评估。
+        var todayDecisions = phases.Where(p => p.AiEvaluated
+            ?? (p.ModelEvidence || !ProactiveOutcomes.IsBeforeAi(p.Outcome))).Sum(p => p.Count);
 
         var participating = await _db.GroupConfigs.AsNoTracking()
             .Where(g => g.AiProactiveEnabled && g.IsEnabled)
@@ -294,6 +302,7 @@ public class ProactiveController : ControllerBase
             TodayByOutcome = sinceRows,
             TodaySent = sinceRows.Where(r => SentOutcomes.Contains(r.Outcome)).Sum(r => r.Count),
             TodayEvaluations = sinceRows.Sum(r => r.Count),
+            TodayDecisions = todayDecisions,
             Quotas = quotas,
             PendingWindows = _observe.PendingWindows()
                 .Select(p => new

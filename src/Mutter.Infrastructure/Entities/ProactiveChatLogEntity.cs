@@ -9,6 +9,15 @@ public class ProactiveChatLogEntity
     public string GroupId { get; set; } = string.Empty;
     public DateTime EvaluatedAt { get; set; }
     public int MessageCount { get; set; }
+    /// <summary>是否实际进入模型评估。NULL 为未保存此阶段标记的旧留痕。</summary>
+    public bool? AiEvaluated { get; set; }
+    /// <summary>0/1 为旧留痕，异常路径的默认值不能作为完整诊断；2 起零值可信。</summary>
+    public int DetailVersion { get; set; }
+
+    /// <summary>2 起完整诊断可信，观察窗口也经过群级隐私门槛。</summary>
+    public const int DiagnosticsVersion = 2;
+    public const int PrivacyGatedWindowVersion = 2;
+    public string? WindowSnapshotJson { get; set; }
 
     /// <summary>这次评估实际随消息附带了几张图片（0 表示纯文本判断）。</summary>
     public int ImageCount { get; set; }
