@@ -2,7 +2,6 @@ using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Mutter.Core.Models;
-using Mutter.Core.Proactive;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
 using Mutter.Web.Models;
@@ -129,9 +128,8 @@ public sealed class ChatTimelineReader(AppDbContext db)
         var log = await db.ProactiveChatLogs.AsNoTracking().SingleOrDefaultAsync(l => l.Id == id, ct);
         if (log is null) return null;
         var name = await db.KnownGroups.AsNoTracking().Where(g => g.GroupOpenId == log.GroupId).Select(g => g.Name).FirstOrDefaultAsync(ct);
-        // DetailVersion=1 起，记忆/附图/联网这些诊断值的 0/空值就是“确实没有”，
-        // 包括模型调用失败、还没回写 Model 的那次；不能再拿 Model 是否为空代替判断，
-        // 否则失败那次的记忆与附图会被误报成“未记录”。
+        // v1 的异常兜底也会写入默认 0，不能视为完整诊断。v2 起明确保存已知诊断值；
+        // 旧留痕仍保留可确认的正数/true，不把缺失信息伪装成“未使用”。
         var known = log.DetailVersion >= ProactiveChatLogEntity.DiagnosticsVersion;
         ProactiveLogSnapshot? window = null;
         // DetailVersion=2 起才返回观察窗口：1 是隐私门槛上线前写的旧快照，只 @ 的群也可能含有
@@ -143,10 +141,8 @@ public sealed class ChatTimelineReader(AppDbContext db)
             catch (JsonException) { /* 旧留痕或损坏快照不影响正文和其他详情读取。 */ }
             if (window?.Version != ProactiveLogSnapshot.CurrentVersion || window.Messages is null) window = null;
         }
-        // 用量和诊断值分开：只有门禁结果确实知道是 0；模型调用的 0 也可能是上游没回 usage。
-        var usageKnown = (log.DetailVersion >= ProactiveChatLogEntity.DiagnosticsVersion
-                && ProactiveOutcomes.IsBeforeAi(log.Outcome))
-            || log.PromptTokens > 0 || log.CompletionTokens > 0;
+        // 最终门禁也可能发生在模型之后，只有明确的阶段标记才能证明没有模型用量。
+        var usageKnown = log.AiEvaluated == false || log.PromptTokens > 0 || log.CompletionTokens > 0;
         var speechKnown = (known && !log.SearchUsed) || log.SpeechPromptTokens > 0 || log.SpeechCompletionTokens > 0;
         return new ChatDecisionDto { Id = log.Id, GroupId = log.GroupId, GroupName = name, EvaluatedAt = log.EvaluatedAt,
             Outcome = log.Outcome, Topic = log.Topic, Line = log.Line, Reason = log.Reason, Detail = log.Detail,

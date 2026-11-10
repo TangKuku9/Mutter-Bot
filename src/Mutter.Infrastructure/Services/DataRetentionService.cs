@@ -71,7 +71,9 @@ public sealed class DataRetentionService(
                     AND r."Model" IS NOT NULL AND r."AiOperationId" IS NULL
                     AND NOT EXISTS (SELECT 1 FROM "ChatMessages" m WHERE m."MessageId" = r."Id")
                     AND NOT EXISTS (SELECT 1 FROM "ProactiveChatLogs" l
-                        WHERE l."GroupId" = r."GroupId" AND l."SentMessageId" = r."PlatformMessageId")
+                        WHERE r."PlatformMessageId" IS NOT NULL AND r."PlatformMessageId" <> ''
+                            AND l."SentMessageId" IS NOT NULL AND l."SentMessageId" <> ''
+                            AND l."GroupId" = r."GroupId" AND l."SentMessageId" = r."PlatformMessageId")
             ) WHERE 1 = 1
             ON CONFLICT ("Id") DO UPDATE SET
                 "CallCount" = "CallCount" + excluded."CallCount",
@@ -91,7 +93,9 @@ public sealed class DataRetentionService(
         var replies = await db.OutgoingReplies
             .Where(r => r.State != DeliveryStates.Pending && r.CreatedAt < cutoff
                 && !db.ProactiveChatLogs.Any(l =>
-                    l.GroupId == r.GroupId && l.SentMessageId == r.PlatformMessageId))
+                    r.PlatformMessageId != null && r.PlatformMessageId != ""
+                    && l.SentMessageId != null && l.SentMessageId != ""
+                    && l.GroupId == r.GroupId && l.SentMessageId == r.PlatformMessageId))
             .ExecuteDeleteAsync(ct);
         await transaction.CommitAsync(ct);
         if (calls + attempts + decisions + snapshots + replies > 0)

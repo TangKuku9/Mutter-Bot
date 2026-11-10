@@ -63,6 +63,7 @@ internal static partial class RuntimeChecks
             ("群设置与记忆保存事务", AtomicGroupSettingsAsync),
             ("运行队列快照与调用过程关联", RuntimeSnapshotAsync),
             ("运行账本保留策略与累计统计事务", RetentionAsync),
+            ("空回执归档幂等与决策阶段计数兼容", ReviewBoundariesAsync),
             ("网关重连缓冲、恢复序号与关闭排空", GatewayHandoffAsync),
             ("真实宿主停机关闭入口与排空", HostShutdownAsync),
             ("新装预算默认值与旧配置保留", BudgetDefaultsAsync),
@@ -630,6 +631,7 @@ internal static partial class RuntimeChecks
             var log = await db.ProactiveChatLogs.OrderBy(l => l.Id).LastAsync();
             var detail = await new ChatTimelineReader(db).DecisionAsync(log.Id);
             Require(log.Outcome == ProactiveOutcomes.FailedAiCall && log.DetailVersion == 0
+                && log.AiEvaluated == false
                 && detail is { ImageCount: null, MemoryCount: null, SearchUsed: null },
                 "exception fallbacks must leave diagnostics unknown instead of inventing zeroes");
         }
@@ -642,6 +644,7 @@ internal static partial class RuntimeChecks
             var log = await db.ProactiveChatLogs.OrderBy(l => l.Id).LastAsync();
             Require(log.Outcome == ProactiveOutcomes.SkippedCooldown && log.WindowSnapshotJson is null,
                 "cooldown skips stay out of snapshot storage even for mode 2 groups");
+            Require(log.AiEvaluated == false, "a cooldown gate before model evaluation records the actual phase");
         }
 
         static ProactiveWindow Window(string id, DateTime now) => new()
@@ -687,6 +690,13 @@ internal static partial class RuntimeChecks
             var log = await checkScope.ServiceProvider.GetRequiredService<AppDbContext>().ProactiveChatLogs.SingleAsync();
             Require(log.Outcome == (change == "quiet" ? ProactiveOutcomes.SkippedQuietHours : ProactiveOutcomes.SkippedDisabled),
                 $"final policy reason {change}: {log.Outcome}");
+            Require(log.AiEvaluated == true && env.Http.Requests.Count > 0,
+                $"the completed model phase survives final policy blocking: {change}");
+            // 状态接口按真实当前日统计，固定时钟只负责复现运行期间的策略切换。
+            log.EvaluatedAt = DateTime.UtcNow;
+            await checkScope.ServiceProvider.GetRequiredService<AppDbContext>().SaveChangesAsync();
+            Require(await ReadTodayDecisionsAsync(checkScope.ServiceProvider) == 1,
+                $"today decisions include model work blocked at delivery: {change}");
         }
     }
 

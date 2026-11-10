@@ -445,7 +445,8 @@ public class AppDbContext : DbContext
         foreach (var sql in new[]
         {
             "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"DetailVersion\" INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"WindowSnapshotJson\" TEXT"
+            "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"WindowSnapshotJson\" TEXT",
+            "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"AiEvaluated\" INTEGER"
         })
         {
             try { await Database.ExecuteSqlRawAsync(sql, ct); }

@@ -27,9 +27,12 @@ internal static partial class RuntimeChecks
         // 真实旧表缺列，反复升级只补结构，保留原聊天与留痕。
         await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"ProactiveChatLogs\" DROP COLUMN \"DetailVersion\"");
         await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"ProactiveChatLogs\" DROP COLUMN \"WindowSnapshotJson\"");
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"ProactiveChatLogs\" DROP COLUMN \"AiEvaluated\"");
         await db.EnsureSchemaUpgradedAsync();
         await db.EnsureSchemaUpgradedAsync();
         db.ChangeTracker.Clear();
+        Require((await db.ProactiveChatLogs.SingleAsync(l => l.Id == oldId)).AiEvaluated is null,
+            "schema upgrade leaves old evaluation phases unknown rather than writing false");
         var reader = new ChatTimelineReader(db);
         var first = await reader.ReadAsync("GROUP", null, null, 1, 50, null);
         Require(first.Items.Count == 50 && first.TotalCount == 73, "messages and silent decisions form one paged timeline");
@@ -56,7 +59,7 @@ internal static partial class RuntimeChecks
         var bot = new ChatMessage { MessageId = "synthetic-outgoing", GroupId = "GROUP", UserId = "BOT", UserName = "Bot",
             IsBotMessage = true, IsProactive = true, PlainText = "实际回复", CreatedAt = time.AddMinutes(4) };
         db.ChatMessages.Add(bot);
-        var decision = new ProactiveChatLogEntity { GroupId = "GROUP", SentMessageId = "platform-sent", DetailVersion = 2,
+        var decision = new ProactiveChatLogEntity { GroupId = "GROUP", SentMessageId = "platform-sent", DetailVersion = 2, AiEvaluated = true,
             Outcome = ProactiveOutcomes.SentPassive, Line = "实际回复", Model = "synthetic-model", EvaluatedAt = time.AddMinutes(4),
             WindowSnapshotJson = ProactiveLogSnapshot.Capture(window), MessageCount = 1 };
         db.ProactiveChatLogs.Add(decision);
@@ -68,9 +71,18 @@ internal static partial class RuntimeChecks
         // 模型调用失败时 Model 还没回写，但这次确实带了 2 张图、1 条记忆；
         // 不能因为 Model 为空就把已知值显示成“未记录”。
         var failedCall = new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = time.AddMinutes(5),
-            DetailVersion = 1, Outcome = ProactiveOutcomes.FailedAiCall, Model = null,
+            DetailVersion = 2, AiEvaluated = true, Outcome = ProactiveOutcomes.FailedAiCall, Model = null,
             ImageCount = 2, MemoryCount = 1, MemoryPromptChars = 30, SearchUsed = false, MessageCount = 2 };
         db.ProactiveChatLogs.Add(failedCall);
+        var oldFallback = new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = time.AddMinutes(5),
+            DetailVersion = 1, Outcome = ProactiveOutcomes.FailedAiCall, Model = null };
+        var oldPositive = new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = time.AddMinutes(5),
+            DetailVersion = 1, Outcome = ProactiveOutcomes.FailedAiCall, MemoryCount = 1, ImageCount = 2, SearchUsed = true };
+        var postModelGate = new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = time.AddMinutes(5),
+            DetailVersion = 2, AiEvaluated = true, Outcome = ProactiveOutcomes.SkippedQuietHours };
+        var beforeModelGate = new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = time.AddMinutes(5),
+            DetailVersion = 2, AiEvaluated = false, Outcome = ProactiveOutcomes.SkippedQuietHours };
+        db.ProactiveChatLogs.AddRange(oldFallback, oldPositive, postModelGate, beforeModelGate);
         db.ProactiveChatLogs.Add(new ProactiveChatLogEntity { GroupId = "OTHER", SentMessageId = "platform-sent",
             Outcome = ProactiveOutcomes.SentPassive, EvaluatedAt = time.AddMinutes(4), Line = "另一个群" });
         var directBot = new ChatMessage { MessageId = "platform-legacy", GroupId = "GROUP", UserId = "BOT", UserName = "历史Bot",
@@ -96,6 +108,14 @@ internal static partial class RuntimeChecks
         var failedDetail = await reader.DecisionAsync(failedCall.Id);
         Require(failedDetail is { ImageCount: 2, MemoryCount: 1, MemoryPromptChars: 30, SearchUsed: false, PromptTokens: null },
             "a failed call keeps recorded diagnostics while unknown token usage stays unknown");
+        Require(await reader.DecisionAsync(oldFallback.Id) is { ImageCount: null, MemoryCount: null, SearchUsed: null, PromptTokens: null, SpeechPromptTokens: null },
+            "version 1 fallback zeroes must remain unknown after upgrade");
+        Require(await reader.DecisionAsync(oldPositive.Id) is { ImageCount: 2, MemoryCount: 1, SearchUsed: true },
+            "known positive diagnostics from version 1 remain visible");
+        Require(await reader.DecisionAsync(postModelGate.Id) is { PromptTokens: null, CompletionTokens: null },
+            "a post-model gate cannot turn missing provider usage into known zeroes");
+        Require(await reader.DecisionAsync(beforeModelGate.Id) is { PromptTokens: 0, CompletionTokens: 0 },
+            "an explicit pre-model phase establishes zero model usage");
         Require(await reader.DecisionAsync(oldSnapshotLog.Id) is { Window: null },
             "windows written before the privacy gate are not returned from the detail endpoint");
         Require(decision.WindowSnapshotJson is not null && !decision.WindowSnapshotJson.Contains("temporary-image"),

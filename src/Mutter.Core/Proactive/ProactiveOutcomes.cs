@@ -45,8 +45,8 @@ public static class ProactiveOutcomes
     };
 
     /// <summary>
-    /// 还没进入模型评估就被门禁挡下的结果。面板的「今日决策」与观察窗口快照只认
-    /// 真正走到模型这一步的评估；冷却、日限、开关关闭都不该算一次决策。
+    /// 模型前门禁会使用的结果码；其中冷却、日限、开关关闭也可能由模型后的投递复核返回。
+    /// 因此结果码本身不能证明是否经过模型，只用于旧留痕的兼容判断。
     /// SkippedDuplicate 来自发送账本 PrepareAsync，模型已经评估过，故不在模型前门禁。
     /// </summary>
     private static readonly HashSet<string> BeforeAi = new(StringComparer.Ordinal)
