@@ -13,7 +13,7 @@
     </el-card>
 
     <el-card shadow="never" style="margin-top: 16px">
-      <el-descriptions :column="3" border>
+      <el-descriptions :column="singleColumn ? 1 : 3" border>
         <el-descriptions-item label="实际模型请求">{{ summary.callCount ?? 0 }}</el-descriptions-item>
         <el-descriptions-item label="失败 / 取消">{{ summary.failedCount ?? 0 }}</el-descriptions-item>
         <el-descriptions-item label="未返回完整用量">{{ summary.unknownUsageCount ?? 0 }}</el-descriptions-item>
@@ -22,13 +22,13 @@
       <p v-if="summary.legacyCount" class="stat-note">另有 {{ summary.legacyCount }} 条历史回复用量已保留；旧记录无法还原实际请求次数和使用者，不计入实际请求数与用户排行。</p>
     </el-card>
     <el-row :gutter="16" style="margin-top: 16px">
-      <el-col :span="12">
+      <el-col :xs="24" :lg="12">
         <el-card shadow="never">
           <template #header><b>每日 Token 用量</b></template>
           <div ref="trendEl" class="trend-chart"></div>
         </el-card>
       </el-col>
-      <el-col :span="12">
+      <el-col :xs="24" :lg="12">
         <el-card shadow="never">
           <template #header><b>群 Token 排行（Top {{ groups.length }}）</b></template>
           <el-table :data="groups" size="small" max-height="420">
@@ -67,10 +67,12 @@ import { CanvasRenderer } from 'echarts/renderers'
 import api from '../api'
 import { LatestRequest } from '../latestRequest'
 import { panelSettings } from '../panelSettings'
+import { useMediaQuery } from '../useMediaQuery'
 
 echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, GraphicComponent, CanvasRenderer])
 
 const days = ref(7)
+const singleColumn = useMediaQuery('(max-width: 600px)')
 const daily = ref([])
 const groups = ref([])
 const users = ref([])
@@ -101,9 +103,10 @@ const enumerateDates = (start, end) => {
 }
 
 const buildOption = () => {
-  const dark = panelSettings.darkMode
-  const axisColor = dark ? '#a3a6ad' : '#909399'
-  const splitColor = dark ? '#363637' : '#ebeef5'
+  const styles = getComputedStyle(document.documentElement)
+  const color = (name) => styles.getPropertyValue(name).trim()
+  const axisColor = color('--panel-text-muted')
+  const splitColor = color('--panel-border-soft')
   const rows = daily.value
   const byDate = new Map(rows.map((row) => [row.date, row]))
   const dates = rows.length ? enumerateDates(rows[0].date, rows[rows.length - 1].date) : []
@@ -111,13 +114,13 @@ const buildOption = () => {
 
   return {
     backgroundColor: 'transparent',
-    color: [panelSettings.primaryColor, '#e6a23c'],
+    color: [color('--panel-accent-text'), color('--el-color-warning')],
     animationDuration: 300,
     tooltip: {
       trigger: 'axis',
-      backgroundColor: dark ? '#1d1e1f' : '#ffffff',
-      borderColor: dark ? '#4c4d4f' : '#e4e7ed',
-      textStyle: { color: dark ? '#e5eaf3' : '#303133', fontSize: 12 },
+      backgroundColor: color('--panel-surface'),
+      borderColor: color('--panel-border'),
+      textStyle: { color: color('--panel-text'), fontSize: 13 },
       axisPointer: { type: 'line', lineStyle: { color: axisColor, type: 'dashed' } },
       formatter: (params) => {
         const date = dates[params[0]?.dataIndex]
@@ -145,17 +148,17 @@ const buildOption = () => {
       data: dates.map((date) => date.slice(5)),
       axisLine: { lineStyle: { color: splitColor } },
       axisTick: { show: false },
-      axisLabel: { color: axisColor, fontSize: 11, hideOverlap: true }
+      axisLabel: { color: axisColor, fontSize: 12, hideOverlap: true }
     },
     yAxis: [
       {
         type: 'value',
-        axisLabel: { color: axisColor, fontSize: 11, formatter: formatTokens },
+        axisLabel: { color: axisColor, fontSize: 12, formatter: formatTokens },
         splitLine: { lineStyle: { color: splitColor } }
       },
       {
         type: 'value',
-        axisLabel: { color: axisColor, fontSize: 11 },
+        axisLabel: { color: axisColor, fontSize: 12 },
         splitLine: { show: false }
       }
     ],
@@ -234,4 +237,5 @@ onBeforeUnmount(() => {
 .stat-note { color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
 .toolbar { display: flex; align-items: center; gap: 10px; }
 .trend-chart { width: 100%; height: 420px; }
+.el-row { row-gap: 16px; }
 </style>

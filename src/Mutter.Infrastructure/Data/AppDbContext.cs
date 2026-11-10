@@ -50,6 +50,7 @@ public class AppDbContext : DbContext
         {
             e.HasKey(r => r.Id);
             e.HasIndex(r => new { r.IsProactive, r.GroupId, r.CreatedAt });
+            e.HasIndex(r => new { r.PlatformMessageId, r.GroupId });
         });
         modelBuilder.Entity<ActiveMessageAttempt>(e =>
         {
@@ -122,6 +123,7 @@ public class AppDbContext : DbContext
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.EvaluatedAt);
             e.HasIndex(x => new { x.GroupId, x.EvaluatedAt });
+            e.HasIndex(x => new { x.SentMessageId, x.GroupId });
         });
 
         modelBuilder.Entity<GroupMemoryEntity>(e =>
@@ -438,6 +440,22 @@ public class AppDbContext : DbContext
             "CREATE INDEX IF NOT EXISTS \"IX_ProactiveChatLogs_EvaluatedAt\" ON \"ProactiveChatLogs\" (\"EvaluatedAt\")", ct);
         await Database.ExecuteSqlRawAsync(
             "CREATE INDEX IF NOT EXISTS \"IX_ProactiveChatLogs_GroupId_EvaluatedAt\" ON \"ProactiveChatLogs\" (\"GroupId\", \"EvaluatedAt\")", ct);
+
+        // 增量补列，不给历史留痕补造观察窗口或诊断结果。
+        foreach (var sql in new[]
+        {
+            "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"DetailVersion\" INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"WindowSnapshotJson\" TEXT",
+            "ALTER TABLE \"ProactiveChatLogs\" ADD COLUMN \"AiEvaluated\" INTEGER"
+        })
+        {
+            try { await Database.ExecuteSqlRawAsync(sql, ct); }
+            catch (Exception ex) when (ex.Message.Contains("duplicate column name")) { }
+        }
+        await Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS \"IX_ProactiveChatLogs_SentMessageId_GroupId\" ON \"ProactiveChatLogs\" (\"SentMessageId\", \"GroupId\")", ct);
+        await Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS \"IX_OutgoingReplies_PlatformMessageId_GroupId\" ON \"OutgoingReplies\" (\"PlatformMessageId\", \"GroupId\")", ct);
 
         // ChatMessages 标记“Bot 主动插话”，面板据此把择机发言与被动应答分开展示
         try

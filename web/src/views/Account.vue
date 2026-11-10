@@ -1,7 +1,7 @@
 <template>
   <div>
-    <el-row :gutter="16">
-      <el-col :span="10">
+    <el-row :gutter="20" class="account-grid">
+      <el-col :xs="24" :lg="10">
         <el-card shadow="never">
           <template #header><b>修改密码</b></template>
           <el-form :model="pwd" label-width="90px">
@@ -24,7 +24,7 @@
         </el-card>
       </el-col>
 
-      <el-col :span="14">
+      <el-col :xs="24" :lg="14">
         <el-card shadow="never">
           <template #header>
             <div class="card-head">
@@ -105,4 +105,5 @@ onMounted(loadSessions)
 
 <style scoped>
 .card-head { display: flex; justify-content: space-between; align-items: center; }
+.account-grid { row-gap: 20px; }
 </style>

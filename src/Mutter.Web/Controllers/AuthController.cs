@@ -1,7 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Mutter.Web.Services;
@@ -20,12 +18,14 @@ public class AuthController : ControllerBase
     private readonly IConfiguration _config;
     private readonly PanelSessionStore _sessions;
     private readonly PanelLoginGuard _loginGuard;
+    private readonly PanelPasswordStore _passwords;
 
-    public AuthController(IConfiguration config, PanelSessionStore sessions, PanelLoginGuard loginGuard)
+    public AuthController(IConfiguration config, PanelSessionStore sessions, PanelLoginGuard loginGuard, PanelPasswordStore passwords)
     {
         _config = config;
         _sessions = sessions;
         _loginGuard = loginGuard;
+        _passwords = passwords;
     }
 
     public class LoginRequest
@@ -93,7 +93,7 @@ public class AuthController : ControllerBase
         // 明文或旧格式哈希在登录成功后透明升级到新格式
         if (!PanelPasswordHasher.IsHashed(storedPass) || PanelPasswordHasher.NeedsRehash(storedPass))
         {
-            try { WritePasswordToAppSettings(PanelPasswordHasher.Hash(req.Password)); }
+            try { _passwords.Save(PanelPasswordHasher.Hash(req.Password)); }
             catch { /* 写文件失败不阻塞登录，下次再试 */ }
         }
 
@@ -135,7 +135,7 @@ public class AuthController : ControllerBase
         return Ok(new { authenticated = false });
     }
 
-    /// <summary>修改密码：校验当前密码后写入 appsettings.json（哈希存储），并清除所有已有会话强制重新登录。初始密码未修改时允许无会话首改。</summary>
+    /// <summary>修改密码：校验后写回实际密码配置文件（哈希存储），并清除会话。初始密码允许无会话首改。</summary>
     [HttpPost("change-password")]
     public IActionResult ChangePassword([FromBody] ChangePasswordRequest req)
     {
@@ -181,7 +181,7 @@ public class AuthController : ControllerBase
         // 更新 appsettings.json（哈希格式）
         try
         {
-            WritePasswordToAppSettings(PanelPasswordHasher.Hash(req.NewPassword));
+            _passwords.Save(PanelPasswordHasher.Hash(req.NewPassword));
         }
         catch (Exception ex)
         {
@@ -228,19 +228,6 @@ public class AuthController : ControllerBase
         return removed ? Ok(new { message = "会话已注销" }) : NotFound(new { error = "会话不存在或已过期" });
     }
 
-    /// <summary>把存储值写入 appsettings.json 的 PanelAuth:Password。</summary>
-    private static void WritePasswordToAppSettings(string storedValue)
-    {
-        var appSettingsPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-        var json = System.IO.File.ReadAllText(appSettingsPath);
-        var doc = JsonNode.Parse(json) ?? new JsonObject();
-        if (doc["PanelAuth"] is null)
-            doc["PanelAuth"] = new JsonObject();
-        doc["PanelAuth"]!["Password"] = storedValue;
-
-        var options = new JsonSerializerOptions { WriteIndented = true };
-        System.IO.File.WriteAllText(appSettingsPath, doc.ToJsonString(options));
-    }
 }
 
 /// <summary>

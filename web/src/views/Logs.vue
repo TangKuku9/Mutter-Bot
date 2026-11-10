@@ -94,14 +94,14 @@ watch(filtered, () => {
 
 <style scoped>
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.log-box { height: calc(100vh - 220px); overflow-y: auto; background: #1e1e1e; border-radius: 6px; padding: 10px; font-family: Consolas, Menlo, monospace; font-size: 12px; }
-.log-line { white-space: pre-wrap; word-break: break-all; line-height: 1.6; color: #d4d4d4; }
-.ts { color: #6a9955; margin-right: 8px; }
+.log-box { height: min(640px, calc(100dvh - 340px)); min-height: 320px; overflow-y: auto; background: var(--panel-raised); border-radius: 8px; padding: 16px; font-family: ui-monospace, Consolas, Menlo, monospace; font-size: 13px; }
+.log-line { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; color: var(--panel-text-regular); }
+.ts { color: var(--panel-text-muted); margin-right: 8px; }
 .lv { display: inline-block; width: 82px; font-weight: 600; }
-.cat { color: #569cd6; margin-right: 8px; }
-.lv-information .lv { color: #4ec9b0; }
-.lv-warning .lv, .lv-warning .msg { color: #dcdcaa; }
-.lv-error .lv, .lv-error .msg, .lv-critical .lv, .lv-critical .msg { color: #f48771; }
-.lv-debug .lv, .lv-trace .lv { color: #808080; }
-.empty { color: #808080; text-align: center; padding: 40px 0; }
+.cat { color: var(--panel-accent-text); margin-right: 8px; }
+.lv-information .lv { color: var(--el-color-success); }
+.lv-warning .lv, .lv-warning .msg { color: var(--el-color-warning); }
+.lv-error .lv, .lv-error .msg, .lv-critical .lv, .lv-critical .msg { color: var(--el-color-danger); }
+.lv-debug .lv, .lv-trace .lv { color: var(--panel-text-muted); }
+.empty { color: var(--panel-text-muted); text-align: center; padding: 40px 0; }
 </style>
