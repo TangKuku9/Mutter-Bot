@@ -52,6 +52,7 @@ internal static partial class RuntimeChecks
             ("完整消息管线串行回复与持久化", MessagePipelineAsync),
             ("跨群主动日限的原子预占", ProactiveReservationAsync),
             ("旧模型升级幂等与数据保留", SchemaAsync),
+            ("聊天历史查找、稳定分页、精确决策关联与旧库兼容", ChatTimelineAsync),
             ("实际调用账本、用户归属、失败和历史用量", UsageLedgerAsync),
             ("统计 SQL 聚合、缓存与大记录集", StatisticsPerformanceAsync),
             ("图片缓存容量、下载并发与取消隔离", ImageLimitsAsync),

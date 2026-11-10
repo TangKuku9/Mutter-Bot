@@ -362,6 +362,8 @@ public sealed class ProactiveWorkflow
                 GroupId = window.GroupId,
                 EvaluatedAt = _clock.GetUtcNow().UtcDateTime,
                 MessageCount = window.Messages.Count,
+                DetailVersion = 1,
+                WindowSnapshotJson = ProactiveLogSnapshot.Capture(window),
                 ImageCount = window.ImageCount,
                 MemoryCount = note.MemoryCount,
                 MemoryPromptChars = note.MemoryPromptChars,
