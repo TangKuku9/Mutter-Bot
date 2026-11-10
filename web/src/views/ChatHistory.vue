@@ -20,7 +20,7 @@
           <div class="chat-live"><el-switch v-model="live" aria-label="实时更新" @change="toggleLive" /><span>{{ live ? connOk ? '实时更新' : '连接中' : '已暂停' }}</span><el-button size="small" :loading="loading" @click="refreshLatest">刷新</el-button></div>
         </div>
         <form class="chat-search" role="search" @submit.prevent="applySearch"><el-input v-model="searchInput" aria-label="查找聊天记录" placeholder="查找内容、发送者或决策理由" :prefix-icon="Search" maxlength="200" clearable @clear="applySearch" /><el-button native-type="submit" :loading="loading">查找</el-button></form>
-        <div v-if="keyword" class="search-summary" role="status"><span>查找“{{ keyword }}” · 共 {{ total }} 条记录</span><el-button link type="primary" size="small" @click="clearSearch">清除查找</el-button></div>
+        <div v-if="keyword" class="search-summary" role="status"><span>{{ total === null ? `正在查找“${keyword}”…` : `查找“${keyword}” · 共 ${total} 条记录` }}</span><el-button link type="primary" size="small" @click="clearSearch">清除查找</el-button></div>
         <div v-if="hasNew" class="new-message-notice" role="status"><span>有新的消息或评估记录</span><el-button link type="primary" size="small" @click="refreshLatest">查看新记录</el-button></div>
         <el-alert v-if="loadError" title="聊天记录暂时无法读取，请刷新重试。" type="warning" :closable="false" show-icon class="history-error" />
         <div ref="stream" v-loading="loading" class="conversation-stream" aria-label="会话内容" :aria-busy="loading" @scroll="onScroll">
@@ -31,7 +31,7 @@
             <article v-else class="chat-message" :class="{ 'bot-message': entry.isBotMessage }"><span class="sender-avatar" :class="{ 'bot-avatar': entry.isBotMessage }" aria-hidden="true">{{ entry.isBotMessage ? '' : senderName(entry).slice(-1) }}</span><div class="message-body"><div class="message-meta"><b><HighlightedText :text="senderName(entry)" :keyword="keyword" /></b><time :title="chatDateTime(entry.createdAt)">{{ chatTime(entry.createdAt) }}</time><span class="message-source">{{ chatKind(entry) }}</span><span v-if="!groupId" class="message-group">{{ entry.chatType === 1 ? '私聊' : entry.groupName || shortId(entry.groupId) }}</span></div><p class="message-text"><HighlightedText :text="entry.plainText || (entry.hasImage ? '[图片]' : '[空消息]')" :keyword="keyword" /></p><span v-if="entry.hasImage && entry.plainText" class="image-note">附图片</span><div v-if="entry.isBotMessage" class="message-bottom"><span><el-icon aria-hidden="true"><Check /></el-icon>已保存回复</span><el-button v-if="entry.isProactive || entry.decisionId" link type="primary" size="small" @click="openDetails(entry)">{{ entry.decisionId ? '接话详情' : '历史详情' }}<el-icon aria-hidden="true"><TopRight /></el-icon></el-button></div></div></article>
           </template>
         </div>
-        <footer class="conversation-footer"><div><span>共 {{ total }} 条记录</span><span>时间按北京时间显示</span></div><el-pagination v-if="total > pageSize" layout="prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" :pager-count="5" prev-text="较新" next-text="更早" @current-change="onPage" /></footer>
+        <footer class="conversation-footer"><div><span>{{ total === null ? (countFailed ? '总数暂无法统计' : hasMore ? '已显示最新记录 · 总数统计中…' : '记录总数统计中…') : `共 ${total} 条记录` }}</span><span>时间按北京时间显示</span></div><el-pagination v-if="total !== null && total > pageSize" layout="prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" :pager-count="5" prev-text="较新" next-text="更早" @current-change="onPage" /><el-button v-else-if="total === null && hasMore" link type="primary" size="small" @click="onPage(2)">更早<el-icon aria-hidden="true"><ArrowRight /></el-icon></el-button></footer>
       </section>
     </div>
   </el-card>
@@ -42,18 +42,18 @@ import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { Search, Collection, Clock, ArrowRight, TopRight, Check } from '@element-plus/icons-vue'
 import { subscribeRealtime, realtimeState } from '../realtime'
 import { LatestRequest, matchesChatMessage } from '../latestRequest'
-import { chatTime, chatDateTime, chatKind, senderName, timelineEntries, groupSummary, groupRecordingNote } from '../chatHistory'
+import { chatTime, chatDateTime, chatKind, senderName, timelineEntries, groupSummary, groupRecordingNote, mergeTimelineMessage, advanceMessageSnapshot } from '../chatHistory'
 import { runtimeLabel, runtimeType } from '../runtimeLabels'
 import HighlightedText from '../components/HighlightedText.vue'
 import ChatDecisionDrawer from '../components/ChatDecisionDrawer.vue'
 import api from '../api'
 const items = ref([]), groups = ref([]), groupId = ref(''), groupSearch = ref(''), source = ref('')
 const searchInput = ref(''), keyword = ref(''), snapshot = ref(null)
-const page = ref(1), total = ref(0), pageSize = 50
+const page = ref(1), total = ref(null), hasMore = ref(false), countFailed = ref(false), pageSize = 50
 const loading = ref(false), loadError = ref(false), groupsError = ref(false)
 const live = ref(true), hasNew = ref(false), following = ref(true), stream = ref(null)
 const drawerVisible = ref(false), selectedEntry = ref(null)
-const request = new LatestRequest(), groupRequest = new AbortController()
+const request = new LatestRequest(), countRequest = new LatestRequest(), groupRequest = new AbortController()
 const connOk = computed(() => live.value && realtimeState.connected)
 const sources = [{ value: '', label: '全部' }, { value: 'observe', label: '围观' }, { value: 'at', label: '被 @' }, { value: 'bot', label: 'Bot 应答' }, { value: 'proactive', label: 'Bot 插话' }, { value: 'decision', label: '评估记录' }]
 const selectedGroup = computed(() => groups.value.find(group => group.groupOpenId === groupId.value))
@@ -61,52 +61,194 @@ const filteredGroups = computed(() => groups.value.filter(group => `${group.name
 const groupDescription = computed(() => groupId.value ? groupRecordingNote(selectedGroup.value?.config) : '按时间查看已保存的消息与择机评估')
 const entries = computed(() => timelineEntries(items.value))
 const shortId = id => id ? `${id.slice(0, 8)}…` : '未记录群聊'
-let unsubscribe = null, timer = null, disposed = false
+let unsubscribe = null, timer = null, countTimer = null, disposed = false
+let pendingMessages = [], queuedRefresh = false
 const onScroll = () => { const el = stream.value; if (el) following.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48 }
-const load = async () => {
+const scrollToLatest = () => nextTick(() => { if (stream.value && following.value) stream.value.scrollTop = stream.value.scrollHeight })
+const canAutoRefresh = () => !disposed && live.value && !loadError.value && page.value === 1 && !keyword.value && following.value && !drawerVisible.value
+const viewIsCurrent = (group, filter) => group === groupId.value && filter === source.value
+const cancelAuto = () => { if (timer) { clearTimeout(timer); timer = null } }
+const cancelCount = () => {
+  if (countTimer) { clearTimeout(countTimer); countTimer = null }
+  countRequest.cancel()
+}
+const countKey = () => `${groupId.value}\u0000${source.value}\u0000${snapshot.value || ''}`
+const scheduleCount = (delay = 0) => {
+  if (countTimer) clearTimeout(countTimer)
+  countTimer = null
+  if (page.value !== 1 || keyword.value || !snapshot.value) return
+  countFailed.value = false
+  countTimer = setTimeout(loadCount, delay)
+}
+const loadCount = async () => {
+  countTimer = null
+  if (disposed || page.value !== 1 || keyword.value || !snapshot.value) return
+  const key = countKey()
+  const params = { groupId: groupId.value || undefined, source: source.value || undefined, q: keyword.value || undefined, snapshot: snapshot.value }
+  try {
+    await countRequest.run(signal => api.get('/chat/timeline/count', { params, signal, skipErrorMessage: true }), ({ data }) => {
+      if (!disposed && page.value === 1 && key === countKey() && Number.isInteger(data.totalCount)) {
+        total.value = data.totalCount
+        countFailed.value = false
+      }
+    })
+  } catch {
+    // 总数只影响页脚；正文和“更早”入口继续可用，不能一直显示“统计中”。
+    if (!disposed && page.value === 1 && key === countKey()) countFailed.value = true
+  }
+}
+const invalidateTotal = () => {
+  if (page.value !== 1 || keyword.value) return
+  total.value = null
+  cancelCount()
+  scheduleCount(650)
+}
+const mergeLiveMessage = (message, { scroll = true } = {}) => {
+  const advanced = advanceMessageSnapshot(snapshot.value, message.id)
+  if (!advanced) { signalNew(); return }
+  const key = `message:${Number(message.id)}`
+  const existed = items.value.some(entry => `${entry.kind}:${entry.id}` === key)
+  const groupName = message.groupId ? groups.value.find(group => group.groupOpenId === message.groupId)?.name ?? null : null
+  const fullBefore = items.value.length >= pageSize
+  const merged = mergeTimelineMessage(items.value, message, { pageSize, groupName })
+  if (!existed) {
+    items.value = merged
+    if (fullBefore) hasMore.value = true
+    invalidateTotal()
+    if (scroll) scrollToLatest()
+  }
+  snapshot.value = advanced
+}
+const flushPendingMessages = () => {
+  if (!pendingMessages.length) return
+  const pending = pendingMessages
+  pendingMessages = []
+  if (!canAutoRefresh()) { hasNew.value = true; return }
+  for (const message of pending) mergeLiveMessage(message, { scroll: false })
+  if (following.value) scrollToLatest()
+}
+const finishLoad = () => {
+  if (request.pending) return
+  loading.value = false
+  flushPendingMessages()
+  if (queuedRefresh && canAutoRefresh()) { queuedRefresh = false; scheduleAutoRefresh() }
+}
+const applyLatest = (data, group, filter) => {
+  if (!viewIsCurrent(group, filter) || page.value !== 1 || keyword.value) return
+  items.value = Array.isArray(data.items) ? data.items : []
+  total.value = Number.isInteger(data.totalCount) ? data.totalCount : null
+  page.value = data.page || 1
+  snapshot.value = data.snapshot || null
+  hasMore.value = !!data.hasMore
+  hasNew.value = false
+  if (total.value === null) scheduleCount(300)
+  scrollToLatest()
+}
+const loadLatest = async ({ quiet = false } = {}) => {
+  if (!quiet) { loading.value = true; loadError.value = false }
+  const group = groupId.value, filter = source.value
+  const params = { pageSize, groupId: group || undefined, source: filter || undefined }
+  try {
+    await request.run(signal => api.get('/chat/timeline/latest', { params, signal, skipErrorMessage: true }),
+      ({ data }) => applyLatest(data, group, filter))
+  } catch {
+    if (!disposed && viewIsCurrent(group, filter)) { if (quiet) hasNew.value = true; else loadError.value = true }
+  } finally { finishLoad() }
+}
+const loadExact = async () => {
   loading.value = true; loadError.value = false
-  const params = { page: page.value, pageSize, groupId: groupId.value || undefined, source: source.value || undefined, q: keyword.value || undefined, snapshot: snapshot.value || undefined }
+  const group = groupId.value, filter = source.value, query = keyword.value, wantedPage = page.value, wantedSnapshot = snapshot.value
+  const params = { page: wantedPage, pageSize, groupId: group || undefined, source: filter || undefined, q: query || undefined, snapshot: wantedSnapshot || undefined }
   try {
     await request.run(signal => api.get('/chat/timeline', { params, signal, skipErrorMessage: true }), ({ data }) => {
-      items.value = data.items; total.value = data.totalCount; page.value = data.page; snapshot.value = data.snapshot
-      if (!params.snapshot) hasNew.value = false
-      nextTick(() => { if (stream.value && following.value) stream.value.scrollTop = stream.value.scrollHeight })
+      if (!viewIsCurrent(group, filter) || keyword.value !== query || page.value !== wantedPage) return
+      items.value = Array.isArray(data.items) ? data.items : []
+      total.value = Number.isInteger(data.totalCount) ? data.totalCount : 0
+      page.value = data.page || 1
+      snapshot.value = data.snapshot || null
+      hasMore.value = !!data.hasMore
+      if (!wantedSnapshot) hasNew.value = false
+      scrollToLatest()
     })
-  } catch { loadError.value = true }
-  finally { if (!request.pending) loading.value = false }
+  } catch {
+    if (!disposed && viewIsCurrent(group, filter) && keyword.value === query) loadError.value = true
+  } finally { finishLoad() }
 }
-const cancelTimer = () => { if (timer) { clearTimeout(timer); timer = null } }
-const resetView = () => { cancelTimer(); snapshot.value = null; page.value = 1; items.value = []; total.value = 0; following.value = true; hasNew.value = false; load() }
-const refreshLatest = () => { cancelTimer(); snapshot.value = null; page.value = 1; following.value = true; load() }
+const loadCurrent = async ({ quiet = false } = {}) =>
+  page.value === 1 && !keyword.value ? loadLatest({ quiet }) : loadExact()
+const resetView = () => {
+  cancelAuto(); cancelCount(); queuedRefresh = false; pendingMessages = []
+  snapshot.value = null; page.value = 1; items.value = []; total.value = null; hasMore.value = false; countFailed.value = false
+  following.value = true; hasNew.value = false; loadCurrent()
+}
+const refreshLatest = () => {
+  cancelAuto(); cancelCount(); queuedRefresh = false; pendingMessages = []
+  snapshot.value = null; page.value = 1; total.value = null; hasMore.value = false; countFailed.value = false
+  following.value = true; hasNew.value = false; loadCurrent()
+}
 const selectGroup = value => { if (groupId.value !== value) { groupId.value = value; resetView() } }
 const setSource = value => { if (source.value !== value) { source.value = value; resetView() } }
 const applySearch = () => { keyword.value = searchInput.value.trim(); resetView() }
 const clearSearch = () => { searchInput.value = ''; applySearch() }
 const showAll = () => { source.value = ''; searchInput.value = ''; keyword.value = ''; resetView() }
-const onPage = value => { cancelTimer(); page.value = value; following.value = true; load() }
+const onPage = value => {
+  cancelAuto(); cancelCount(); queuedRefresh = false; pendingMessages = []
+  page.value = value; following.value = true; hasNew.value = false; loadExact()
+}
 const openDetails = entry => { selectedEntry.value = entry; drawerVisible.value = true }
 const loadGroups = async () => {
   try { const { data } = await api.get('/groups', { signal: groupRequest.signal, skipErrorMessage: true }); groups.value = data || []; groupsError.value = false }
   catch { if (!disposed) groupsError.value = true }
 }
+const scheduleAutoRefresh = () => {
+  if (!canAutoRefresh() || disposed) return
+  if (request.pending) { queuedRefresh = true; return }
+  if (timer) return
+  timer = setTimeout(() => {
+    timer = null
+    if (disposed) return
+    if (!canAutoRefresh()) { hasNew.value = true; return }
+    if (request.pending) { queuedRefresh = true; return }
+    loadLatest({ quiet: true })
+  }, 1500)
+}
 const signalNew = () => {
   if (disposed || !live.value) return
-  if (drawerVisible.value || page.value !== 1 || keyword.value || !following.value) { hasNew.value = true; return }
-  if (!timer) timer = setTimeout(() => { timer = null; if (!disposed) { if (!drawerVisible.value && page.value === 1 && !keyword.value && following.value) refreshLatest(); else hasNew.value = true } }, 1500)
+  if (!canAutoRefresh()) { hasNew.value = true; return }
+  if (request.pending) { queuedRefresh = true; return }
+  scheduleAutoRefresh()
+}
+const handleReceiveMessage = message => {
+  if (disposed || !live.value || source.value === 'decision' || !matchesChatMessage(message, { groupId: groupId.value, source: source.value })) return
+  if (!canAutoRefresh()) { hasNew.value = true; return }
+  if (request.pending) {
+    if (advanceMessageSnapshot(snapshot.value, message.id)) {
+      pendingMessages.push(message)
+      if (pendingMessages.length > 100) pendingMessages.shift()
+    } else queuedRefresh = true
+    return
+  }
+  mergeLiveMessage(message)
 }
 const connect = () => {
   if (unsubscribe || disposed) return
   unsubscribe = subscribeRealtime({
-    ReceiveMessage: message => { if (source.value !== 'decision' && matchesChatMessage(message, { groupId: groupId.value, source: source.value })) signalNew() },
+    ReceiveMessage: handleReceiveMessage,
     AiResponseCompleted: message => { if ((!groupId.value || message.groupId === groupId.value) && ['', 'bot', 'proactive'].includes(source.value)) signalNew() },
     ProactiveEvaluated: event => { if ((!groupId.value || event.groupId === groupId.value) && ['', 'decision', 'proactive'].includes(source.value)) signalNew() },
     Resync: signalNew
   })
 }
-const disconnect = () => { unsubscribe?.(); unsubscribe = null; cancelTimer() }
+const disconnect = () => {
+  unsubscribe?.(); unsubscribe = null
+  cancelAuto(); queuedRefresh = false; pendingMessages = []
+}
 const toggleLive = on => { on ? connect() : disconnect() }
-onMounted(async () => { connect(); await Promise.allSettled([load(), loadGroups()]) })
-onUnmounted(() => { disposed = true; disconnect(); request.cancel(); groupRequest.abort() })
+onMounted(async () => { connect(); await Promise.allSettled([loadCurrent(), loadGroups()]) })
+onUnmounted(() => {
+  disposed = true; disconnect(); cancelCount()
+  request.cancel(); groupRequest.abort()
+})
 </script>
 <style scoped>
 .chat-history-card :deep(.el-card__body) { padding: 0; }

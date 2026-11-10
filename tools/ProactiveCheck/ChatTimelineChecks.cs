@@ -35,13 +35,28 @@ internal static partial class RuntimeChecks
             "schema upgrade leaves old evaluation phases unknown rather than writing false");
         var reader = new ChatTimelineReader(db);
         var first = await reader.ReadAsync("GROUP", null, null, 1, 50, null);
-        Require(first.Items.Count == 50 && first.TotalCount == 73, "messages and silent decisions form one paged timeline");
+        Require(first.Items.Count == 50 && first.TotalCount == 73 && first.HasMore, "messages and silent decisions form one paged timeline");
+        var latest = await reader.ReadLatestAsync("GROUP", null, 50);
+        Require(latest.TotalCount is null && latest.Items.Count == 50 && latest.HasMore,
+            "the lightweight first page skips the exact total but still reports that older records exist");
+        Require(latest.Items.Select(i => $"{i.Kind}:{i.Id}").SequenceEqual(first.Items.Select(i => $"{i.Kind}:{i.Id}")),
+            "the lightweight first page keeps the exact page's order and decision linking");
+        var frozenCount = await reader.CountAsync("GROUP", null, null, latest.Snapshot);
+        Require(frozenCount.TotalCount == 73 && frozenCount.Snapshot == latest.Snapshot,
+            "the deferred count uses the first page's frozen snapshot");
         var second = await reader.ReadAsync("GROUP", null, null, 2, 50, first.Snapshot);
         Require(second.Items.Count == 23 && !first.Items.Select(i => $"{i.Kind}:{i.Id}").Intersect(second.Items.Select(i => $"{i.Kind}:{i.Id}")).Any(), "pages do not overlap");
-        db.ChatMessages.Add(new ChatMessage { MessageId = "new-after-snapshot", GroupId = "GROUP", UserId = "x", UserName = "新消息", PlainText = "新增", CreatedAt = time.AddDays(1) });
+        var newArrival = new ChatMessage { MessageId = "new-after-snapshot", GroupId = "GROUP", UserId = "x", UserName = "新消息", PlainText = "新增", CreatedAt = time.AddDays(1) };
+        db.ChatMessages.Add(newArrival);
         await db.SaveChangesAsync();
         var frozen = await reader.ReadAsync("GROUP", null, null, 2, 50, first.Snapshot);
         Require(frozen.TotalCount == 73 && frozen.Items.Select(i => i.Id).SequenceEqual(second.Items.Select(i => i.Id)), "new arrivals do not shift older pages");
+        var frozenLatest = await reader.ReadLatestAsync("GROUP", null, 50);
+        Require(frozenLatest.Items[0].Id == newArrival.Id && frozenLatest.TotalCount is null,
+            "the lightweight page observes new arrivals without pretending to know their count");
+        Require((await reader.CountAsync("GROUP", null, null, first.Snapshot)).TotalCount == 73
+            && (await reader.CountAsync("GROUP", null, null, frozenLatest.Snapshot)).TotalCount == 74,
+            "deferred counts follow both an old snapshot and the newly opened range");
         Require((await reader.ReadAsync("GROUP", null, "历史关键字", 1, 50, null)).TotalCount == 1, "search reaches records beyond the first page");
         Require((await reader.ReadAsync("GROUP", "observe", "甲同学", 1, 50, null)).TotalCount == 72, "sender search composes with group and source filters");
         Require((await reader.ReadAsync("GROUP", null, "%_", 1, 50, null)).TotalCount == 1, "SQL wildcard characters are searched literally");

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { highlightParts, timelineEntries, chatTime, chatDay, decisionTitle, detailTitle, groupSummary, groupRecordingNote } from '../src/chatHistory.js'
+import { highlightParts, timelineEntries, chatTime, chatDay, decisionTitle, detailTitle, groupSummary, groupRecordingNote, mergeTimelineMessage, advanceMessageSnapshot } from '../src/chatHistory.js'
 test('查找高亮按字面处理正则符号、百分号及 HTML，保持原文不变', () => {
   for (const keyword of ['[x]', '100%_', '<script>', 'a+b']) {
     const text = `之前 ${keyword} 之后 ${keyword}`, parts = highlightParts(text, keyword)
@@ -53,4 +53,40 @@ test('群记录说明区分观察范围与人设，停用群优先', () => {
   assert.equal(groupRecordingNote({ triggerMode: 0, activeCharacter: false }), '仅记录被 @ 的消息 · 使用全局人设')
   assert.equal(groupRecordingNote({ triggerMode: 2 }), '记录全部消息 · 使用全局人设')
   assert.equal(groupRecordingNote({ activeCharacter: true }), '仅记录被 @ 的消息 · 使用群专属人设')
+})
+test('实时消息按同一时间线规则并入最新页，重复推送不产生重复项', () => {
+  const items = [
+    { kind: 'decision', id: 8, createdAt: '2026-11-10T00:00:02Z' },
+    { kind: 'message', id: 7, createdAt: '2026-11-10T00:00:01Z' }
+  ]
+  const incoming = { id: 9, groupId: 'GROUP', userName: '甲', plainText: '刚到', createdAt: '2026-11-10T00:00:03Z' }
+  const merged = mergeTimelineMessage(items, incoming, { groupName: '测试群' })
+  assert.deepEqual(merged.map(entry => `${entry.kind}:${entry.id}`), ['message:9', 'decision:8', 'message:7'])
+  assert.equal(merged[0].groupName, '测试群')
+  assert.deepEqual(items.map(entry => entry.id), [8, 7])
+  assert.deepEqual(mergeTimelineMessage(merged, incoming).map(entry => entry.id), [9, 8, 7])
+  const sameId = mergeTimelineMessage(merged, { ...incoming, id: 8 })
+  assert.equal(sameId.filter(entry => entry.kind === 'message' && entry.id === 8).length, 1)
+  assert.equal(sameId.filter(entry => entry.kind === 'decision' && entry.id === 8).length, 1,
+    '消息 ID 与决策 ID 相同也不能互相去重')
+})
+test('实时合并只保留一页，并优先保留最新消息', () => {
+  const items = Array.from({ length: 50 }, (_, index) => ({
+    kind: 'message', id: 50 - index, createdAt: `2026-11-10T00:00:${String(59 - index).padStart(2, '0')}Z`
+  }))
+  const merged = mergeTimelineMessage(items, { id: 51, createdAt: '2026-11-10T00:01:00Z' })
+  assert.equal(merged.length, 50)
+  assert.equal(merged[0].id, 51)
+  assert.equal(merged.at(-1).id, 2)
+})
+test('实时消息推进快照上界但不猜测另一张表的留痕上界', () => {
+  assert.equal(advanceMessageSnapshot('120:80', 125), '125:80')
+  assert.equal(advanceMessageSnapshot('120:80', 100), '120:80')
+  assert.equal(advanceMessageSnapshot('bad', 100), null)
+  assert.equal(advanceMessageSnapshot(null, 100), null)
+  assert.equal(advanceMessageSnapshot('120:80', 'not-a-number'), null)
+})
+test('无效实时负载不改变当前时间线', () => {
+  const items = [{ kind: 'message', id: 1, createdAt: '2026-11-10T00:00:00Z' }]
+  assert.equal(mergeTimelineMessage(items, { userName: '缺少 ID' }), items)
 })
