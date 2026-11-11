@@ -16,6 +16,7 @@ export default defineConfig({
   webServer: {
     command: 'npm run preview -- --host 127.0.0.1 --port 4179 --strictPort',
     url: 'http://127.0.0.1:4179',
-    reuseExistingServer: !process.env.CI
+    // 始终启动本次构建的预览服务：复用旧 4179 会让回归跑到过期的构建产物。
+    reuseExistingServer: false
   }
 })

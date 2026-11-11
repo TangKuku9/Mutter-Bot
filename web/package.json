@@ -1,6 +1,6 @@
 {
   "name": "mutter-panel",
-  "version": "261110",
+  "version": "261112",
   "private": true,
   "type": "module",
   "description": "Mutter 管理面板前端源码工程",
@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test": "node --test tests/*.test.mjs",
     "brand:generate": "node scripts/generate-brand.mjs",
+    "pretest:ui": "npm run build",
     "test:ui": "playwright test"
   },
   "dependencies": {
