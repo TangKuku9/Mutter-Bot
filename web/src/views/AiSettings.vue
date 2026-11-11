@@ -1,205 +1,566 @@
 <template>
-  <el-card shadow="never" v-loading="loading">
-    <template #header>
-      <div class="card-head">
-        <b>AI 配置</b>
-        <el-button size="small" @click="openHelp('configPreset')">参数说明</el-button>
+  <div class="ai-settings" v-loading="loading">
+    <el-alert
+      v-if="loadError"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="ai-load-error"
+      title="暂时无法读取配置，当前内容已保留。"
+    >
+      <el-button link type="primary" @click="reloadConfig">重新读取</el-button>
+    </el-alert>
+    <el-card shadow="never" class="ai-preset-card">
+      <div class="ai-heading">
+        <div>
+          <div class="ai-title">
+            <h2>AI 配置</h2>
+            <el-tag v-if="ready" size="small" :type="isDirty ? 'warning' : 'info'">
+              {{ isDirty ? '有未保存修改' : '已读取配置' }}
+            </el-tag>
+          </div>
+          <p>连接模型，调整回复风格与信息来源。</p>
+        </div>
+        <div class="ai-actions">
+          <el-button :disabled="!ready || formBusy" @click="openHelp('configPreset')">参数说明</el-button>
+          <el-button :icon="Collection" :disabled="!ready || formBusy || presetsLoading" @click="openManagePresets">
+            预设库
+          </el-button>
+          <el-button :icon="FolderAdd" :disabled="!ready || formBusy || !!formError" @click="openSavePreset()">
+            存为预设
+          </el-button>
+        </div>
       </div>
-    </template>
-
-    <el-form :model="form" label-width="130px" style="max-width: 760px">
-      <el-form-item label="配置预设">
-        <el-select v-model="selectedPresetId" placeholder="选择已保存的预设" clearable style="width: 260px">
-          <el-option v-for="p in presets" :key="p.id" :label="p.name" :value="p.id">
-            <span>{{ p.name }}</span>
-            <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px">{{ p.modelName || '未填模型' }}</span>
-          </el-option>
-        </el-select>
-        <el-button style="margin-left: 12px" :disabled="!selectedPresetId" :loading="applyingPreset"
-          @click="applySelectedPreset()">应用</el-button>
-        <el-button style="margin-left: 12px" @click="openSavePreset()">保存为预设</el-button>
-        <el-button style="margin-left: 12px" @click="openManagePresets()">管理预设</el-button>
-        <ParamHelpButton :label="helpLabel('configPreset')" @click="openHelp('configPreset')" />
-        <div class="hint" v-if="selectedPreset">
-          {{ selectedPreset.hasApiKey ? '已保存密钥' : '未保存密钥，应用时沿用当前 Key' }}
-          <span v-if="selectedPreset.personalityMissing">；人设「{{ selectedPreset.personality }}」已不存在</span>
-        </div>
-        <div class="hint" v-if="isDirty">当前表单有未保存修改；保存或应用后会重新开始对比。</div>
-      </el-form-item>
-      <el-form-item label="服务商">
-        <el-select v-model="presetId" placeholder="选择服务商自动填充" clearable style="width: 320px" @change="applyPreset">
-          <el-option v-for="p in form.availableProviders" :key="p.id" :label="p.name" :value="p.id">
-            <span>{{ p.name }}</span>
-            <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px">{{ p.defaultModel }}</span>
-          </el-option>
-        </el-select>
-        <ParamHelpButton :label="helpLabel('presetId')" @click="openHelp('presetId')" />
-        <div class="hint" v-if="presetHelp">{{ presetHelp }}</div>
-      </el-form-item>
-      <el-form-item label="API 地址">
-        <el-input v-model="form.apiBaseUrl" placeholder="https://api.example.com/v1" />
-        <ParamHelpButton :label="helpLabel('apiBaseUrl')" @click="openHelp('apiBaseUrl')" />
-      </el-form-item>
-      <el-form-item label="API Key">
-        <el-input v-model="form.apiKey" type="password" show-password placeholder="留空或保持打码值表示不修改" />
-        <ParamHelpButton :label="helpLabel('apiKey')" @click="openHelp('apiKey')" />
-      </el-form-item>
-      <el-form-item label="模型">
-        <el-input v-model="form.modelName" placeholder="模型名" />
-        <ParamHelpButton :label="helpLabel('modelName')" @click="openHelp('modelName')" />
-      </el-form-item>
-      <el-form-item label="人设">
-        <el-select v-model="form.personality" clearable placeholder="选择角色人设" style="width: 320px">
-          <el-option v-for="c in form.availableCharacters" :key="c.name" :label="c.displayName" :value="c.name">
-            <span>{{ c.displayName }}<el-tag v-if="c.isCustom" size="small" type="warning" style="margin-left: 6px">自定义</el-tag></span>
-            <span style="float: right; color: var(--el-text-color-secondary); font-size: 12px">{{ c.description }}</span>
-          </el-option>
-        </el-select>
-        <el-button style="margin-left: 12px" @click="manageDialog = true">管理人设</el-button>
-        <ParamHelpButton :label="helpLabel('personality')" @click="openHelp('personality')" />
-      </el-form-item>
-      <el-form-item label="系统提示词">
-        <el-input v-model="form.systemPrompt" type="textarea" :rows="5" placeholder="留空则使用内置默认提示词" />
-        <ParamHelpButton :label="helpLabel('systemPrompt')" @click="openHelp('systemPrompt')" />
-        <div class="hint">
-          <span v-if="!form.systemPrompt">当前使用内置默认提示词。</span>
-          <el-button size="small" link type="primary" @click="defaultPromptDialog = true">查看内置默认提示词</el-button>
-        </div>
-      </el-form-item>
-      <el-form-item label="Temperature">
-        <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" show-input style="max-width: 420px" />
-        <ParamHelpButton :label="helpLabel('temperature')" @click="openHelp('temperature')" />
-      </el-form-item>
-      <el-form-item label="回复输出上限">
-        <el-input-number v-model="form.maxTokens" :min="64" :max="32768" :step="256" />
-        <ParamHelpButton :label="helpLabel('maxTokens')" @click="openHelp('maxTokens')" />
-      </el-form-item>
-      <el-form-item label="模型上下文容量">
-        <el-input-number v-model="form.contextWindowTokens" :min="4096" :max="1048576" :step="4096" />
-        <ParamHelpButton :label="helpLabel('contextWindowTokens')" @click="openHelp('contextWindowTokens')" />
-      </el-form-item>
-      <el-form-item label="输入预算">
-        <el-input-number v-model="form.maxInputTokens" :min="512" :max="Math.max(512, budget.availableInput)" :step="512" />
-        <ParamHelpButton :label="helpLabel('maxInputTokens')" @click="openHelp('maxInputTokens')" />
-      </el-form-item>
-      <el-form-item label="容量分配">
-        <div style="width: 100%">
-          <el-progress :percentage="budget.percent" :status="budget.error ? 'exception' : undefined" />
-          <div class="hint">输入 {{ budget.input }} + 输出 {{ budget.output }} + 预留 {{ budget.reserve }} / 容量 {{ budget.context }}</div>
-          <el-alert v-if="budget.error" :title="budget.error" type="error" :closable="false" style="margin-top: 6px" />
-        </div>
-      </el-form-item>
-      <el-form-item label="群记忆用于回复">
-        <el-switch v-model="form.groupMemoryInjectionEnabled" />
-        <ParamHelpButton :label="helpLabel('groupMemoryInjectionEnabled')" @click="openHelp('groupMemoryInjectionEnabled')" />
-        <div class="hint">普通 @ 回复参考群管理中维护的记忆；与择机发言的全局开关独立。私聊不使用群记忆。</div>
-      </el-form-item>
-      <el-form-item label="上下文条数">
-        <el-input-number v-model="form.maxContextMessages" :min="2" :max="100" />
-        <ParamHelpButton :label="helpLabel('maxContextMessages')" @click="openHelp('maxContextMessages')" />
-      </el-form-item>
-      <el-form-item label="附图张数">
-        <el-input-number v-model="form.maxAttachedImages" :min="0" :max="form.ceilingAttachedImages || 10" />
-        <ParamHelpButton :label="helpLabel('maxAttachedImages')" @click="openHelp('maxAttachedImages')" />
-      </el-form-item>
-      <el-form-item label="联网搜索">
-        <el-switch v-model="form.webSearchEnabled" />
-        <ParamHelpButton :label="helpLabel('webSearchEnabled')" @click="openHelp('webSearchEnabled')" />
-        <el-button size="small" style="margin-left: 12px" :loading="probing" :disabled="probing" @click="probeWebSearch">
-          检测联网搜索
-        </el-button>
-        <div class="hint" v-if="form.webSearchShape">
-          当前策略：{{ shapeLabel(form.webSearchShape) }}（文字已验证<span v-if="form.webSearchImageCapable === true">，带图已验证</span><span v-else-if="form.webSearchImageCapable === false">，带图不支持</span><span v-else>，带图未测</span>）
-        </div>
-        <div class="hint" v-else-if="form.webSearchEnabled">
-          尚未选用实测策略，运行时按 API 地址自动推断——中转可能因此不生效。
-        </div>
-        <div class="hint" v-if="form.webSearchEnabled">
-          带图时：
-          <el-select v-model="form.webSearchImageMode" size="small" style="width: 150px">
-            <el-option label="跟随能力" value="auto" />
-            <el-option label="确保联网" value="two_stage" />
-            <el-option label="关闭" value="off" />
-          </el-select>
-          <ParamHelpButton :label="helpLabel('webSearchImageMode')" @click="openHelp('webSearchImageMode')" />
-        </div>
-      </el-form-item>
-      <el-form-item label="独立搜索服务">
-        <div class="es-box">
-          <div class="es-head">
-            <div class="es-head-main">
-              <span class="es-title">独立搜索服务<el-tag size="small" type="success" effect="plain" style="margin-left: 6px">推荐</el-tag></span>
-              <span class="es-sub">
-                由本程序先检索、再把结果作为资料注入对话（预检索注入），不依赖模型服务商支持搜索——
-                适合中转站与不带内建搜索的模型。与上方「联网搜索」（模型服务商内建通道）相互独立；
-                总开关仍是上方「联网搜索」，两者同时开启才会生效。
-              </span>
+      <div class="ai-preset-toolbar">
+        <label for="ai-config-preset">配置预设</label>
+        <el-select
+          id="ai-config-preset"
+          v-model="selectedPresetId"
+          clearable
+          placeholder="选择已保存的预设"
+          :loading="presetsLoading"
+          :disabled="formBusy || presetsLoading"
+          aria-label="配置预设"
+        >
+          <el-option v-for="preset in presets" :key="preset.id" :label="preset.name" :value="preset.id">
+            <div class="ai-option">
+              <span>{{ preset.name }}</span>
+              <small>{{ preset.modelName || '未填模型' }}</small>
             </div>
-            <el-switch v-model="form.externalSearch.enabled" aria-label="启用独立搜索服务" />
-            <ParamHelpButton :label="helpLabel('externalSearchEnabled')" @click="openHelp('externalSearchEnabled')" />
+          </el-option>
+        </el-select>
+        <el-button :disabled="!selectedPresetId || formBusy" :loading="applyingPreset" @click="applySelectedPreset()">
+          应用并保存
+          <el-icon class="ai-action-icon"><ArrowRight /></el-icon>
+        </el-button>
+      </div>
+      <div v-if="selectedPreset" class="ai-preset-note">
+        <el-tag size="small" type="info">{{ selectedPreset.hasApiKey ? '包含密钥' : '沿用当前密钥' }}</el-tag>
+        <span>{{ selectedPreset.description || '应用后立即保存当前 AI 配置。' }}</span>
+        <span v-if="selectedPreset.personalityMissing" class="ai-warning">人设「{{ selectedPreset.personality }}」已不存在</span>
+      </div>
+      <p class="ai-preset-footnote">AI 预设应用后立即生效；保存为预设只记录当前表单，不改变正在使用的配置。</p>
+      <el-alert v-if="presetsError" type="warning" :closable="false" show-icon title="预设暂时无法读取">
+        <el-button link type="primary" @click="loadPresets">重新读取预设</el-button>
+      </el-alert>
+    </el-card>
+
+    <el-form :model="form" :disabled="formBusy" label-position="top" class="ai-settings-form">
+      <div class="ai-primary-grid">
+        <el-card shadow="never" class="ai-section" data-section="connection">
+          <div class="ai-section-heading">
+            <el-icon><Connection /></el-icon>
+            <div>
+              <h3>模型连接</h3>
+              <p>设置服务商、接口和模型。</p>
+            </div>
           </div>
-          <el-alert v-if="form.externalSearch.enabled && !form.webSearchEnabled" type="warning" :closable="false"
-            show-icon style="margin-top: 8px"
-            title="独立搜索服务已开启，但上方「联网搜索」总开关未开启；两者同时开启才会真正检索。" />
-          <div class="es-field">
-            <span class="es-label">搜索服务商</span>
-            <el-select v-model="form.externalSearch.provider" style="width: 240px">
-              <el-option v-for="p in ES_PROVIDERS" :key="p.id" :label="p.name" :value="p.id" />
-            </el-select>
-            <ParamHelpButton :label="helpLabel('externalSearchProvider')" @click="openHelp('externalSearchProvider')" />
+          <div class="ai-fields">
+            <AiSettingField
+              label="服务商"
+              control-id="ai-provider"
+              help-key="presetId"
+              :hint="presetHelp || '选择服务商会填入地址和默认模型，密钥保持当前值。'"
+              @help="openHelp"
+            >
+              <el-select
+                id="ai-provider"
+                v-model="presetId"
+                clearable
+                placeholder="选择服务商，也可直接填写接口"
+                @change="applyPreset"
+              >
+                <el-option
+                  v-for="provider in form.availableProviders"
+                  :key="provider.id"
+                  :label="provider.name"
+                  :value="provider.id"
+                >
+                  <div class="ai-option">
+                    <span>{{ provider.name }}</span>
+                    <small>{{ provider.defaultModel }}</small>
+                  </div>
+                </el-option>
+              </el-select>
+            </AiSettingField>
+            <AiSettingField
+              label="API 地址"
+              control-id="ai-api-url"
+              help-key="apiBaseUrl"
+              hint="使用服务商提供的接口根地址。"
+              @help="openHelp"
+            >
+              <el-input id="ai-api-url" v-model="form.apiBaseUrl" placeholder="https://api.example.com/v1" />
+            </AiSettingField>
+            <AiSettingField
+              label="API Key"
+              control-id="ai-api-key"
+              help-key="apiKey"
+              hint="留空或保持打码值表示不修改；填写新值会替换已保存的密钥。"
+              @help="openHelp"
+            >
+              <el-input
+                id="ai-api-key"
+                v-model="form.apiKey"
+                type="password"
+                show-password
+                autocomplete="new-password"
+                placeholder="留空或保持打码值表示不修改"
+              />
+            </AiSettingField>
+            <AiSettingField
+              label="模型名称"
+              control-id="ai-model"
+              help-key="modelName"
+              hint="使用服务商提供的准确模型标识。"
+              @help="openHelp"
+            >
+              <el-input id="ai-model" v-model="form.modelName" placeholder="模型名" />
+            </AiSettingField>
           </div>
-          <div class="es-hint-inset hint" v-if="esProviderHint">{{ esProviderHint }}</div>
-          <div class="es-field">
-            <span class="es-label">服务地址</span>
-            <el-input v-model="form.externalSearch.baseUrl" :placeholder="esBaseUrlPlaceholder" style="width: 380px" />
-            <ParamHelpButton :label="helpLabel('externalSearchBaseUrl')" @click="openHelp('externalSearchBaseUrl')" />
+        </el-card>
+        <el-card shadow="never" class="ai-section" data-section="personality">
+          <div class="ai-section-heading">
+            <el-icon><User /></el-icon>
+            <div>
+              <h3>回复风格</h3>
+              <p>决定怎么说，也决定说话的分寸。</p>
+            </div>
+            <el-button link type="primary" :disabled="formBusy" @click="manageDialog = true">管理人设</el-button>
           </div>
-          <div class="es-field">
-            <span class="es-label">API Key</span>
-            <el-input v-model="form.externalSearch.apiKey" type="password" show-password
-              :disabled="form.externalSearch.provider === 'searxng'"
-              :placeholder="esApiKeyPlaceholder"
-              style="width: 380px" />
-            <ParamHelpButton :label="helpLabel('externalSearchApiKey')" @click="openHelp('externalSearchApiKey')" />
+          <div class="ai-fields">
+            <AiSettingField
+              label="全局人设"
+              control-id="ai-personality"
+              help-key="personality"
+              hint="群管理中指定的人设优先于这里的全局人设。"
+              @help="openHelp"
+            >
+              <el-select id="ai-personality" v-model="form.personality" clearable placeholder="选择角色人设">
+                <el-option
+                  v-for="character in form.availableCharacters"
+                  :key="character.name"
+                  :label="character.displayName"
+                  :value="character.name"
+                >
+                  <div class="ai-option">
+                    <span>{{ character.displayName }}</span>
+                    <small>{{ character.isCustom ? '自定义' : '内置' }}</small>
+                  </div>
+                </el-option>
+              </el-select>
+            </AiSettingField>
+            <AiSettingField
+              label="回复随机度"
+              control-id="ai-temperature"
+              help-key="temperature"
+              hint="Temperature 越低越稳定，越高越灵活。"
+              @help="openHelp"
+            >
+              <div class="ai-temperature">
+                <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" aria-label="回复随机度滑块" />
+                <el-input-number
+                  :key="String(formBusy)"
+                  id="ai-temperature"
+                  v-model="form.temperature"
+                  :min="0"
+                  :max="2"
+                  :step="0.1"
+                  :precision="1"
+                  :controls="false"
+                />
+              </div>
+            </AiSettingField>
+            <AiSettingField label="系统提示词" control-id="ai-system-prompt" help-key="systemPrompt" @help="openHelp">
+              <el-input
+                id="ai-system-prompt"
+                v-model="form.systemPrompt"
+                type="textarea"
+                :autosize="{ minRows: 4, maxRows: 10 }"
+                placeholder="留空则使用内置默认提示词"
+              />
+              <template #hint>
+                <span>{{ form.systemPrompt ? '自定义提示词会替换全局默认提示词。' : '当前使用内置默认提示词。' }}</span>
+                <el-button link type="primary" :disabled="formBusy" @click="defaultPromptDialog = true">
+                  查看内置默认提示词
+                </el-button>
+              </template>
+            </AiSettingField>
           </div>
-          <div class="es-hint-inset hint" v-if="form.externalSearch.provider !== 'searxng'">
-            只存在本机数据库，页面不回显明文；填新值会直接覆盖。
-          </div>
-          <div class="es-field">
-            <span class="es-label">检索参数</span>
-            <span class="es-inline-label">结果条数</span>
-            <el-input-number v-model="form.externalSearch.maxResults" :min="1" :max="10" />
-            <span class="es-inline-label" style="margin-left: 16px">超时</span>
-            <el-input-number v-model="form.externalSearch.timeoutSeconds" :min="1" :max="30" />
-            <span class="es-inline-label">秒</span>
-            <ParamHelpButton :label="helpLabel('externalSearchLimits')" @click="openHelp('externalSearchLimits')" />
-          </div>
-          <div class="es-field">
-            <span class="es-label">失败兜底</span>
-            <el-switch v-model="form.externalSearch.fallbackToBuiltin" aria-label="外搜失败时回退内建搜索" />
-            <span class="es-inline-label">外搜失败时，回退到服务商内建联网通道</span>
-            <ParamHelpButton :label="helpLabel('externalSearchFallback')" @click="openHelp('externalSearchFallback')" />
-          </div>
-          <div class="es-hint-inset hint">默认关闭；兜底还需要上方「联网搜索」可用，开启后失败会多一次内建检索，回复可能更慢。0 条结果视为无资料，不会再检索。</div>
-          <div class="es-foot">
-            <el-button size="small" :loading="esProbing" :disabled="esProbing" @click="probeExternalSearch">
-              测试搜索
-            </el-button>
-            <ParamHelpButton :label="helpLabel('externalSearchTest')" @click="openHelp('externalSearchTest')" />
-            <span class="hint" style="margin-top: 0">
-              最近验证：{{ form.externalSearchStatus.verifiedAt ? fmt(form.externalSearchStatus.verifiedAt) : '尚未验证' }}
-            </span>
+        </el-card>
+      </div>
+
+      <el-card shadow="never" class="ai-section ai-context-card" data-section="context">
+        <div class="ai-section-heading">
+          <el-icon><ChatDotRound /></el-icon>
+          <div>
+            <h3>上下文与记忆</h3>
+            <p>控制普通 @ 回复与私聊参考多少内容。</p>
           </div>
         </div>
-      </el-form-item>
-      <el-form-item>
-        <el-button type="primary" :loading="saving" :disabled="!!budget.error" @click="save()">保存配置</el-button>
-        <el-button @click="reloadConfig">重新加载</el-button>
-      </el-form-item>
+        <div class="ai-context-grid ai-fields">
+          <AiSettingField
+            label="回复输出上限"
+            control-id="ai-output-tokens"
+            help-key="maxTokens"
+            hint="每次回复的输出预算；择机判定使用自己的设置。"
+            @help="openHelp"
+          >
+            <el-input-number
+              :key="String(formBusy)"
+              id="ai-output-tokens"
+              v-model="form.maxTokens"
+              :min="64"
+              :max="32768"
+              :step="256"
+              :precision="0"
+              :controls="false"
+            />
+            <span class="ai-unit">Token</span>
+          </AiSettingField>
+          <AiSettingField
+            label="历史消息条数"
+            control-id="ai-history"
+            help-key="maxContextMessages"
+            hint="保留最近的历史消息帮助衔接对话。"
+            @help="openHelp"
+          >
+            <el-input-number
+              :key="String(formBusy)"
+              id="ai-history"
+              v-model="form.maxContextMessages"
+              :min="2"
+              :max="100"
+              :precision="0"
+              :controls="false"
+            />
+            <span class="ai-unit">条</span>
+          </AiSettingField>
+          <AiSettingField
+            label="附图张数"
+            control-id="ai-attached-images"
+            help-key="maxAttachedImages"
+            hint="0 表示不附图，实际附图需符合模型支持的格式。"
+            @help="openHelp"
+          >
+            <el-input-number
+              :key="String(formBusy)"
+              id="ai-attached-images"
+              v-model="form.maxAttachedImages"
+              :min="0"
+              :max="form.ceilingAttachedImages || 10"
+              :precision="0"
+              :controls="false"
+            />
+            <span class="ai-unit">张</span>
+          </AiSettingField>
+          <AiSettingField
+            label="群记忆用于回复"
+            control-id="ai-group-memory"
+            help-key="groupMemoryInjectionEnabled"
+            hint="参考群管理中维护的记忆；私聊不使用群记忆。"
+            @help="openHelp"
+          >
+            <el-switch id="ai-group-memory" v-model="form.groupMemoryInjectionEnabled" aria-label="群记忆用于回复" />
+            <span class="ai-unit">{{ form.groupMemoryInjectionEnabled ? '已开启' : '已关闭' }}</span>
+          </AiSettingField>
+        </div>
+        <el-collapse v-model="advancedOpen" class="ai-budget-collapse">
+          <el-collapse-item name="capacity">
+            <template #title>
+              <span>容量与输入预算</span>
+              <small>{{ formatTokens(budget.input) }} / {{ formatTokens(budget.context) }} Token</small>
+            </template>
+            <div class="ai-context-grid ai-fields">
+              <AiSettingField
+                label="模型上下文容量"
+                control-id="ai-context-capacity"
+                help-key="contextWindowTokens"
+                hint="按服务商公布的模型容量填写。"
+                @help="openHelp"
+              >
+                <el-input-number
+                  :key="String(formBusy)"
+                  id="ai-context-capacity"
+                  v-model="form.contextWindowTokens"
+                  :min="4096"
+                  :max="1048576"
+                  :step="4096"
+                  :precision="0"
+                  :controls="false"
+                />
+                <span class="ai-unit">Token</span>
+              </AiSettingField>
+              <AiSettingField
+                label="输入预算"
+                control-id="ai-input-tokens"
+                help-key="maxInputTokens"
+                hint="历史、当前消息、系统提示词和图片共用这段预算。"
+                @help="openHelp"
+              >
+                <el-input-number
+                  :key="String(formBusy)"
+                  id="ai-input-tokens"
+                  v-model="form.maxInputTokens"
+                  :min="512"
+                  :max="Math.max(512, budget.availableInput)"
+                  :step="512"
+                  :precision="0"
+                  :controls="false"
+                />
+                <span class="ai-unit">Token</span>
+              </AiSettingField>
+            </div>
+            <div class="ai-budget-summary">
+              <div>
+                <span>已分配容量</span>
+                <span>
+                  {{ formatTokens(budget.input + budget.output + budget.reserve) }} / {{ formatTokens(budget.context) }} Token
+                </span>
+              </div>
+              <el-progress
+                :percentage="budget.percent"
+                :status="budget.error ? 'exception' : undefined"
+                :stroke-width="6"
+                :show-text="false"
+                aria-label="已分配模型容量"
+              />
+              <p>
+                输入 {{ formatTokens(budget.input) }} · 输出 {{ formatTokens(budget.output) }} · 安全预留
+                {{ formatTokens(budget.reserve) }}
+              </p>
+            </div>
+          </el-collapse-item>
+        </el-collapse>
+      </el-card>
+
+      <el-card shadow="never" class="ai-section ai-search-card" data-section="search">
+        <div class="ai-section-heading">
+          <el-icon><Search /></el-icon>
+          <div>
+            <h3>联网与检索</h3>
+            <p>需要时效信息时，为回复补充资料。</p>
+          </div>
+          <div class="ai-search-master">
+            <span>联网搜索</span>
+            <ParamHelpButton :label="helpLabel('webSearchEnabled')" @click="openHelp('webSearchEnabled')" />
+            <el-switch v-model="form.webSearchEnabled" aria-label="联网搜索总开关" />
+          </div>
+        </div>
+        <div class="ai-search-content">
+          <AiSettingField
+            label="优先检索通道"
+            control-id="ai-search-route"
+            help-key="externalSearchEnabled"
+            hint="独立服务先检索再交给模型；内建通道需要模型服务商支持。"
+            @help="openHelp"
+          >
+            <el-radio-group
+              id="ai-search-route"
+              v-model="form.externalSearch.enabled"
+              aria-labelledby="ai-search-route-label"
+              class="ai-search-route"
+            >
+              <el-radio-button :value="false">模型内建搜索</el-radio-button>
+              <el-radio-button :value="true">独立搜索服务</el-radio-button>
+            </el-radio-group>
+          </AiSettingField>
+          <el-alert
+            v-if="!form.webSearchEnabled"
+            type="info"
+            :closable="false"
+            show-icon
+            title="联网搜索已关闭。通道参数可先配置，开启总开关并保存后生效。"
+          />
+          <template v-if="form.externalSearch.enabled">
+            <div class="ai-search-fields ai-fields">
+              <AiSettingField
+                label="搜索服务商"
+                control-id="ai-search-provider"
+                help-key="externalSearchProvider"
+                :hint="esProviderHint"
+                @help="openHelp"
+              >
+                <el-select id="ai-search-provider" v-model="form.externalSearch.provider">
+                  <el-option v-for="provider in ES_PROVIDERS" :key="provider.id" :label="provider.name" :value="provider.id" />
+                </el-select>
+              </AiSettingField>
+              <AiSettingField
+                label="服务地址"
+                control-id="ai-search-url"
+                help-key="externalSearchBaseUrl"
+                hint="自建和自定义通道需填写地址；其他服务商可留空使用默认端点。"
+                @help="openHelp"
+              >
+                <el-input id="ai-search-url" v-model="form.externalSearch.baseUrl" :placeholder="esBaseUrlPlaceholder" />
+              </AiSettingField>
+              <AiSettingField
+                label="搜索 API Key"
+                control-id="ai-search-key"
+                help-key="externalSearchApiKey"
+                :hint="
+                  form.externalSearch.provider === 'searxng'
+                    ? 'SearXNG 不使用密钥。'
+                    : '留空或保持打码值表示不修改；页面不回显明文。'
+                "
+                @help="openHelp"
+              >
+                <el-input
+                  id="ai-search-key"
+                  v-model="form.externalSearch.apiKey"
+                  :disabled="form.externalSearch.provider === 'searxng'"
+                  type="password"
+                  show-password
+                  autocomplete="new-password"
+                  :placeholder="esApiKeyPlaceholder"
+                />
+              </AiSettingField>
+              <div class="ai-search-test">
+                <el-button :loading="esProbing" :disabled="formBusy" @click="probeExternalSearch">测试搜索</el-button>
+                <ParamHelpButton :label="helpLabel('externalSearchTest')" @click="openHelp('externalSearchTest')" />
+                <p>
+                  最近验证：{{ form.externalSearchStatus.verifiedAt ? fmt(form.externalSearchStatus.verifiedAt) : '尚未验证' }}
+                </p>
+                <small>使用当前表单实测，不会保存配置。</small>
+              </div>
+            </div>
+            <el-collapse v-model="searchAdvancedOpen" class="ai-budget-collapse">
+              <el-collapse-item name="search-advanced">
+                <template #title>
+                  <span>检索与容错</span>
+                  <small>结果条数、超时与失败兜底</small>
+                </template>
+                <div class="ai-context-grid ai-fields">
+                  <AiSettingField
+                    label="检索结果条数"
+                    control-id="ai-search-count"
+                    help-key="externalSearchLimits"
+                    hint="更多资料会占用更多上下文。"
+                    @help="openHelp"
+                  >
+                    <el-input-number
+                      :key="String(formBusy)"
+                      id="ai-search-count"
+                      v-model="form.externalSearch.maxResults"
+                      :min="1"
+                      :max="10"
+                      :precision="0"
+                      :controls="false"
+                    />
+                    <span class="ai-unit">条</span>
+                  </AiSettingField>
+                  <AiSettingField
+                    label="检索超时"
+                    control-id="ai-search-timeout"
+                    help-key="externalSearchLimits"
+                    hint="超过等待时间按检索失败处理。"
+                    @help="openHelp"
+                  >
+                    <el-input-number
+                      :key="String(formBusy)"
+                      id="ai-search-timeout"
+                      v-model="form.externalSearch.timeoutSeconds"
+                      :min="1"
+                      :max="30"
+                      :precision="0"
+                      :controls="false"
+                    />
+                    <span class="ai-unit">秒</span>
+                  </AiSettingField>
+                  <AiSettingField
+                    label="失败兜底内建通道"
+                    control-id="ai-search-fallback"
+                    help-key="externalSearchFallback"
+                    hint="独立检索失败时再尝试内建通道；0 条结果不触发兜底。"
+                    @help="openHelp"
+                  >
+                    <el-switch
+                      id="ai-search-fallback"
+                      v-model="form.externalSearch.fallbackToBuiltin"
+                      aria-label="独立检索失败时回退内建搜索"
+                    />
+                  </AiSettingField>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+          </template>
+          <div v-else class="ai-builtin-search">
+            <div>
+              <h4>模型内建搜索</h4>
+              <p v-if="form.webSearchShape">当前策略：{{ shapeLabel(form.webSearchShape) }}</p>
+              <p v-else>尚未选用实测策略，当前按 API 地址推断。</p>
+              <small v-if="form.webSearchShape">
+                文字已验证 ·
+                {{
+                  form.webSearchImageCapable === true
+                    ? '带图已验证'
+                    : form.webSearchImageCapable === false
+                      ? '带图不支持'
+                      : '带图未测'
+                }}
+              </small>
+            </div>
+            <el-button :loading="probing" :disabled="formBusy" @click="probeWebSearch">检测联网搜索</el-button>
+          </div>
+          <AiSettingField
+            label="带图时联网"
+            control-id="ai-image-search-mode"
+            help-key="webSearchImageMode"
+            hint="单次请求不能同时看图与搜索时，选择是否增加一次调用来确保检索。"
+            @help="openHelp"
+          >
+            <el-select id="ai-image-search-mode" v-model="form.webSearchImageMode">
+              <el-option label="跟随能力" value="auto" />
+              <el-option label="确保联网" value="two_stage" />
+              <el-option label="关闭带图联网" value="off" />
+            </el-select>
+          </AiSettingField>
+        </div>
+      </el-card>
+
+      <el-alert v-if="ready && formError" :title="formError" type="error" :closable="false" show-icon class="ai-form-error" />
+      <div class="ai-save-bar">
+        <div class="ai-save-status" aria-live="polite">
+          <span :class="{ 'is-dirty': isDirty }"></span>
+          {{ !ready ? '等待读取配置' : isDirty ? '有修改未保存' : '当前设置已保存' }}
+        </div>
+        <div class="ai-actions">
+          <el-button :disabled="formBusy" :icon="Refresh" @click="reloadConfig">重新加载</el-button>
+          <el-button
+            type="primary"
+            :loading="saving"
+            :disabled="formBusy || !isDirty || !!formError"
+            :icon="Check"
+            @click="save()"
+          >
+            保存配置
+          </el-button>
+        </div>
+      </div>
     </el-form>
 
     <!-- 人设管理 -->
-    <el-dialog v-model="manageDialog" title="人设管理" width="720px">
+    <el-dialog :style="dialogStyle" append-to-body v-model="manageDialog" title="人设管理" width="720px">
       <el-table :data="form.availableCharacters" size="small">
         <el-table-column prop="displayName" label="名称" width="120">
           <template #default="{ row }">
@@ -213,7 +574,11 @@
         <el-table-column label="操作" width="130">
           <template #default="{ row }">
             <el-button size="small" link type="primary" @click="openEdit(row)">{{ row.isCustom ? '编辑' : '查看' }}</el-button>
-            <el-popconfirm v-if="row.isCustom" title="删除后引用该人设的配置将回退为默认，确认删除？" @confirm="removeCharacter(row)">
+            <el-popconfirm
+              v-if="row.isCustom"
+              title="删除后引用该人设的配置将回退为默认，确认删除？"
+              @confirm="removeCharacter(row)"
+            >
               <template #reference>
                 <el-button size="small" link type="danger">删除</el-button>
               </template>
@@ -228,10 +593,15 @@
     </el-dialog>
 
     <!-- 人设编辑/查看 -->
-    <el-dialog v-model="editDialog" :title="editTitle" width="560px">
-      <el-form :model="charForm" label-width="100px" v-if="charForm">
+    <el-dialog :style="dialogStyle" append-to-body v-model="editDialog" :title="editTitle" width="560px">
+      <el-form :model="charForm" label-position="top" v-if="charForm" :disabled="charSaving">
         <el-form-item label="标识" required>
-          <el-input v-model="charForm.name" :disabled="charReadonly || editing" placeholder="英文标识，如 waifu，保存后不可改" maxlength="32" />
+          <el-input
+            v-model="charForm.name"
+            :disabled="charReadonly || editing"
+            placeholder="英文标识，如 waifu，保存后不可改"
+            maxlength="32"
+          />
         </el-form-item>
         <el-form-item label="名称" required>
           <el-input v-model="charForm.displayName" :disabled="charReadonly" placeholder="显示名称，如 温柔学姐" />
@@ -240,7 +610,13 @@
           <el-input v-model="charForm.description" :disabled="charReadonly" placeholder="一句话简介，供列表展示" />
         </el-form-item>
         <el-form-item label="角色提示词">
-          <el-input v-model="charForm.systemPrompt" :disabled="charReadonly" type="textarea" :rows="6" placeholder="设定角色身份、语气与行为规则，选中该人设后追加到系统提示词" />
+          <el-input
+            v-model="charForm.systemPrompt"
+            :disabled="charReadonly"
+            type="textarea"
+            :rows="6"
+            placeholder="设定角色身份、语气与行为规则，选中该人设后追加到系统提示词"
+          />
         </el-form-item>
       </el-form>
       <template #footer v-if="!charReadonly">
@@ -250,8 +626,8 @@
     </el-dialog>
 
     <!-- 保存为预设 -->
-    <el-dialog v-model="savePresetDialog" title="保存为预设" width="520px">
-      <el-form :model="presetForm" label-width="96px">
+    <el-dialog :style="dialogStyle" append-to-body v-model="savePresetDialog" title="保存为预设" width="520px">
+      <el-form :model="presetForm" label-position="top" :disabled="presetSaving">
         <el-form-item label="名称" required>
           <el-input v-model="presetForm.name" maxlength="40" show-word-limit placeholder="例如：群聊日常、深度推理" />
         </el-form-item>
@@ -270,8 +646,8 @@
     </el-dialog>
 
     <!-- 重命名预设 -->
-    <el-dialog v-model="editPresetDialog" title="编辑预设" width="520px">
-      <el-form :model="presetEditForm" label-width="96px">
+    <el-dialog :style="dialogStyle" append-to-body v-model="editPresetDialog" title="编辑预设" width="520px">
+      <el-form :model="presetEditForm" label-position="top" :disabled="presetSaving">
         <el-form-item label="名称" required>
           <el-input v-model="presetEditForm.name" maxlength="40" show-word-limit />
         </el-form-item>
@@ -286,88 +662,100 @@
     </el-dialog>
 
     <!-- 预设管理 -->
-    <el-dialog v-model="managePresetDialog" title="配置预设管理" width="1000px">
-      <el-table :data="presets" size="small" empty-text="还没有保存过配置预设">
-        <el-table-column label="名称" min-width="160">
-          <template #default="{ row }">
-            <div>
-              {{ row.name }}
-              <el-tag v-if="!row.isValid" size="small" type="danger">数据损坏</el-tag>
+    <el-dialog :style="dialogStyle" append-to-body v-model="managePresetDialog" title="AI 配置预设" width="760px">
+      <p class="ai-library-intro">保存不同模型与用途的整套配置，需要时应用并保存。</p>
+      <el-alert v-if="presetsError" type="warning" title="预设暂时无法读取" :closable="false">
+        <el-button link type="primary" @click="loadPresets">重新读取</el-button>
+      </el-alert>
+      <el-empty v-else-if="!presets.length" description="还没有配置预设" :image-size="64" />
+      <div v-else class="ai-preset-list" v-loading="presetsLoading || presetSaving || applyingPreset">
+        <article v-for="row in presets" :key="row.id" class="ai-preset-item">
+          <div class="ai-preset-item-title">
+            <strong>{{ row.name }}</strong>
+            <el-tag v-if="!row.isValid" size="small" type="danger">数据损坏</el-tag>
+            <el-tag size="small" type="info">{{ row.hasApiKey ? '包含密钥' : '沿用当前密钥' }}</el-tag>
+          </div>
+          <p v-if="row.description" class="ai-preset-description">{{ row.description }}</p>
+          <div class="ai-preset-details">
+            <span>{{ row.modelName || '未填模型' }}</span>
+            <span>{{ row.personalityDisplayName || '未指定人设' }}{{ row.personalityMissing ? '（已失效）' : '' }}</span>
+            <span>
+              {{ row.webSearchEnabled ? '联网开启' : '联网关闭'
+              }}{{ row.webSearchEnabled && row.webSearchShape ? ` · ${shapeShortLabel(row.webSearchShape)}` : '' }}
+            </span>
+          </div>
+          <p class="probe-desc ai-preset-address">{{ row.apiBaseUrl || '未填地址' }}</p>
+          <div class="ai-preset-item-footer">
+            <small>更新于 {{ fmt(row.updatedAt) }}</small>
+            <div class="ai-preset-item-actions">
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :disabled="formBusy || !row.isValid"
+                @click="applyPresetById(row.id, true)"
+              >
+                应用并保存
+              </el-button>
+              <el-dropdown trigger="click" :disabled="formBusy" @command="(command) => presetCommand(command, row)">
+                <el-button size="small" :disabled="formBusy" :aria-label="`${row.name}的更多操作`">
+                  更多操作
+                  <el-icon class="ai-action-icon"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="rename">编辑名称与备注</el-dropdown-item>
+                    <el-dropdown-item command="overwrite" :disabled="!!formError">用当前表单覆盖</el-dropdown-item>
+                    <el-dropdown-item command="duplicate">复制预设</el-dropdown-item>
+                    <el-dropdown-item command="remove" divided>删除预设</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
-            <div v-if="row.description" class="probe-desc">{{ row.description }}</div>
-            <div class="probe-desc">更新于 {{ fmt(row.updatedAt) }}</div>
-          </template>
-        </el-table-column>
-        <el-table-column label="服务商 / 模型" min-width="200">
-          <template #default="{ row }">
-            <div>{{ row.modelName || '未填模型' }}</div>
-            <div class="probe-desc">{{ row.apiBaseUrl || '未填地址' }}</div>
-          </template>
-        </el-table-column>
-        <el-table-column label="人设" width="100">
-          <template #default="{ row }">
-            {{ row.personalityDisplayName || '未指定' }}
-            <el-tag v-if="row.personalityMissing" size="small" type="warning">已失效</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="联网" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.webSearchEnabled ? 'success' : 'info'">
-              {{ row.webSearchEnabled ? '开启' : '关闭' }}
-            </el-tag>
-            <div v-if="row.webSearchEnabled" class="probe-desc">
-              {{ row.webSearchShape ? shapeShortLabel(row.webSearchShape) : '自动推断' }}
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="密钥" width="80">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.hasApiKey ? 'success' : 'info'">
-              {{ row.hasApiKey ? '已保存' : '未保存' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="300" fixed="right">
-          <template #default="{ row }">
-            <el-button size="small" link type="primary" :disabled="!row.isValid"
-              @click="applyPresetById(row.id, true)">应用</el-button>
-            <el-button size="small" link type="primary" @click="openPresetMeta(row)">重命名</el-button>
-            <el-button size="small" link type="warning" @click="overwritePreset(row)">覆盖</el-button>
-            <el-button size="small" link type="primary" @click="duplicatePreset(row)">复制</el-button>
-            <el-popconfirm title="删除后不影响当前生效配置，确认删除？" @confirm="removePreset(row)">
-              <template #reference>
-                <el-button size="small" link type="danger">删除</el-button>
-              </template>
-            </el-popconfirm>
-          </template>
-        </el-table-column>
-      </el-table>
-      <div class="probe-footnote">
-        「覆盖」会用当前表单内容替换该预设的配置快照；「应用」会立即覆盖并保存当前生效配置。
+          </div>
+        </article>
       </div>
+      <div class="probe-footnote">覆盖只更新预设；应用会立即覆盖并保存当前配置。</div>
       <template #footer>
-        <el-button type="primary" @click="openSavePreset(true)">从当前表单新建</el-button>
+        <el-button type="primary" :disabled="formBusy || !!formError" @click="openSavePreset(true)">从当前表单新建</el-button>
         <el-button @click="managePresetDialog = false">关闭</el-button>
       </template>
     </el-dialog>
 
     <!-- 内置默认系统提示词 -->
-    <el-dialog v-model="defaultPromptDialog" title="内置默认系统提示词" width="760px">
+    <el-dialog :style="dialogStyle" append-to-body v-model="defaultPromptDialog" title="内置默认系统提示词" width="760px">
       <el-input :model-value="form.defaultSystemPrompt || '未获取到默认提示词'" type="textarea" :rows="14" readonly />
-      <div class="probe-footnote">
-        系统提示词留空时使用这段内容；选中「人设」后，角色提示词会在此基础上追加。
-      </div>
+      <div class="probe-footnote">系统提示词留空时使用这段内容；选中「人设」后，角色提示词会在此基础上追加。</div>
       <template #footer>
         <el-button @click="defaultPromptDialog = false">关闭</el-button>
       </template>
     </el-dialog>
 
     <!-- 联网搜索探测：流式逐项进度 → 完整报告 → 每个已验证形状可一键选用 -->
-    <el-dialog v-model="probeDialog" title="联网搜索探测报告" width="760px" @close="cancelProbe">
-      <el-alert v-if="probeReport && !probeReport.reachable" type="error" :closable="false" show-icon
-        :title="probeReport.error || '上游不可达'" style="margin-bottom: 12px" />
-      <el-alert v-else-if="probeReport && probeReport.authFailed" type="error" :closable="false" show-icon
-        :title="probeReport.error || '鉴权失败'" style="margin-bottom: 12px" />
+    <el-dialog
+      :style="dialogStyle"
+      append-to-body
+      v-model="probeDialog"
+      title="联网搜索探测报告"
+      width="760px"
+      @close="cancelProbe"
+    >
+      <el-alert
+        v-if="probeReport && !probeReport.reachable"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="probeReport.error || '上游不可达'"
+        style="margin-bottom: 12px"
+      />
+      <el-alert
+        v-else-if="probeReport && probeReport.authFailed"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="probeReport.error || '鉴权失败'"
+        style="margin-bottom: 12px"
+      />
 
       <template v-else-if="probePhase === 'running'">
         <div class="probe-summary">正在逐个形状实测当前填写的地址与模型，请稍候……</div>
@@ -378,7 +766,9 @@
           </div>
           <div v-for="item in probeProgress" :key="item.shape" class="probe-progress-item">
             <el-icon v-if="!item.done" class="is-loading"><Loading /></el-icon>
-            <el-icon v-else :color="item.status === 'verified' ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'"><CircleCheck /></el-icon>
+            <el-icon v-else :color="item.status === 'verified' ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'">
+              <CircleCheck />
+            </el-icon>
             <div class="probe-progress-main">
               <code>{{ item.shape }}</code>
               <div class="probe-desc">{{ item.description }}</div>
@@ -391,8 +781,8 @@
       <template v-else-if="probeReport">
         <div class="probe-summary">
           以「现在北京时间几点？」实测当前填写的地址与模型（基线 {{ probeReport.basePromptTokens ?? '?' }} prompt tokens）：
-          <b>{{ verifiedCount }}</b> 种形状已验证、{{ ignoredCount }} 种被静默忽略。
-          对已验证的形状点右侧「选用」，即时写进配置并打开联网搜索。
+          <b>{{ verifiedCount }}</b>
+          种形状已验证、{{ ignoredCount }} 种被静默忽略。 对已验证的形状点右侧「选用」，即时写进配置并打开联网搜索。
         </div>
         <el-table :data="probeReport.results" size="small">
           <el-table-column label="请求形状" min-width="190">
@@ -421,13 +811,12 @@
           </el-table-column>
           <el-table-column label="操作" width="88" fixed="right">
             <template #default="{ row }">
-              <el-button v-if="form.webSearchShape === row.shape" size="small" type="success" plain disabled>
-                已选用
-              </el-button>
+              <el-button v-if="form.webSearchShape === row.shape" size="small" type="success" plain disabled>已选用</el-button>
               <el-tooltip v-else :disabled="row.status === 'verified'" content="该形状未通过实测，不能选用" placement="top">
                 <span>
-                  <el-button size="small" type="primary" :disabled="row.status !== 'verified'"
-                    @click="applyProbe(row)">选用</el-button>
+                  <el-button size="small" type="primary" :disabled="row.status !== 'verified'" @click="applyProbe(row)">
+                    选用
+                  </el-button>
                 </span>
               </el-tooltip>
             </template>
@@ -435,8 +824,8 @@
         </el-table>
         <div class="probe-footnote">
           「已验证」= 响应携带检索证据字段，或带搜索比基线多出大量 prompt token（搜索结果被注入），
-          或回答给出了与当前北京时间吻合的时刻而基线给不出（部分中转会抹掉前两种证据）。
-          「被静默忽略」= 请求 2xx 但无任何检索证据——这正是开关打开却毫无效果的情形。
+          或回答给出了与当前北京时间吻合的时刻而基线给不出（部分中转会抹掉前两种证据）。 「被静默忽略」= 请求 2xx
+          但无任何检索证据——这正是开关打开却毫无效果的情形。
           「选用」会把形状写入配置并打开联网搜索；换地址或模型后旧策略会自动清空，需要重新检测。
           「带图」列需要文字联网先通过才会测试；「看不到图」表示上游接受了请求但静默丢弃了图片。
         </div>
@@ -450,7 +839,14 @@
     </el-dialog>
 
     <!-- 独立搜索服务测试：用表单当前值实测一次检索，不需要先保存 -->
-    <el-dialog v-model="esProbeDialog" title="测试搜索 · 独立搜索服务" width="640px" @close="cancelEsProbe">
+    <el-dialog
+      :style="dialogStyle"
+      append-to-body
+      v-model="esProbeDialog"
+      title="测试搜索 · 独立搜索服务"
+      width="640px"
+      @close="cancelEsProbe"
+    >
       <template v-if="esProbing">
         <div class="probe-summary">正在用表单当前值实测一次检索（不经缓存、不会保存配置），请稍候……</div>
         <div class="probe-progress">
@@ -472,8 +868,7 @@
           <span>{{ esProbeResult.detail }}</span>
         </div>
         <div v-if="(esProbeResult.hits || []).length" class="es-hits">
-          <a v-for="h in esProbeResult.hits" :key="h.url" class="es-hit" :href="h.url" target="_blank"
-            rel="noopener noreferrer">
+          <a v-for="h in esProbeResult.hits" :key="h.url" class="es-hit" :href="h.url" target="_blank" rel="noopener noreferrer">
             <span class="es-hit-title">{{ h.title || h.url }}</span>
             <span class="es-hit-url">{{ esHost(h.url) }}</span>
           </a>
@@ -491,42 +886,39 @@
       </template>
     </el-dialog>
 
-    <ParamHelpDrawer v-model="helpVisible" :title="helpTitle" :lines="helpLines" :current="helpCurrent"
-      :index="helpIndex" :total="helpTotal" @step="stepHelp" />
-  </el-card>
+    <ParamHelpDrawer
+      v-model="helpVisible"
+      :title="helpTitle"
+      :lines="helpLines"
+      :current="helpCurrent"
+      :index="helpIndex"
+      :total="helpTotal"
+      @step="stepHelp"
+    />
+  </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Loading, CircleCheck } from '@element-plus/icons-vue'
+import { Loading, CircleCheck, Collection, FolderAdd, ArrowRight, ArrowDown, Connection, User, ChatDotRound, Search, Refresh, Check } from '@element-plus/icons-vue'
 import api from '../api'
 import { tokenBudget, DEFAULT_INPUT_BUDGET } from '../tokenBudget'
 import { useUnsavedChanges } from '../useUnsavedChanges'
 import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
+import AiSettingField from '../components/AiSettingField.vue'
+import { normalizeAiSettings, aiSettingsError } from '../aiSettings'
 
-// 独立搜索服务：与后端 ExternalSearchInputDto 对齐的默认值；响应缺字段时兜底，默认不启用
-const defaultExternalSearch = () => ({
-  enabled: false,
-  provider: 'searxng',
-  baseUrl: '',
-  apiKey: '',
-  maxResults: 5,
-  timeoutSeconds: 8,
-  fallbackToBuiltin: false
-})
-const withExternalDefaults = (data) => ({
-  ...data,
-  externalSearch: { ...defaultExternalSearch(), ...(data?.externalSearch || {}) },
-  externalSearchStatus: data?.externalSearchStatus || { verifiedAt: null }
-})
+const withExternalDefaults = normalizeAiSettings
 
 const form = ref(withExternalDefaults({ availableProviders: [], availableCharacters: [] }))
 const presetId = ref('')
 const loading = ref(false)
 const saving = ref(false)
+const loadError = ref(false), presetsError = ref(false), presetsLoading = ref(false)
+const advancedOpen = ref([]), searchAdvancedOpen = ref([])
 
 // 配置预设：当前选中项、已保存列表与管理弹窗状态
 const presets = ref([])
@@ -539,8 +931,13 @@ const presetSaving = ref(false)
 const presetForm = ref({ name: '', description: '', includeApiKey: true })
 const presetEditForm = ref({ id: null, name: '', description: '' })
 const defaultPromptDialog = ref(false)
+const dialogStyle = { maxWidth: 'calc(100vw - 32px)' }
 // 上次读取/应用/保存后的表单快照，用来判断有没有未保存修改
 const baseline = ref('')
+const ready = computed(() => !!baseline.value)
+const formBusy = computed(() => loading.value || !ready.value || saving.value || applyingPreset.value || presetSaving.value)
+const formError = computed(() => aiSettingsError(form.value))
+const formatTokens = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '—'
 
 // 只取服务端可写字段；预设接口和 PUT /ai 共用同一份契约
 const configPayload = () => ({
@@ -575,6 +972,8 @@ const configPayload = () => ({
 const isDirty = computed(() =>
   !!baseline.value && JSON.stringify(configPayload()) !== baseline.value)
 const budget = computed(() => tokenBudget(form.value))
+watch(() => budget.value.error, error => { if (error && !advancedOpen.value.includes('capacity')) advancedOpen.value.push('capacity') })
+watch(formError, error => { if (error.includes('检索') && !searchAdvancedOpen.value.includes('search-advanced')) searchAdvancedOpen.value.push('search-advanced') })
 const confirmDiscard = useUnsavedChanges(isDirty)
 const reloadConfig = async () => { if (await confirmDiscard()) await load() }
 
@@ -884,8 +1283,8 @@ const presetHelp = computed(() => {
 })
 
 const HELP_ORDER = [
-  'configPreset', 'presetId', 'apiBaseUrl', 'apiKey', 'modelName', 'personality', 'systemPrompt',
-  'temperature', 'maxTokens', 'contextWindowTokens', 'maxInputTokens', 'groupMemoryInjectionEnabled', 'maxContextMessages', 'maxAttachedImages',
+  'configPreset', 'presetId', 'apiBaseUrl', 'apiKey', 'modelName', 'personality', 'temperature', 'systemPrompt',
+  'maxTokens', 'maxContextMessages', 'maxAttachedImages', 'groupMemoryInjectionEnabled', 'contextWindowTokens', 'maxInputTokens',
   'webSearchEnabled', 'webSearchImageMode',
   'externalSearchEnabled', 'externalSearchProvider', 'externalSearchBaseUrl', 'externalSearchApiKey',
   'externalSearchLimits', 'externalSearchFallback', 'externalSearchTest'
@@ -1005,9 +1404,9 @@ const HELP = {
     value: (f) => (f.webSearchEnabled ? '开启' : '关闭'),
     lines: [
       '打开后，@ 回复与私聊可以先联网检索再回答。',
-      '先点「检测联网搜索」，在报告里对已验证的形状点「选用」，运行时会按选用的通道发请求。',
-      '没有选用时按 API 地址自动推断，中转可能因此不生效。',
-      '只在服务商支持时生效，会更慢也更费 token。'
+      '优先检索通道选「独立搜索服务」时，填写搜索参数，再点「测试搜索」检查连接。',
+      '选「模型内建搜索」时，先点「检测联网搜索」，在报告里选用已验证的策略；未选用时按 API 地址推断。',
+      '内建通道需要服务商支持；检索会增加等待时间与调用费用。'
     ]
   },
   webSearchImageMode: {
@@ -1028,7 +1427,7 @@ const HELP = {
     value: (f) => (f.externalSearch?.enabled ? '开启' : '关闭'),
     lines: [
       '由本程序先检索、再把结果作为资料注入对话（预检索注入），不依赖模型服务商支持搜索。',
-      '适合中转站与不带内建搜索的模型；与上方「联网搜索」（服务商内建通道）相互独立。',
+      '适合中转站与不带内建搜索的模型，在「优先检索通道」中选择。',
       '总开关仍是「联网搜索」：两者同时开启才会真正联网检索。',
       '配置默认关闭，保存后才会生效。'
     ]
@@ -1113,21 +1512,33 @@ const load = async () => {
     const { data } = await api.get('/config/ai')
     form.value = withExternalDefaults(data)
     baseline.value = JSON.stringify(configPayload())
+    presetId.value = ''
+    loadError.value = false
+  } catch {
+    loadError.value = true
+    // API 层提示错误；读取失败时保留当前草稿，不开放空表单覆盖服务器配置。
   } finally { loading.value = false }
 }
 
 const loadPresets = async () => {
-  const { data } = await api.get('/config/ai/presets')
-  presets.value = data
+  presetsLoading.value = true
+  try {
+    const { data } = await api.get('/config/ai/presets')
+    presets.value = data
+    presetsError.value = false
+  } catch { presetsError.value = true }
+  finally { presetsLoading.value = false }
 }
 
 const openSavePreset = (fromManage = false) => {
+  if (formBusy.value || formError.value) return
   if (fromManage) managePresetDialog.value = false
   presetForm.value = { name: '', description: '', includeApiKey: true }
   savePresetDialog.value = true
 }
 
 const savePreset = async () => {
+  if (formBusy.value || formError.value) return
   const name = presetForm.value.name.trim()
   if (!name) {
     ElMessage.warning('预设名称不能为空')
@@ -1145,7 +1556,8 @@ const savePreset = async () => {
     await loadPresets()
     if (data?.id) selectedPresetId.value = data.id
     ElMessage.success(`已保存预设「${data?.name || name}」`)
-  } finally { presetSaving.value = false }
+  } catch { /* 请求失败时保留预设表单。 */ }
+  finally { presetSaving.value = false }
 }
 
 const openManagePresets = async () => {
@@ -1154,7 +1566,7 @@ const openManagePresets = async () => {
 }
 
 const openPresetMeta = (row) => {
-  presetEditForm.value = { id: row.id, name: row.name, description: row.description }
+  presetEditForm.value = { id: row.id, name: row.name, description: row.description || '' }
   editPresetDialog.value = true
 }
 
@@ -1173,10 +1585,12 @@ const savePresetMeta = async () => {
     editPresetDialog.value = false
     await loadPresets()
     ElMessage.success('预设已更新')
-  } finally { presetSaving.value = false }
+  } catch { /* API 层提示错误，保留名称与备注。 */ }
+  finally { presetSaving.value = false }
 }
 
 const overwritePreset = async (row) => {
+  if (formBusy.value || formError.value) return
   const lines = [`将用当前表单内容覆盖预设「${row.name}」的配置快照。`]
   if (isDirty.value) lines.push('当前表单有未保存修改，会一并保存进预设。')
   lines.push('API Key 按当前生效配置保存；表单里填了新 Key 则保存新 Key。')
@@ -1198,23 +1612,45 @@ const overwritePreset = async (row) => {
     })
     await loadPresets()
     ElMessage.success(`预设「${row.name}」已更新`)
-  } finally { presetSaving.value = false }
+  } catch { /* API 层提示错误，保留当前草稿。 */ }
+  finally { presetSaving.value = false }
 }
 
 const duplicatePreset = async (row) => {
-  const { data } = await api.post(`/config/ai/presets/${row.id}/duplicate`)
-  await loadPresets()
-  ElMessage.success(`已复制为「${data?.name || '副本'}」`)
+  if (formBusy.value) return
+  presetSaving.value = true
+  try {
+    const { data } = await api.post(`/config/ai/presets/${row.id}/duplicate`)
+    await loadPresets()
+    ElMessage.success(`已复制为「${data?.name || '副本'}」`)
+  } catch { /* API 层提示错误。 */ }
+  finally { presetSaving.value = false }
 }
 
 const removePreset = async (row) => {
-  await api.delete(`/config/ai/presets/${row.id}`)
-  if (selectedPresetId.value === row.id) selectedPresetId.value = null
-  await loadPresets()
-  ElMessage.success('预设已删除')
+  if (formBusy.value) return
+  try {
+    await ElMessageBox.confirm(`删除预设「${row.name}」？当前生效配置不受影响。`, '删除预设', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+  } catch { return }
+  presetSaving.value = true
+  try {
+    await api.delete(`/config/ai/presets/${row.id}`)
+    if (selectedPresetId.value === row.id) selectedPresetId.value = null
+    await loadPresets()
+    ElMessage.success('预设已删除')
+  } catch { /* API 层提示错误。 */ }
+  finally { presetSaving.value = false }
+}
+
+const presetCommand = (command, row) => {
+  if (command === 'rename') openPresetMeta(row)
+  else if (command === 'overwrite') overwritePreset(row)
+  else if (command === 'duplicate') duplicatePreset(row)
+  else if (command === 'remove') removePreset(row)
 }
 
 const applyPresetById = async (id, fromManage = false) => {
+  if (formBusy.value) return
   const p = presets.value.find((x) => x.id === id)
   if (!p) return
   if (!p.isValid) {
@@ -1228,7 +1664,7 @@ const applyPresetById = async (id, fromManage = false) => {
   if (p.personalityMissing) lines.push(`人设「${p.personality}」已不存在，应用后会按自由文本处理。`)
   try {
     await ElMessageBox.confirm(lines.join(''), '应用预设', {
-      type: 'warning', confirmButtonText: '应用', cancelButtonText: '取消'
+      type: 'warning', confirmButtonText: '应用并保存', cancelButtonText: '取消'
     })
   } catch {
     return
@@ -1239,10 +1675,12 @@ const applyPresetById = async (id, fromManage = false) => {
     const { data } = await api.post(`/config/ai/presets/${id}/apply`)
     form.value = withExternalDefaults(data)
     baseline.value = JSON.stringify(configPayload())
+    presetId.value = ''
     selectedPresetId.value = id
     if (fromManage) managePresetDialog.value = false
     ElMessage.success(`已应用预设「${p.name}」`)
-  } finally { applyingPreset.value = false }
+  } catch { /* API 层提示错误，应用失败时保留当前草稿。 */ }
+  finally { applyingPreset.value = false }
 }
 
 const applySelectedPreset = () => {
@@ -1296,7 +1734,8 @@ const removeCharacter = async (row) => {
 }
 
 const save = async (successMessage = 'AI 配置已保存') => {
-  if (budget.value.error) { ElMessage.warning(budget.value.error); return false }
+  if (formBusy.value) return false
+  if (formError.value) { ElMessage.warning(formError.value); return false }
   saving.value = true
   try {
     await api.put('/config/ai', configPayload())
@@ -1304,7 +1743,9 @@ const save = async (successMessage = 'AI 配置已保存') => {
     await load()
     // 手动保存后当前配置未必还等于选中的预设，清掉标记避免误导。
     selectedPresetId.value = null
-  } finally { saving.value = false }
+    return true
+  } catch { return false /* API 层提示错误；保留未保存的草稿。 */ }
+  finally { saving.value = false }
 }
 
 onMounted(async () => {
@@ -1313,51 +1754,113 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.card-head { display: flex; justify-content: space-between; align-items: center; }
-/* 预设提示是选中后才知道的结果，留在原地更醒目；width 100% 保证它独占一行 */
-.hint { width: 100%; color: var(--el-text-color-secondary); font-size: 12px; margin-top: 4px; }
-/* 整行控件给右边的「?」留出位置，否则宽度占满会把按钮挤到下一行 */
-.el-form-item__content > .el-input,
-.el-form-item__content > .el-textarea { width: calc(100% - 32px); }
-.probe-summary { margin-bottom: 12px; font-size: 13px; line-height: 1.6; }
-.probe-desc { color: var(--el-text-color-secondary); font-size: 12px; }
-.probe-footnote { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; margin-top: 10px; }
+.ai-settings { min-width: 0; }
+.ai-heading, .ai-title, .ai-actions, .ai-preset-toolbar, .ai-preset-note, .ai-save-bar, .ai-save-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.ai-heading { justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 22px; }
+.ai-title h2 { margin: 0; color: var(--panel-text); font-size: 20px; font-weight: 600; }
+.ai-heading p { margin: 6px 0 0; color: var(--panel-text-muted); font-size: 13px; }
+.ai-actions { gap: 8px; }
+.ai-actions :deep(.el-button + .el-button), .ai-preset-item-actions :deep(.el-button + .el-button) { margin-left: 0; }
+.ai-action-icon { margin-left: 6px; }
+.ai-preset-toolbar { padding: 16px 18px; background: var(--panel-raised); border-radius: 10px; border: 1px solid var(--panel-border-soft); }
+.ai-preset-toolbar label { font-size: 13px; color: var(--panel-text-regular); }
+.ai-preset-toolbar :deep(.el-select) { width: 300px; max-width: 100%; }
+.ai-preset-note { margin-top: 12px; font-size: 12px; color: var(--panel-text-regular); overflow-wrap: anywhere; }
+.ai-preset-footnote { font-size: 12px; color: var(--panel-text-muted); line-height: 1.7; margin: 12px 0 0; }
+.ai-preset-card { margin-bottom: 16px; }
+.ai-option { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; }
+.ai-option > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ai-option small { max-width: 50%; overflow: hidden; text-overflow: ellipsis; color: var(--panel-text-muted); font-size: 12px; font-weight: 400; }
+.ai-warning { color: var(--el-color-warning); }
+.ai-settings-form { display: flex; flex-direction: column; gap: 16px; }
+.ai-primary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.ai-section { min-width: 0; }
+.ai-section-heading { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 24px; }
+.ai-section-heading > .el-icon { margin-top: 3px; color: var(--panel-accent-text); font-size: 18px; flex: none; }
+.ai-section-heading > div { flex: 1; min-width: 0; }
+.ai-section-heading h3 { margin: 0; color: var(--panel-text); font-size: 16px; font-weight: 600; }
+.ai-section-heading p { margin: 5px 0 0; color: var(--panel-text-muted); font-size: 12px; line-height: 1.65; }
+.ai-section-heading > .el-button { flex: none; padding-top: 2px; }
+.ai-fields { display: grid; gap: 22px; }
+.ai-context-grid, .ai-search-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; }
+.ai-unit { color: var(--panel-text-muted); font-size: 12px; }
+.ai-temperature { display: flex; align-items: center; gap: 20px; width: 100%; }
+.ai-temperature :deep(.el-slider) { flex: 1; min-width: 0; margin: 0 8px; }
+.ai-temperature :deep(.el-input-number) { width: 80px; flex: none; }
+.ai-temperature :deep(.el-input-number .el-input__inner) { text-align: center; }
+.ai-budget-collapse { border: 0; border-top: 1px solid var(--panel-border-soft); margin-top: 24px; }
+.ai-budget-collapse :deep(.el-collapse-item__header) { height: auto; min-height: 56px; border: 0; gap: 10px; background: transparent; font-size: 14px; font-weight: 400; line-height: 1.6; }
+.ai-budget-collapse :deep(.el-collapse-item__title) { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; flex: 1; min-width: 0; padding: 10px 0; }
+.ai-budget-collapse :deep(.el-collapse-item__title small) { font-size: 12px; color: var(--panel-text-muted); }
+.ai-budget-collapse :deep(.el-collapse-item__arrow) { margin-left: 0; }
+.ai-budget-collapse :deep(.el-collapse-item__wrap) { border: 0; background: transparent; }
+.ai-budget-collapse :deep(.el-collapse-item__content) { padding: 10px 0 0; }
+.ai-budget-summary { padding: 16px; background: var(--panel-raised); border-radius: 8px; margin-top: 20px; }
+.ai-budget-summary > div:first-child { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--panel-text-regular); margin-bottom: 10px; }
+.ai-budget-summary p { margin: 8px 0 0; font-size: 12px; color: var(--panel-text-muted); line-height: 1.7; }
+.ai-section-heading > .ai-search-master { display: flex; align-items: center; gap: 10px; color: var(--panel-text-regular); font-size: 13px; flex: none; }
+.ai-search-content { display: flex; flex-direction: column; gap: 20px; }
+.ai-search-route { max-width: 100%; }
+.ai-search-route :deep(.el-radio-button__original-radio:disabled:checked + .el-radio-button__inner) { color: var(--panel-text-muted); }
+.ai-search-fields { gap: 20px 32px; }
+.ai-search-test { align-self: center; font-size: 12px; color: var(--panel-text-muted); padding: 0; }
+.ai-search-test p { margin: 10px 0 4px; line-height: 1.6; }
+.ai-search-test small { font-size: 12px; line-height: 1.7; }
+.ai-search-content > .ai-budget-collapse { margin-top: 0; }
+.ai-builtin-search { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding: 16px 18px; border: 1px solid var(--panel-border-soft); border-radius: 10px; background: var(--panel-raised); }
+.ai-builtin-search h4 { margin: 0; font-size: 14px; font-weight: 500; color: var(--panel-text); }
+.ai-builtin-search p { margin: 6px 0 0; color: var(--panel-text-regular); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.ai-builtin-search small { display: block; margin-top: 4px; font-size: 12px; color: var(--panel-text-muted); }
+.ai-search-content > .ai-field { max-width: calc(50% - 16px); }
+.ai-save-bar { justify-content: space-between; gap: 14px; padding: 4px 0; }
+.ai-save-status { color: var(--panel-text-muted); font-size: 13px; }
+.ai-save-status > span { width: 6px; height: 6px; border-radius: 50%; background: var(--el-color-success); }
+.ai-save-status > span.is-dirty { background: var(--el-color-warning); }
+.ai-form-error, .ai-load-error { margin-bottom: 0; }
+.ai-load-error { margin-bottom: 16px; }
+.ai-library-intro { color: var(--panel-text-muted); font-size: 13px; line-height: 1.7; margin: 0 0 16px; }
+.ai-preset-list { max-height: 60vh; overflow: auto; overscroll-behavior: contain; }
+.ai-preset-item { border: 1px solid var(--panel-border); border-radius: 10px; padding: 16px; }
+.ai-preset-item + .ai-preset-item { margin-top: 12px; }
+.ai-preset-item-title, .ai-preset-details, .ai-preset-item-footer, .ai-preset-item-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ai-preset-item-title strong { font-size: 14px; color: var(--panel-text); font-weight: 500; overflow-wrap: anywhere; }
+.ai-preset-description { font-size: 13px; color: var(--panel-text-regular); line-height: 1.6; margin: 8px 0; overflow-wrap: anywhere; }
+.ai-preset-details { gap: 6px 16px; margin-top: 8px; color: var(--panel-text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.ai-preset-address { margin: 6px 0 0; overflow-wrap: anywhere; }
+.ai-preset-item-footer { justify-content: space-between; margin-top: 14px; gap: 12px; }
+.ai-preset-item-footer > small { color: var(--panel-text-muted); font-size: 12px; }
+.hint { width: 100%; color: var(--panel-text-muted); font-size: 12px; margin-top: 4px; line-height: 1.6; }
+.probe-summary { margin-bottom: 12px; font-size: 13px; line-height: 1.7; }
+.probe-desc { color: var(--panel-text-muted); font-size: 12px; }
+.probe-footnote { color: var(--panel-text-muted); font-size: 12px; line-height: 1.7; margin-top: 12px; }
 .probe-progress { display: flex; flex-direction: column; gap: 8px; }
-.probe-progress-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px;
-}
+.probe-progress-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--panel-border-soft); border-radius: 8px; }
 .probe-progress-main { flex: 1; min-width: 0; }
 .probe-progress-main code { font-size: 12px; }
-/* 独立搜索服务卡片：浅色内嵌块，与服务商内建通道（上方「联网搜索」）区分 */
-.es-box {
-  width: 100%; border: 1px solid var(--el-border-color-lighter); border-radius: 6px;
-  padding: 12px 16px 10px; background: var(--el-fill-color-extra-light);
-}
-.es-head { display: flex; align-items: flex-start; gap: 12px; }
-.es-head-main { flex: 1; min-width: 0; }
-.es-title { font-weight: 600; font-size: 13px; color: var(--el-text-color-primary); }
-.es-sub { display: block; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; margin-top: 4px; }
-.es-field { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-.es-label { flex: none; width: 84px; text-align: right; color: var(--el-text-color-regular); font-size: 13px; }
-.es-inline-label { color: var(--el-text-color-regular); font-size: 13px; }
-.es-hint-inset { padding-left: 92px; }
-.es-foot { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-/* 测试结果：判定行 + 可点击结果列表 */
-.es-verdict { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.6; }
+.es-verdict { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.7; }
 .es-hits { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.es-hit { display: block; padding: 8px 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; text-decoration: none; }
-.es-hit:hover { border-color: var(--el-color-primary-light-5); background: var(--el-fill-color-light); }
-.es-hit-title {
-  display: block; color: var(--panel-accent-text); font-size: 13px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.es-hit-url { display: block; color: var(--el-text-color-secondary); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.es-hit { display: block; padding: 8px 12px; border: 1px solid var(--panel-border-soft); border-radius: 8px; text-decoration: none; }
+.es-hit:hover { border-color: var(--el-color-primary-light-5); background: var(--panel-raised); }
+.es-hit-title { display: block; color: var(--panel-accent-text); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.es-hit-url { display: block; color: var(--panel-text-muted); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 1100px) and (min-width: 901px), (max-width: 760px) { .ai-primary-grid { grid-template-columns: 1fr; } }
 @media (max-width: 600px) {
-  .es-box { padding: 14px 12px; }
-  .es-label { width: 100%; text-align: left; }
-  .es-hint-inset { padding-left: 0; }
-  .es-foot { flex-wrap: wrap; }
-  .es-head { gap: 8px; }
+  .ai-title h2 { font-size: 18px; }
+  .ai-heading { margin-bottom: 18px; }
+  .ai-heading > .ai-actions { width: 100%; }
+  .ai-preset-toolbar { padding: 14px; }
+  .ai-preset-toolbar label { width: 100%; }
+  .ai-preset-toolbar :deep(.el-select) { width: 100%; }
+  .ai-preset-toolbar > .el-button { margin-left: auto; }
+  .ai-section-heading { margin-bottom: 20px; flex-wrap: wrap; }
+  .ai-search-master { margin-left: 28px; width: calc(100% - 28px); justify-content: space-between; }
+  .ai-context-grid, .ai-search-fields { grid-template-columns: 1fr; gap: 20px; }
+  .ai-search-content > .ai-field { max-width: 100%; }
+  .ai-search-route { display: flex; width: 100%; }
+  .ai-search-route :deep(.el-radio-button) { flex: 1; min-width: 0; }
+  .ai-search-route :deep(.el-radio-button__inner) { width: 100%; padding: 10px 6px; font-size: 13px; }
+  .ai-budget-summary { padding: 12px; }
+  .ai-save-bar > .ai-actions { width: 100%; justify-content: flex-end; }
+  .ai-preset-item { padding: 12px; }
 }
 </style>
