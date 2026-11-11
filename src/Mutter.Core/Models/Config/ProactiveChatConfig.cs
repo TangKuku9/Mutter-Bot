@@ -144,5 +144,6 @@ public class ProactiveChatConfig
 
     private static int Clamp(int value, int min, int max) => Math.Min(max, Math.Max(min, value));
 
-    private static int ClampHour(int value) => value is < 0 or > 23 ? 0 : value;
+    /// <summary>越界小时钳回 0–23，与 ProactiveOverrides 的静默小时口径一致。</summary>
+    private static int ClampHour(int value) => Math.Clamp(value, 0, 23);
 }

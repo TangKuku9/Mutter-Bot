@@ -76,38 +76,62 @@ public sealed class ProactiveChatHostedService(
                 continue;
             }
             var config = global.WithOverrides(ProactiveOverridesCodec.Decode(settings.ProactiveOverridesJson));
-            if (!observe.IsDue(group, config, clock.GetUtcNow().UtcDateTime) || !_scheduled.TryAdd(group, 0)) continue;
-            var result = queue.TryEnqueue($"g:{group}", async token =>
+            if (!observe.IsDue(group, config, clock.GetUtcNow().UtcDateTime)) continue;
+            bool added;
+            try { added = _scheduled.TryAdd(group, 0); }
+            // 防御：标记失败不能让该群在本次进程内被永久跳过。
+            catch (Exception ex) { logger.LogWarning(ex, "择机调度标记失败 group={GroupId}", group); continue; }
+            if (!added) continue;
+            EnqueueResult result;
+            try
             {
-                try
+                result = queue.TryEnqueue($"g:{group}", async token =>
                 {
-                    // 群设置可能在排队期间改变；取走窗口前重读，避免按旧窗口条数和节奏执行。
-                    using var latestScope = scopes.CreateScope();
-                    var latestConfigs = latestScope.ServiceProvider.GetRequiredService<IConfigRepository>();
-                    var latestGlobal = await latestConfigs.GetProactiveConfigAsync(token);
-                    var latestGroup = await latestConfigs.GetGroupConfigAsync(group, token);
-                    if (!latestGlobal.Enabled) return;
-                    if (latestGroup is not { IsEnabled: true, AiProactiveEnabled: true })
+                    IDisposable? lease = null;
+                    try
                     {
-                        observe.Take(group, 1);
-                        return;
+                        ProactiveWindow? window = null;
+                        // scope 只覆盖读取配置与取窗口，避免整个工作流持有 DbContext scope。
+                        using (var latestScope = scopes.CreateScope())
+                        {
+                            var latestConfigs = latestScope.ServiceProvider.GetRequiredService<IConfigRepository>();
+                            var latestGlobal = await latestConfigs.GetProactiveConfigAsync(token);
+                            var latestGroup = await latestConfigs.GetGroupConfigAsync(group, token);
+                            if (!latestGlobal.Enabled) return;
+                            if (latestGroup is not { IsEnabled: true, AiProactiveEnabled: true })
+                            {
+                                observe.Take(group, 1);
+                                return;
+                            }
+                            var latest = latestGlobal.WithOverrides(latestGroup.ProactiveOverrides);
+                            if (!observe.IsDue(group, latest, clock.GetUtcNow().UtcDateTime)) return;
+                            // 排队期间健康状态可能已变化，必须在取走观察窗口前再次检查。
+                            if (!health.TryBeginBackgroundCall(out var probe)) return;
+                            lease = probe;
+                            window = observe.Take(group, latest.WindowMaxMessages);
+                            if (window is null) return;
+                            observe.MarkEvaluated(group, clock.GetUtcNow().UtcDateTime);
+                        }
+                        // health lease 覆盖整个工作流调用。
+                        await workflow.RunAsync(window!, token);
                     }
-                    var latest = latestGlobal.WithOverrides(latestGroup.ProactiveOverrides);
-                    if (!observe.IsDue(group, latest, clock.GetUtcNow().UtcDateTime)) return;
-                    // 排队期间健康状态可能已变化，必须在取走观察窗口前再次检查。
-                    if (!health.TryBeginBackgroundCall(out var probe)) return;
-                    using var lease = probe;
-                    var window = observe.Take(group, latest.WindowMaxMessages);
-                    if (window is null) return;
-                    observe.MarkEvaluated(group, clock.GetUtcNow().UtcDateTime);
-                    await workflow.RunAsync(window, token);
-                }
-                finally { _scheduled.TryRemove(group, out _); }
-            }, background: true, maxQueueAge: TimeSpan.FromSeconds(runtime.BackgroundQueueAgeSeconds), onExpired: expiryToken =>
+                    finally
+                    {
+                        lease?.Dispose();
+                        _scheduled.TryRemove(group, out _);
+                    }
+                }, background: true, maxQueueAge: TimeSpan.FromSeconds(runtime.BackgroundQueueAgeSeconds), onExpired: expiryToken =>
+                {
+                    _scheduled.TryRemove(group, out _);
+                    return Task.CompletedTask;
+                });
+            }
+            catch (Exception ex)
             {
                 _scheduled.TryRemove(group, out _);
-                return Task.CompletedTask;
-            });
+                logger.LogWarning(ex, "择机任务入队失败，本轮跳过 group={GroupId}", group);
+                continue;
+            }
             if (result == EnqueueResult.Rejected) _scheduled.TryRemove(group, out _);
             else if (health.IsDegraded) break;
         }

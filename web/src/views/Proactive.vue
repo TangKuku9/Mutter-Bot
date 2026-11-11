@@ -207,13 +207,16 @@ const onPage = (p) => { page.value = p; loadLogs() }
 
 const resetConfig = () => { if (savedConfig.value) { form.value = { ...savedConfig.value }; dirty.value = false } }
 
+let saveController = null
 const save = async () => {
   if (saving.value || refreshing.value || !savedConfig.value) return
   const invalid = invalidParameterField(form.value, true)
   if (invalid) { ElMessage.warning(`请填写有效的${invalid}后再保存`); return }
   saving.value = true
+  saveController = new AbortController()
   try {
-    const { data } = await api.put('/proactive/config', form.value)
+    const { data } = await api.put('/proactive/config', form.value, { signal: saveController.signal })
+    if (disposed) return // 已离开页面：不写状态、不弹提示
     ElMessage.success(data.message)
     form.value = { ...emptyForm(), ...data.config }
     savedConfig.value = { ...form.value }
@@ -222,6 +225,7 @@ const save = async () => {
   } catch { /* API 层提示失败；未成功保存时保留草稿。 */ }
   finally {
     saving.value = false
+    saveController = null
   }
 }
 
@@ -258,6 +262,7 @@ const connectHub = () => {
 const disconnectHub = () => {
   disposed = true
   if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null }
+  saveController?.abort() // 卸载时取消在途的全局保存，返回后也不再写状态
   unsubscribe?.()
   logRequest.cancel()
   statusRequest.cancel()

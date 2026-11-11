@@ -43,12 +43,34 @@ public sealed class ProactiveObserveService
         }
     }
 
-    /// <summary>窗口是否攒够到了该评估的时候。</summary>
+    /// <summary>
+    /// 窗口是否攒够到了该评估的时候。静默期与日限达到时直接清空缓冲并返回 false：
+    /// 这些窗口反正发不出去，留着只会被“跳过”消费或在第二天早上回复昨晚话题。
+    /// </summary>
     public bool IsDue(string groupId, ProactiveChatConfig config, DateTime utcNow)
     {
         lock (_gate)
         {
             if (!_states.TryGetValue(groupId, out var state) || state.Buffer.Count == 0) return false;
+            // 静默期消息不补评：清空缓冲，静默结束后从新话题开始，也不产生 skipped 留痕。
+            if (config.IsQuietNow(utcNow))
+            {
+                ClearWindow(state);
+                return false;
+            }
+            // 日限（群级与全局）与 BlockReason 同一套北京日界翻转逻辑；到量后评估没有意义。
+            var today = BeijingDate(utcNow);
+            RollDate(state, today);
+            if (today != _globalDate)
+            {
+                _globalDate = today;
+                _globalSentCount = 0;
+            }
+            if (state.SentTodayCount >= config.MaxPerGroupPerDay || _globalSentCount >= config.MaxGlobalPerDay)
+            {
+                ClearWindow(state);
+                return false;
+            }
             // 首条消息攒够一个窗口时长
             if (utcNow - state.FirstBufferedAtUtc < TimeSpan.FromSeconds(config.WindowSeconds)) return false;
             // 两次评估至少隔一个窗口，防止消息不断流时评估连着打
@@ -56,6 +78,12 @@ public sealed class ProactiveObserveService
             if (utcNow - state.LastSentUtc < TimeSpan.FromMinutes(config.CooldownMinutes)) return false;
             return true;
         }
+    }
+
+    private static void ClearWindow(GroupState state)
+    {
+        state.Buffer.Clear();
+        state.FirstBufferedAtUtc = DateTime.MinValue;
     }
 
     /// <summary>取走当前窗口并清空，只保留最近 maxMessages 条。取走后旧消息不再参与下一次评估。</summary>

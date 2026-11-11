@@ -4,7 +4,7 @@
       <div><h2>参数与预设</h2><p>让每个群，都有适合自己的接话节奏。</p></div>
       <div class="parameter-actions">
         <el-button :icon="Collection" :disabled="presetsLoading" @click="libraryOpen = true">预设库</el-button>
-        <el-button :icon="FolderAdd" :disabled="!ready || busy || !!invalidField" @click="openSavePreset">存为预设</el-button>
+        <el-button :icon="FolderAdd" :disabled="!ready || busy || presetsLoading || !!invalidField" @click="openSavePreset">存为预设</el-button>
       </div>
     </div>
     <el-alert v-if="groupsError" type="warning" :closable="false" show-icon class="parameter-alert">
@@ -69,12 +69,14 @@
     <p class="preset-context">挑选一组参数，应用到「{{ scopeName }}」的草稿。</p>
     <el-alert v-if="presetsError" type="warning" title="预设暂时无法读取" :closable="false"><el-button @click="loadPresets">重试</el-button></el-alert>
     <section v-for="builtIn in [true, false]" :key="String(builtIn)" class="preset-group"><h4>{{ builtIn ? '内置预设' : '我的预设' }}</h4>
-      <p v-if="!presets.some(p => p.isBuiltIn === builtIn)" class="preset-context">{{ presetsLoading ? '正在读取…' : '还没有自定义预设。' }}</p>
-      <div v-for="preset in presets.filter(p => p.isBuiltIn === builtIn)" :key="preset.id" class="preset-row"><div><b>{{ preset.name }}</b><p>{{ preset.description }}</p><small>{{ overrideCount(preset.values) }} 项参数<template v-if="preset.values.cooldownMinutes != null"> · 间隔 {{ preset.values.cooldownMinutes }} 分钟</template><template v-if="preset.values.maxPerGroupPerDay != null"> · 每日 {{ preset.values.maxPerGroupPerDay }} 次</template></small></div>
-        <div class="parameter-actions"><el-popconfirm v-if="!preset.isBuiltIn" title="删除这个预设？已应用的群设置不会改变。" width="260" @confirm="deletePreset(preset)"><template #reference><el-button link type="danger" :loading="deletingPreset === preset.id">删除</el-button></template></el-popconfirm><el-button :disabled="!ready || busy" @click="libraryOpen = false; openApply(preset)">查看并应用</el-button></div>
+      <p v-if="presetsError" class="preset-context">{{ builtIn ? '内置预设暂时无法读取。' : '预设暂时无法读取。' }}</p>
+      <p v-else-if="presetsLoading" class="preset-context">正在读取…</p>
+      <p v-else-if="!presets.some(p => p.isBuiltIn === builtIn)" class="preset-context">还没有自定义预设。</p>
+      <div v-for="preset in presetsError ? [] : presets.filter(p => p.isBuiltIn === builtIn)" :key="preset.id" class="preset-row"><div><b>{{ preset.name }}</b><p>{{ preset.description }}</p><small>{{ overrideCount(preset.values) }} 项参数<template v-if="preset.values.cooldownMinutes != null"> · 间隔 {{ preset.values.cooldownMinutes }} 分钟</template><template v-if="preset.values.maxPerGroupPerDay != null"> · 每日 {{ preset.values.maxPerGroupPerDay }} 次</template></small></div>
+        <div class="parameter-actions"><el-popconfirm v-if="!preset.isBuiltIn" title="删除这个预设？已应用的群设置不会改变。" width="260" @confirm="deletePreset(preset)"><template #reference><el-button link type="danger" :disabled="presetsLoading || !!deletingPreset" :loading="deletingPreset === preset.id">删除</el-button></template></el-popconfirm><el-button :disabled="!ready || busy" @click="libraryOpen = false; openApply(preset)">查看并应用</el-button></div>
       </div>
     </section>
-    <template #footer><el-button type="primary" :disabled="!ready || busy || !!invalidField" @click="libraryOpen = false; openSavePreset()">把当前参数存为预设</el-button></template>
+    <template #footer><el-button type="primary" :disabled="!ready || busy || presetsLoading || !!invalidField" @click="libraryOpen = false; openSavePreset()">把当前参数存为预设</el-button></template>
   </el-dialog>
   <el-dialog v-model="savePresetOpen" title="存为预设" width="560px" :style="dialogStyle" append-to-body :close-on-click-modal="false" :before-close="closeSavePreset">
     <p class="preset-context">从「{{ presetSourceName }}」提取一组可复用参数。</p>
@@ -99,7 +101,7 @@ import { ElMessage } from 'element-plus'
 import { Collection, FolderAdd, ArrowRight, TopRight, MagicStick, ChatDotRound, Clock } from '@element-plus/icons-vue'
 import api from '../api'
 import { LatestRequest } from '../latestRequest'
-import { proactiveFields, copy, parameterValue, hasOverride, overrideCount, onlyParameters, changeParameter, applyParameterPreset, effectiveParameters, draftSignature, parameterText, defaultProactiveConfig, invalidParameterField } from '../proactiveParameters'
+import { proactiveFields, copy, parameterValue, hasOverride, overrideCount, onlyParameters, changeParameter, applyParameterPreset, effectiveParameters, draftSignature, parameterText, defaultProactiveConfig, invalidParameterField, sortPresets } from '../proactiveParameters'
 import ProactiveParameterField from './ProactiveParameterField.vue'
 
 const props = defineProps({ globalConfig: { type: Object, required: true }, savedGlobal: Object, savingGlobal: Boolean, refreshing: Boolean, dirtyGlobal: Boolean })
@@ -111,6 +113,10 @@ const libraryOpen = ref(false), savePresetOpen = ref(false), applyOpen = ref(fal
 const applyingPreset = ref(null), savingPreset = ref(false), presetForm = reactive({ name: '', description: '', mode: 'all' })
 const presetSourceName = ref(''), presetCustomCount = ref(0)
 let presetAllValues = {}, presetCustomValues = {}, refreshTask = null, disposed = false
+// 预设读取的代次：创建/删除成功后自增，让仍在途的旧 GET 响应作废，不覆盖本地最新列表。
+let presetLoadToken = 0
+// 当前在途的群配置请求；refresh 结束前等它，避免刷新中切群时父页 refreshing 提前复位。
+let groupLoadTask = null
 const groupRequest = new LatestRequest(), listRequest = new LatestRequest(), presetRequest = new LatestRequest(), writes = new AbortController()
 watch(scope, () => loadSelectedGroup(), { flush: 'sync' })
 const dialogStyle = { maxWidth: 'calc(100vw - 32px)' }
@@ -143,8 +149,11 @@ function updateGlobal(value) { emit('update:globalConfig', value); emit('change-
 function changeEnabled(value) { if (isGlobal.value) updateGlobal({ ...props.globalConfig, enabled: value }); else selectedGroup.value.draft.enabled = value }
 function changeGlobalLimit(key, value) { updateGlobal({ ...props.globalConfig, [key]: value }) }
 function changeValue(field, value) {
-  if (isGlobal.value) updateGlobal(changeParameter(props.globalConfig, field.key, value))
-  else selectedGroup.value.draft.overrides = changeParameter(selectedGroup.value.draft.overrides, field.key, value)
+  if (isGlobal.value) { updateGlobal(changeParameter(props.globalConfig, field.key, value)); return }
+  const hadOverride = hasOverride(selectedGroup.value.draft.overrides, field.key)
+  selectedGroup.value.draft.overrides = changeParameter(selectedGroup.value.draft.overrides, field.key, value)
+  // 清空群级自定义数值 = 恢复跟随全局：显式提示，避免“草稿静默变回继承”被误读为已保存自定义。
+  if (value == null && hadOverride) ElMessage.info(`「${field.label}」已恢复为跟随全局`)
 }
 function changeSource(field, source) {
   selectedGroup.value.draft.overrides = changeParameter(selectedGroup.value.draft.overrides, field.key, parameterValue(effective.value, field.key), source === 'inherit')
@@ -154,7 +163,15 @@ function resetOverrides() { selectedGroup.value.draft.overrides = {}; resetOpen.
 
 async function loadGroups() {
   groupsLoading.value = true
-  try { await listRequest.run(signal => api.get('/groups', { signal }), ({ data }) => { groups.value = Array.isArray(data) ? data : []; groupsError.value = false }) }
+  try {
+    await listRequest.run(signal => api.get('/groups', { signal }), ({ data }) => {
+      groups.value = Array.isArray(data) ? data : []; groupsError.value = false
+      // 群列表整体替换后，草稿只保留仍存在的群；当前群被移除时回到全局默认，避免草稿搁浅。
+      const ids = new Set(groups.value.map(g => g.groupOpenId))
+      for (const id of Object.keys(groupStates)) if (!ids.has(id)) delete groupStates[id]
+      if (scope.value && !ids.has(scope.value)) scope.value = ''
+    })
+  }
   catch { if (!disposed) groupsError.value = true }
   finally { if (!listRequest.pending) groupsLoading.value = false }
 }
@@ -162,31 +179,42 @@ async function loadSelectedGroup(force = false) {
   groupRequest.cancel()
   groupLoading.value = false
   groupError.value = false
-  if (!scope.value) { groupRequest.cancel(); groupLoading.value = false; return }
+  if (!scope.value) return
   if (selectedGroup.value && (!force || groupHasDraft(scope.value))) return
   const id = scope.value
   groupLoading.value = true
-  try {
-    await groupRequest.run(signal => api.get(`/proactive/groups/${encodeURIComponent(id)}/config`, { signal }), ({ data }) => {
-      const draft = { enabled: !!data.enabled, overrides: onlyParameters(data.overrides || {}) }
-      groupStates[id] = { name: data.name, isEnabled: data.isEnabled, memoryAllowed: data.memoryAllowed, original: copy(draft), draft }
-    })
-  } catch { if (!disposed && scope.value === id) groupError.value = true }
-  finally { if (!groupRequest.pending) groupLoading.value = false }
+  const task = (async () => {
+    try {
+      await groupRequest.run(signal => api.get(`/proactive/groups/${encodeURIComponent(id)}/config`, { signal }), ({ data }) => {
+        const draft = { enabled: !!data.enabled, overrides: onlyParameters(data.overrides || {}) }
+        groupStates[id] = { name: data.name, isEnabled: data.isEnabled, memoryAllowed: data.memoryAllowed, original: copy(draft), draft }
+      })
+    } catch { if (!disposed && scope.value === id) groupError.value = true }
+    finally { if (!groupRequest.pending) groupLoading.value = false }
+  })()
+  groupLoadTask = task
+  try { await task } finally { if (groupLoadTask === task) groupLoadTask = null }
 }
 async function loadPresets() {
+  const token = ++presetLoadToken
   presetsLoading.value = true
   try {
     await presetRequest.run(signal => api.get('/proactive/presets', { signal }), ({ data }) => {
-      presets.value = Array.isArray(data) ? data : []; presetsError.value = false
+      if (token !== presetLoadToken) return // 创建/删除后的本地列表更新，旧的读取响应作废
+      presets.value = sortPresets(Array.isArray(data) ? data : []); presetsError.value = false
       if (!presets.value.some(p => p.id === presetId.value)) presetId.value = presets.value[0]?.id || ''
     })
-  } catch { if (!disposed) presetsError.value = true }
+  } catch { if (!disposed && token === presetLoadToken) presetsError.value = true }
+  // 复位只看请求是否在途：创建/删除成功会推进 token，但不能让 presetsLoading 卡住。
   finally { if (!presetRequest.pending) presetsLoading.value = false }
 }
 async function refresh() {
   if (refreshTask) return refreshTask
-  refreshTask = Promise.allSettled([loadGroups(), loadPresets(), loadSelectedGroup(true)])
+  refreshTask = (async () => {
+    await Promise.allSettled([loadGroups(), loadPresets(), loadSelectedGroup(true)])
+    // 刷新中用户切群会另起群请求：等它结束再放开父页 refreshing，spinner 不提前结束。
+    await groupLoadTask?.catch(() => {})
+  })()
   try { await refreshTask } finally { refreshTask = null }
 }
 async function saveCurrent() {
@@ -219,26 +247,32 @@ function closeSavePreset(done) { if (!savingPreset.value) done() }
 async function createPreset() {
   const name = presetForm.name.trim()
   if (!name) { ElMessage.warning('请填写预设名称'); return }
-  if (savingPreset.value) return
+  if (savingPreset.value || presetsLoading.value) return
   savingPreset.value = true
   try {
     const { data } = await api.post('/proactive/presets', { name, description: presetForm.description.trim(), values: copy(presetForm.mode === 'custom' ? presetCustomValues : presetAllValues) }, { signal: writes.signal })
     if (disposed) return
-    presets.value = [...presets.value, data]; presetId.value = data.id; savePresetOpen.value = false
+    // 后端按 UpdatedAt 倒序返回；新预设排到对应位置，并让在途的旧读取响应作废。
+    presetLoadToken++
+    presets.value = sortPresets([...presets.value, data]); presetsError.value = false
+    presetId.value = data.id; savePresetOpen.value = false
     ElMessage.success('预设已保存，可应用到其他群')
   } catch { /* 重名或网络失败时保留对话框与输入。 */ }
   finally { savingPreset.value = false }
 }
 async function deletePreset(preset) {
+  // 并发删除共用一个 loading 位：删除进行中直接忽略新的请求，避免第一个 finally 清掉第二个的 loading。
+  if (deletingPreset.value || presetsLoading.value) return
   deletingPreset.value = preset.id
   try {
     await api.delete(`/proactive/presets/${encodeURIComponent(preset.id)}`, { signal: writes.signal })
     if (disposed) return
-    presets.value = presets.value.filter(p => p.id !== preset.id)
+    presetLoadToken++
+    presets.value = presets.value.filter(p => p.id !== preset.id); presetsError.value = false
     if (presetId.value === preset.id) presetId.value = presets.value[0]?.id || ''
     ElMessage.success('预设已删除，群设置保持原样')
   } catch { /* 删除失败时保留原列表。 */ }
-  finally { deletingPreset.value = null }
+  finally { if (deletingPreset.value === preset.id) deletingPreset.value = null }
 }
 defineExpose({ refresh })
 onMounted(refresh)

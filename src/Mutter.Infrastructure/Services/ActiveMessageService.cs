@@ -98,6 +98,11 @@ public class ActiveMessageService : IActiveMessageService
         var db = serviceScope.ServiceProvider.GetRequiredService<AppDbContext>();
         var config = await LoadLimitsAsync(serviceScope, key, scope, ct);
 
+        // 主动通道总开关按生效配置判定（群已带 overrides，私聊用全局）；
+        // 服务自身把关，避免依赖调用方逐一自查。
+        if (!config.AllowActiveChannel)
+            return new ActiveMessageSendResult { Success = false, Reason = "active_channel_disabled" };
+
         var entity = await db.ActiveMessageQuotas
             .FirstOrDefaultAsync(q => q.Key == key && q.Scope == scope && q.Month == month, ct);
 

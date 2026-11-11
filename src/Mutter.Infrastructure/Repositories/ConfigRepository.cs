@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
+using Mutter.Core.Services;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
 
@@ -139,7 +140,7 @@ public class ConfigRepository : IConfigRepository
                 CustomSystemPrompt = config.CustomSystemPrompt,
                 CustomTemperature = config.CustomTemperature,
                 AiProactiveEnabled = config.AiProactiveEnabled,
-                ProactiveOverridesJson = ProactiveOverridesCodec.Encode(config.ProactiveOverrides),
+                ProactiveOverridesJson = EncodeOverrides(config.ProactiveOverrides),
                 BotMentionOpenId = config.BotMentionOpenId,
                 ActiveCharacter = config.ActiveCharacter,
                 MemoryInjectionEnabled = config.MemoryInjectionEnabled
@@ -153,13 +154,31 @@ public class ConfigRepository : IConfigRepository
             entity.CustomSystemPrompt = config.CustomSystemPrompt;
             entity.CustomTemperature = config.CustomTemperature;
             entity.AiProactiveEnabled = config.AiProactiveEnabled;
-            entity.ProactiveOverridesJson = ProactiveOverridesCodec.Encode(config.ProactiveOverrides);
+            // partial 保存契约：ProactiveOverrides 为 null 表示保持原值，不整行覆盖。
+            if (config.ProactiveOverrides is not null)
+                entity.ProactiveOverridesJson = EncodeOverrides(config.ProactiveOverrides);
             entity.BotMentionOpenId = config.BotMentionOpenId;
             entity.ActiveCharacter = config.ActiveCharacter;
             entity.MemoryInjectionEnabled = config.MemoryInjectionEnabled;
         }
 
         await _dbContext.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// 写入前按当前模型上下文窗口收敛判定输出预算：绕过面板的写路径（自动配置、命令、
+    /// 未来调用方）也不会把超限值落库。读取路径不额外查询。
+    /// </summary>
+    private string EncodeOverrides(ProactiveOverrides? overrides)
+    {
+        if (overrides is null) return "{}";
+        if (overrides.EvalMaxTokens.HasValue)
+        {
+            var contextWindow = _dbContext.AiConfigs.AsNoTracking().Select(a => (int?)a.ContextWindowTokens).FirstOrDefault()
+                ?? AiRequestBudget.DefaultContextWindow;
+            overrides.EvalMaxTokens = AiRequestBudget.ClampOutputTokens(overrides.EvalMaxTokens.Value, contextWindow);
+        }
+        return ProactiveOverridesCodec.Encode(overrides);
     }
 
     public async Task<List<GroupConfig>> GetAllGroupConfigsAsync(CancellationToken ct = default)
@@ -225,6 +244,10 @@ public class ConfigRepository : IConfigRepository
     public async Task SaveProactiveConfigAsync(ProactiveChatConfig config, CancellationToken ct = default)
     {
         var normalized = config.Normalize();
+        // 与群级覆盖一致的兜底：面板之外的写路径也不能把超出模型窗口的输出预算落库。
+        var contextWindow = await _dbContext.AiConfigs.AsNoTracking()
+            .Select(a => (int?)a.ContextWindowTokens).FirstOrDefaultAsync(ct) ?? AiRequestBudget.DefaultContextWindow;
+        normalized.EvalMaxTokens = AiRequestBudget.ClampOutputTokens(normalized.EvalMaxTokens, contextWindow);
         var entity = await _dbContext.ProactiveChatConfigs.FirstOrDefaultAsync(e => e.Id == 1, ct);
         if (entity is null)
         {

@@ -16,15 +16,32 @@ export const proactiveFields = [
 ]
 
 const keysFor = key => key === 'quietHours' ? ['quietStartHour', 'quietEndHour'] : [key]
-const parameterKeys = proactiveFields.flatMap(field => keysFor(field.key))
+// 全局/账号级字段不属于可分群覆盖；保存群参数与预设时始终排除。
+const globalOnlyKeys = ['enabled', 'maxGlobalPerDay', 'activePerAccountPerMinute', 'updatedAt',
+  'ceilingGroupPerMinute', 'ceilingGroupPerDay', 'ceilingAccountPerMinute', 'ceilingAttachedImages']
 export const copy = value => JSON.parse(JSON.stringify(value))
 export const parameterValue = (config, key) => key === 'quietHours'
   ? [config.quietStartHour, config.quietEndHour] : config[key]
 export const hasOverride = (overrides, key) => keysFor(key).some(part => overrides?.[part] != null)
 export const overrideCount = overrides => proactiveFields.filter(field => hasOverride(overrides, field.key)).length
 
+// 排除已知全局字段后保留其余非 null 字段：未来新增的分群参数键会原样透传到后端。
 export function onlyParameters(config = {}) {
-  return Object.fromEntries(parameterKeys.filter(key => config[key] != null).map(key => [key, config[key]]))
+  return Object.fromEntries(Object.entries(config)
+    .filter(([key, value]) => value != null && !globalOnlyKeys.includes(key)))
+}
+
+// 与后端返回顺序一致：内置预设在前且保持后端返回顺序，自定义预设按 UpdatedAt 倒序、Id 升序。
+export function sortPresets(presets) {
+  return [...presets].sort((a, b) => {
+    if (a.isBuiltIn && b.isBuiltIn) return 0
+    if (!!a.isBuiltIn !== !!b.isBuiltIn) return a.isBuiltIn ? -1 : 1
+    const at = Date.parse(a.updatedAt) || 0, bt = Date.parse(b.updatedAt) || 0
+    if (at !== bt) return bt - at
+    const ai = Number(a.id), bi = Number(b.id)
+    if (Number.isInteger(ai) && Number.isInteger(bi)) return ai - bi
+    return String(a.id).localeCompare(String(b.id))
+  })
 }
 
 export function changeParameter(config, key, value, inherit = false) {
@@ -44,7 +61,11 @@ export function effectiveParameters(globalConfig, overrides) {
   return applyParameterPreset(globalConfig, overrides)
 }
 
-export const draftSignature = draft => JSON.stringify([!!draft.enabled, onlyParameters(draft.overrides)])
+// 草稿签名与键的插入顺序无关（已知键与透传的未知键都按名字排序后比较）。
+export const draftSignature = draft => {
+  const params = onlyParameters(draft.overrides)
+  return JSON.stringify([!!draft.enabled, Object.keys(params).sort().map(key => [key, params[key]])])
+}
 export function invalidParameterField(config, includeGlobal = false, fields = proactiveFields) {
   const invalid = fields.find(field => field.type === 'number' && (!Number.isInteger(config[field.key]) || config[field.key] < field.min || config[field.key] > field.max))
   if (invalid) return invalid.label
