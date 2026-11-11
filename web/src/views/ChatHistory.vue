@@ -14,13 +14,13 @@
       </aside>
       <section class="chat-conversation" aria-label="聊天记录">
         <header class="conversation-heading"><div><h2>{{ selectedGroup?.name || (groupId ? shortId(groupId) : '全部记录') }}</h2><p>{{ groupDescription }}</p></div><el-tag v-if="selectedGroup?.config?.isEnabled === false" type="info" size="small">群聊已停用</el-tag><el-tag v-else-if="selectedGroup?.config?.aiProactiveEnabled" size="small">群级择机已开启</el-tag></header>
-        <div class="mobile-group-picker"><el-select v-model="groupId" placeholder="选择群聊" aria-label="选择群聊" filterable @change="resetView"><el-option label="全部记录" value="" /><el-option v-for="group in groups" :key="group.groupOpenId" :value="group.groupOpenId" :label="group.name || shortId(group.groupOpenId)" /></el-select></div>
+        <div class="mobile-group-picker"><el-select :model-value="groupId" placeholder="选择群聊" aria-label="选择群聊" filterable @change="selectGroup"><el-option label="全部记录" value="" /><el-option v-for="group in groups" :key="group.groupOpenId" :value="group.groupOpenId" :label="group.name || shortId(group.groupOpenId)" /></el-select></div>
         <div class="chat-toolbar">
           <div class="source-filters" role="group" aria-label="消息来源"><button v-for="option in sources" :key="option.value" type="button" :aria-pressed="source === option.value" @click="setSource(option.value)">{{ option.label }}</button></div>
           <div class="chat-live"><el-switch v-model="live" aria-label="实时更新" @change="toggleLive" /><span>{{ live ? connOk ? '实时更新' : '连接中' : '已暂停' }}</span><el-button size="small" :loading="loading" @click="refreshLatest">刷新</el-button></div>
         </div>
         <form class="chat-search" role="search" @submit.prevent="applySearch"><el-input v-model="searchInput" aria-label="查找聊天记录" placeholder="查找内容、发送者或决策理由" :prefix-icon="Search" maxlength="200" clearable @clear="applySearch" /><el-button native-type="submit" :loading="loading">查找</el-button></form>
-        <div v-if="keyword" class="search-summary" role="status"><span>{{ total === null ? `正在查找“${keyword}”…` : `查找“${keyword}” · 共 ${total} 条记录` }}</span><el-button link type="primary" size="small" @click="clearSearch">清除查找</el-button></div>
+        <div v-if="keyword" class="search-summary" role="status"><span v-if="loadError">查找“{{ keyword }}”失败，请重试</span><span v-else>{{ total === null ? `正在查找“${keyword}”…` : `查找“${keyword}” · 共 ${total} 条记录` }}</span><el-button v-if="loadError" link type="primary" size="small" @click="loadCurrent()">重试</el-button><el-button link type="primary" size="small" @click="clearSearch">清除查找</el-button></div>
         <div v-if="hasNew" class="new-message-notice" role="status"><span>有新的消息或评估记录</span><el-button link type="primary" size="small" @click="refreshLatest">查看新记录</el-button></div>
         <el-alert v-if="loadError" title="聊天记录暂时无法读取，请刷新重试。" type="warning" :closable="false" show-icon class="history-error" />
         <div ref="stream" v-loading="loading" class="conversation-stream" aria-label="会话内容" :aria-busy="loading" @scroll="onScroll">
@@ -31,7 +31,7 @@
             <article v-else class="chat-message" :class="{ 'bot-message': entry.isBotMessage }"><span class="sender-avatar" :class="{ 'bot-avatar': entry.isBotMessage }" aria-hidden="true">{{ entry.isBotMessage ? '' : senderName(entry).slice(-1) }}</span><div class="message-body"><div class="message-meta"><b><HighlightedText :text="senderName(entry)" :keyword="keyword" /></b><time :title="chatDateTime(entry.createdAt)">{{ chatTime(entry.createdAt) }}</time><span class="message-source">{{ chatKind(entry) }}</span><span v-if="!groupId" class="message-group">{{ entry.chatType === 1 ? '私聊' : entry.groupName || shortId(entry.groupId) }}</span></div><p class="message-text"><HighlightedText :text="entry.plainText || (entry.hasImage ? '[图片]' : '[空消息]')" :keyword="keyword" /></p><span v-if="entry.hasImage && entry.plainText" class="image-note">附图片</span><div v-if="entry.isBotMessage" class="message-bottom"><span><el-icon aria-hidden="true"><Check /></el-icon>已保存回复</span><el-button v-if="entry.isProactive || entry.decisionId" link type="primary" size="small" @click="openDetails(entry)">{{ entry.decisionId ? '接话详情' : '历史详情' }}<el-icon aria-hidden="true"><TopRight /></el-icon></el-button></div></div></article>
           </template>
         </div>
-        <footer class="conversation-footer"><div><span>{{ total === null ? (countFailed ? '总数暂无法统计' : hasMore ? '已显示最新记录 · 总数统计中…' : '记录总数统计中…') : `共 ${total} 条记录` }}</span><span>时间按北京时间显示</span></div><el-pagination v-if="total !== null && total > pageSize" layout="prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" :pager-count="5" prev-text="较新" next-text="更早" @current-change="onPage" /><el-button v-else-if="total === null && hasMore" link type="primary" size="small" @click="onPage(2)">更早<el-icon aria-hidden="true"><ArrowRight /></el-icon></el-button></footer>
+        <footer class="conversation-footer"><div><span v-if="keyword && loadError">查找失败，请重试</span><span v-else>{{ total === null ? (countFailed ? '总数暂无法统计' : hasMore ? '已显示最新记录 · 总数统计中…' : '记录总数统计中…') : `共 ${total} 条记录` }}</span><span>时间按北京时间显示</span></div><el-button v-if="keyword && loadError" link type="primary" size="small" @click="loadCurrent()">重试</el-button><el-pagination v-else-if="total !== null && total > pageSize" layout="prev, pager, next" :total="total" :page-size="pageSize" :current-page="page" :pager-count="5" prev-text="较新" next-text="更早" @current-change="onPage" /><el-button v-else-if="total === null && hasMore" link type="primary" size="small" @click="onPage(2)">更早<el-icon aria-hidden="true"><ArrowRight /></el-icon></el-button></footer>
       </section>
     </div>
   </el-card>
@@ -61,8 +61,9 @@ const filteredGroups = computed(() => groups.value.filter(group => `${group.name
 const groupDescription = computed(() => groupId.value ? groupRecordingNote(selectedGroup.value?.config) : '按时间查看已保存的消息与择机评估')
 const entries = computed(() => timelineEntries(items.value))
 const shortId = id => id ? `${id.slice(0, 8)}…` : '未记录群聊'
-let unsubscribe = null, timer = null, countTimer = null, disposed = false
-let pendingMessages = [], queuedRefresh = false
+let unsubscribe = null, timer = null, countTimer = null, calibrationTimer = null, disposed = false
+let pendingMessages = [], queuedRefresh = false, countRetries = 0
+const countRetryDelays = [5000, 10000]
 const onScroll = () => { const el = stream.value; if (el) following.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48 }
 const scrollToLatest = () => nextTick(() => { if (stream.value && following.value) stream.value.scrollTop = stream.value.scrollHeight })
 const canAutoRefresh = () => !disposed && live.value && !loadError.value && page.value === 1 && !keyword.value && following.value && !drawerVisible.value
@@ -89,24 +90,25 @@ const loadCount = async () => {
   countTimer = null
   if (disposed || page.value !== 1 || keyword.value || !snapshot.value) return
   const key = countKey()
-  const params = { groupId: groupId.value || undefined, source: source.value || undefined, q: keyword.value || undefined, snapshot: snapshot.value }
+  // count 只在无关键词时执行，不传 q；countKey 也保持不含 q。
+  const params = { groupId: groupId.value || undefined, source: source.value || undefined, snapshot: snapshot.value }
   try {
     await countRequest.run(signal => api.get('/chat/timeline/count', { params, signal, skipErrorMessage: true }), ({ data }) => {
       if (!disposed && page.value === 1 && key === countKey() && Number.isInteger(data.totalCount)) {
         total.value = data.totalCount
         countFailed.value = false
+        countRetries = 0
       }
     })
   } catch {
-    // 总数只影响页脚；正文和“更早”入口继续可用，不能一直显示“统计中”。
-    if (!disposed && page.value === 1 && key === countKey()) countFailed.value = true
+    // 总数只影响页脚；正文和“更早”入口继续可用。先按 5s/10s 退避自动重试，仍失败才显示“暂无法统计”。
+    if (disposed || page.value !== 1 || key !== countKey()) return
+    if (countRetries < countRetryDelays.length) {
+      countTimer = setTimeout(loadCount, countRetryDelays[countRetries++])
+      return
+    }
+    countFailed.value = true
   }
-}
-const invalidateTotal = () => {
-  if (page.value !== 1 || keyword.value) return
-  total.value = null
-  cancelCount()
-  scheduleCount(650)
 }
 const mergeLiveMessage = (message, { scroll = true } = {}) => {
   const advanced = advanceMessageSnapshot(snapshot.value, message.id)
@@ -119,7 +121,10 @@ const mergeLiveMessage = (message, { scroll = true } = {}) => {
   if (!existed) {
     items.value = merged
     if (fullBefore) hasMore.value = true
-    invalidateTotal()
+    // 已有精确总数时直接 +1，避免每条实时消息都把总数打回“统计中”；未知时交给重新调度的 count 补齐。
+    if (Number.isInteger(total.value)) total.value += 1
+    cancelCount()
+    scheduleCount(650)
     if (scroll) scrollToLatest()
   }
   snapshot.value = advanced
@@ -148,6 +153,8 @@ const applyLatest = (data, group, filter, quiet) => {
   if (quiet && !canAutoRefresh()) { markNewRecords(); return }
   items.value = Array.isArray(data.items) ? data.items : []
   total.value = Number.isInteger(data.totalCount) ? data.totalCount : null
+  // 新总数落定后重置 count 的重试预算，下一次统计从零开始退避。
+  if (total.value !== null) countRetries = 0
   page.value = data.page || 1
   snapshot.value = data.snapshot || null
   hasMore.value = !!data.hasMore
@@ -174,7 +181,9 @@ const loadExact = async () => {
     await request.run(signal => api.get('/chat/timeline', { params, signal, skipErrorMessage: true }), ({ data }) => {
       if (!viewIsCurrent(group, filter) || keyword.value !== query || page.value !== wantedPage) return
       items.value = Array.isArray(data.items) ? data.items : []
-      total.value = Number.isInteger(data.totalCount) ? data.totalCount : 0
+      // 精确端点在深分页等场景可能返回未知总数；null 不能当成 0。
+      total.value = Number.isInteger(data.totalCount) ? data.totalCount : null
+      if (total.value !== null) countRetries = 0
       page.value = data.page || 1
       snapshot.value = data.snapshot || null
       hasMore.value = !!data.hasMore
@@ -189,12 +198,12 @@ const loadCurrent = async ({ quiet = false } = {}) =>
   page.value === 1 && !keyword.value ? loadLatest({ quiet }) : loadExact()
 const resetView = () => {
   cancelAuto(); cancelCount(); queuedRefresh = false; pendingMessages = []
-  snapshot.value = null; page.value = 1; items.value = []; total.value = null; hasMore.value = false; countFailed.value = false
+  snapshot.value = null; page.value = 1; items.value = []; total.value = null; hasMore.value = false; countFailed.value = false; countRetries = 0
   following.value = true; hasNew.value = false; loadCurrent()
 }
 const refreshLatest = () => {
   cancelAuto(); cancelCount(); queuedRefresh = false; pendingMessages = []
-  snapshot.value = null; page.value = 1; total.value = null; hasMore.value = false; countFailed.value = false
+  snapshot.value = null; page.value = 1; total.value = null; hasMore.value = false; countFailed.value = false; countRetries = 0
   following.value = true; hasNew.value = false; loadCurrent()
 }
 const selectGroup = value => { if (groupId.value !== value) { groupId.value = value; resetView() } }
@@ -203,9 +212,15 @@ const applySearch = () => { keyword.value = searchInput.value.trim(); resetView(
 const clearSearch = () => { searchInput.value = ''; applySearch() }
 const showAll = () => { source.value = ''; searchInput.value = ''; keyword.value = ''; resetView() }
 const onPage = value => {
-  if (timer || queuedRefresh || pendingMessages.length) markNewRecords()
+  // 在途的静默校准会被这次精确查询 abort，而 LatestRequest 对 abort 是静默 resolve；
+  // 不先记下提醒，这次校准本应带回的 Bot/决策记录就会被静默丢弃。
+  if (timer || queuedRefresh || pendingMessages.length || request.pending) markNewRecords()
   cancelAuto(); cancelCount(); queuedRefresh = false; pendingMessages = []
-  page.value = value; following.value = true; loadExact()
+  page.value = value; following.value = true
+  // 带着未读提醒回到第 1 页时改走最新页（不带快照），才能真正取回缺口里的记录；
+  // 在第 2 页浏览期间仍走精确分页，不推进快照。
+  if (value === 1 && hasNew.value && !keyword.value) { loadLatest(); return }
+  loadExact()
 }
 const openDetails = entry => { selectedEntry.value = entry; drawerVisible.value = true }
 const loadGroups = async () => {
@@ -224,6 +239,15 @@ const scheduleAutoRefresh = () => {
     loadLatest({ quiet: true })
   }, 1500)
 }
+// Bot/决策推送失败只记 warning，普通消息会继续把快照推过缺口；
+// 每 60 秒静默校准一次兜底补齐，不依赖单次推送成功。用递归 setTimeout 而非 setInterval。
+const runCalibration = () => {
+  calibrationTimer = null
+  if (disposed) return
+  if (canAutoRefresh() && !request.pending) loadLatest({ quiet: true })
+  calibrationTimer = setTimeout(runCalibration, 60_000)
+}
+const cancelCalibration = () => { if (calibrationTimer) { clearTimeout(calibrationTimer); calibrationTimer = null } }
 const signalNew = () => {
   if (disposed || !live.value) return
   if (!canAutoRefresh()) { markNewRecords(); return }
@@ -262,9 +286,13 @@ const toggleLive = on => {
   if (on) { connect(); signalNew() }
   else disconnect()
 }
-onMounted(async () => { connect(); await Promise.allSettled([loadCurrent(), loadGroups()]) })
+onMounted(async () => {
+  connect()
+  calibrationTimer = setTimeout(runCalibration, 60_000)
+  await Promise.allSettled([loadCurrent(), loadGroups()])
+})
 onUnmounted(() => {
-  disposed = true; disconnect(); cancelCount()
+  disposed = true; disconnect(); cancelCount(); cancelCalibration()
   request.cancel(); groupRequest.abort()
 })
 </script>

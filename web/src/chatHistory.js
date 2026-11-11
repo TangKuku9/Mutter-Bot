@@ -61,10 +61,18 @@ export function timelineEntries(items) {
   return entries
 }
 
-const timelineTime = item => date(item.createdAt)?.getTime() ?? 0
+// 后端按完整 DateTime tick 排序，而 JS Date 只有毫秒精度；把 createdAt 的小数秒
+// （.NET 最多 7 位）单独解析出来，组成毫秒 + 7 位小数的排序键，页边界顺序才能与后端一致。
+const timelineTime = item => {
+  const parsed = date(item.createdAt)
+  if (!parsed) return null
+  const fraction = /\.(\d+)/.exec(item.createdAt)
+  return { ms: parsed.getTime(), ticks: fraction ? Number(fraction[1].slice(0, 7).padEnd(7, '0')) : 0 }
+}
 const timelineKind = item => item.kind === 'decision' ? 1 : 0
 const compareTimeline = (left, right) => {
-  const byTime = timelineTime(right) - timelineTime(left)
+  const a = timelineTime(left), b = timelineTime(right)
+  const byTime = (b?.ms ?? 0) - (a?.ms ?? 0) || (b?.ticks ?? 0) - (a?.ticks ?? 0)
   if (byTime) return byTime
   const byKind = timelineKind(right) - timelineKind(left)
   return byKind || Number(right.id) - Number(left.id)
@@ -100,6 +108,7 @@ export function advanceMessageSnapshot(snapshot, messageId) {
   const parts = String(snapshot).split(':')
   if (parts.length !== 2 || parts.some(part => !/^\d+$/.test(part))) return null
   const id = Number(messageId)
-  if (!Number.isSafeInteger(id) || id < 0) return null
+  // 0 不是有效的消息行 ID（与 messageTimelineItem 一致）；重复事件未入库时不应推进快照。
+  if (!Number.isSafeInteger(id) || id <= 0) return null
   return `${Math.max(Number(parts[0]), id)}:${parts[1]}`
 }

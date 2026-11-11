@@ -55,6 +55,8 @@ public sealed class ChatTimelineReader(AppDbContext db)
     public async Task<ChatTimelinePageDto> ReadLatestAsync(string? groupId, string? source, int pageSize,
         CancellationToken ct = default)
     {
+        // 控制器之外也可能直接调用；自行钳制，避免 pageSize<=0 返回空页还带 hasMore。
+        pageSize = Math.Clamp(pageSize, 1, 100);
         var (messageCap, decisionCap) = await ResolveCapsAsync(null, ct);
         var timeline = BuildTimeline(groupId, source, null, messageCap, decisionCap);
         var keys = await timeline.OrderByDescending(k => k.Time).ThenByDescending(k => k.Kind).ThenByDescending(k => k.Id)
@@ -163,28 +165,32 @@ public sealed class ChatTimelineReader(AppDbContext db)
             : await Links(messageIds, decisionCap).Distinct().ToListAsync(ct);
         var uniqueLinks = links.GroupBy(l => l.MessageId).Where(g => g.Select(l => l.DecisionId).Distinct().Count() == 1)
             .ToDictionary(g => g.Key, g => g.First().DecisionId);
-        return keys.Select(k =>
+        var items = new List<ChatTimelineItemDto>(keys.Count);
+        foreach (var k in keys)
         {
+            // DataRetentionService 可能在取键与取行之间清理了记录；跳过已删除的行，不要让整页请求 500。
             if (k.Kind == 1)
             {
-                var log = events[k.Id];
-                return new ChatTimelineItemDto
+                if (!events.TryGetValue(k.Id, out var log)) continue;
+                items.Add(new ChatTimelineItemDto
                 {
                     Kind = "decision", Id = log.Id, CreatedAt = log.EvaluatedAt,
                     GroupId = log.GroupId, ChatType = 0, GroupName = names.GetValueOrDefault(log.GroupId),
                     DecisionId = log.Id, Outcome = log.Outcome, Topic = log.Topic, Reason = log.Reason ?? log.Detail
-                };
+                });
+                continue;
             }
-            var m = rows[k.Id];
-            return new ChatTimelineItemDto
+            if (!rows.TryGetValue(k.Id, out var m)) continue;
+            items.Add(new ChatTimelineItemDto
             {
                 Id = m.Id, CreatedAt = m.CreatedAt, ChatType = m.ChatType,
                 GroupId = m.GroupId, GroupName = m.GroupId is null ? null : names.GetValueOrDefault(m.GroupId),
                 UserId = m.UserId, UserName = m.UserName, PlainText = m.PlainText, HasImage = m.HasImage,
                 HasAtBot = m.HasAtBot, IsBotMessage = m.IsBotMessage, IsProactive = m.IsProactive,
                 DecisionId = uniqueLinks.TryGetValue(m.Id, out var id) ? id : null
-            };
-        }).ToList();
+            });
+        }
+        return items;
     }
 
     private IQueryable<DecisionLink> Links(long[] messageIds, long decisionCap)

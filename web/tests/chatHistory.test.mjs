@@ -79,12 +79,25 @@ test('实时合并只保留一页，并优先保留最新消息', () => {
   assert.equal(merged[0].id, 51)
   assert.equal(merged.at(-1).id, 2)
 })
+test('同一毫秒内不同 tick 的消息与决策按完整精度排序，与后端 Time→Kind→Id 一致', () => {
+  const rows = [
+    { kind: 'message', id: 4, createdAt: '2026-11-10T00:00:00.1234567Z' },
+    { kind: 'message', id: 3, createdAt: '2026-11-10T00:00:00.1234567Z' },
+    { kind: 'decision', id: 2, createdAt: '2026-11-10T00:00:00.1234500Z' },
+    { kind: 'message', id: 9, createdAt: '2026-11-10T00:00:00.1234500Z' },
+    { kind: 'message', id: 5, createdAt: '2026-11-10T00:00:00.1234500Z' }
+  ]
+  const merged = mergeTimelineMessage(rows, { id: 7, createdAt: '2026-11-10T00:00:00.1234568Z' })
+  assert.deepEqual(merged.map(entry => `${entry.kind}:${entry.id}`),
+    ['message:7', 'message:4', 'message:3', 'decision:2', 'message:9', 'message:5'])
+})
 test('实时消息推进快照上界但不猜测另一张表的留痕上界', () => {
   assert.equal(advanceMessageSnapshot('120:80', 125), '125:80')
   assert.equal(advanceMessageSnapshot('120:80', 100), '120:80')
   assert.equal(advanceMessageSnapshot('bad', 100), null)
   assert.equal(advanceMessageSnapshot(null, 100), null)
   assert.equal(advanceMessageSnapshot('120:80', 'not-a-number'), null)
+  assert.equal(advanceMessageSnapshot('120:80', 0), null, '未入库的重复事件带 Id=0，不能推进快照')
 })
 test('无效实时负载不改变当前时间线', () => {
   const items = [{ kind: 'message', id: 1, createdAt: '2026-11-10T00:00:00Z' }]

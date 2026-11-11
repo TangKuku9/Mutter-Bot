@@ -21,9 +21,11 @@ public sealed class ChatTimelineController(ChatTimelineReader reader) : Controll
     /// <summary>切换群或来源时的轻量首屏；不等待全量总数。</summary>
     [HttpGet("timeline/latest")]
     public async Task<ActionResult<ChatTimelinePageDto>> Latest(string? groupId = null, string? source = null,
-        int pageSize = 50, CancellationToken ct = default)
+        int pageSize = 50, string? q = null, CancellationToken ct = default)
     {
         if (!ChatTimelineReader.Sources.Contains(source ?? "")) return BadRequest(new { error = "无效的消息来源" });
+        // 轻量首屏不做查找：静默忽略 q 会让调用方误以为结果已被过滤。
+        if (!string.IsNullOrEmpty(q)) return BadRequest(new { error = "轻量首屏不支持查找，请使用精确查询" });
         return Ok(await reader.ReadLatestAsync(groupId, source, Math.Clamp(pageSize, 1, 100), ct));
     }
 
