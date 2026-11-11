@@ -65,3 +65,11 @@ jobs:
       - name: Build
         working-directory: web
         run: npm run build
+
+      - name: 安装浏览器回归环境
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: 弹窗尺寸与离开确认回归
+        working-directory: web
+        run: npm run test:ui

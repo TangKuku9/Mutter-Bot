@@ -12,6 +12,9 @@ public class GroupConfigEntity
     /// <summary>本群是否参与 AI 择机发言（仍需全局开关同时打开）。</summary>
     public bool AiProactiveEnabled { get; set; }
 
+    /// <summary>择机参数的稀疏覆盖；null/空对象均跟随全局。</summary>
+    public string? ProactiveOverridesJson { get; set; }
+
     /// <summary>机器人在本群的 @ 识别码，见 <see cref="Mutter.Core.Models.Config.GroupConfig.BotMentionOpenId"/>。</summary>
     public string? BotMentionOpenId { get; set; }
 

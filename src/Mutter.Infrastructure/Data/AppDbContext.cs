@@ -23,6 +23,7 @@ public class AppDbContext : DbContext
     public DbSet<CustomCharacterEntity> CustomCharacters => Set<CustomCharacterEntity>();
     public DbSet<AiConfigPresetEntity> AiPresets => Set<AiConfigPresetEntity>();
     public DbSet<ProactiveChatConfigEntity> ProactiveChatConfigs => Set<ProactiveChatConfigEntity>();
+    public DbSet<ProactivePresetEntity> ProactivePresets => Set<ProactivePresetEntity>();
     public DbSet<ProactiveChatLogEntity> ProactiveChatLogs => Set<ProactiveChatLogEntity>();
     public DbSet<GroupMemoryEntity> GroupMemories => Set<GroupMemoryEntity>();
 
@@ -116,6 +117,13 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<ProactiveChatConfigEntity>(e =>
         {
             e.HasKey(x => x.Id);
+        });
+
+        modelBuilder.Entity<ProactivePresetEntity>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Name).UseCollation("NOCASE").IsRequired();
+            e.HasIndex(x => x.Name).IsUnique();
         });
 
         modelBuilder.Entity<ProactiveChatLogEntity>(e =>
@@ -476,6 +484,23 @@ public class AppDbContext : DbContext
         catch (Exception ex) when (ex.Message.Contains("duplicate column name"))
         {
         }
+
+        // 稀疏群级覆盖：不复制全局值，老群自动保持继承。
+        try
+        {
+            await Database.ExecuteSqlRawAsync("ALTER TABLE \"GroupConfigs\" ADD COLUMN \"ProactiveOverridesJson\" TEXT", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name")) { }
+        await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "ProactivePresets" (
+                "Id" INTEGER NOT NULL CONSTRAINT "PK_ProactivePresets" PRIMARY KEY AUTOINCREMENT,
+                "Name" TEXT NOT NULL COLLATE NOCASE,
+                "Description" TEXT NOT NULL DEFAULT '',
+                "ValuesJson" TEXT NOT NULL DEFAULT '{{}}',
+                "UpdatedAt" TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS "IX_ProactivePresets_Name" ON "ProactivePresets" ("Name");
+            """, ct);
 
         // 发言倾向（0 克制 / 1 正常 / 2 主动）。老库补成"正常"，不改用户已保存的值
         try

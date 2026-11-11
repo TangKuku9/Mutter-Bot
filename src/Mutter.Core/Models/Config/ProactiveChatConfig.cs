@@ -101,6 +101,14 @@ public class ProactiveChatConfig
 
     public DateTime UpdatedAt { get; set; }
 
+    /// <summary>生成本群的独立配置，不修改全局实例，也不允许覆盖账号范围的限制。</summary>
+    public ProactiveChatConfig WithOverrides(ProactiveOverrides? overrides)
+    {
+        var effective = (ProactiveChatConfig)MemberwiseClone();
+        overrides?.ApplyTo(effective);
+        return effective.Normalize();
+    }
+
     /// <summary>
     /// 把面板传入的值收敛到可用区间：下限保 1（0 等于静默熔断，交给 Enabled），
     /// 上限锁死官方频控，避免误填把机器人推到 QQ 侧限流封禁。

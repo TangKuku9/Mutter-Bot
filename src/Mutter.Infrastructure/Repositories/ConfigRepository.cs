@@ -60,6 +60,7 @@ public class ConfigRepository : IConfigRepository
             CustomSystemPrompt = entity.CustomSystemPrompt,
             CustomTemperature = entity.CustomTemperature,
             AiProactiveEnabled = entity.AiProactiveEnabled,
+            ProactiveOverrides = ProactiveOverridesCodec.Decode(entity.ProactiveOverridesJson),
             BotMentionOpenId = entity.BotMentionOpenId,
             ActiveCharacter = entity.ActiveCharacter,
             MemoryInjectionEnabled = entity.MemoryInjectionEnabled
@@ -138,6 +139,7 @@ public class ConfigRepository : IConfigRepository
                 CustomSystemPrompt = config.CustomSystemPrompt,
                 CustomTemperature = config.CustomTemperature,
                 AiProactiveEnabled = config.AiProactiveEnabled,
+                ProactiveOverridesJson = ProactiveOverridesCodec.Encode(config.ProactiveOverrides),
                 BotMentionOpenId = config.BotMentionOpenId,
                 ActiveCharacter = config.ActiveCharacter,
                 MemoryInjectionEnabled = config.MemoryInjectionEnabled
@@ -151,6 +153,7 @@ public class ConfigRepository : IConfigRepository
             entity.CustomSystemPrompt = config.CustomSystemPrompt;
             entity.CustomTemperature = config.CustomTemperature;
             entity.AiProactiveEnabled = config.AiProactiveEnabled;
+            entity.ProactiveOverridesJson = ProactiveOverridesCodec.Encode(config.ProactiveOverrides);
             entity.BotMentionOpenId = config.BotMentionOpenId;
             entity.ActiveCharacter = config.ActiveCharacter;
             entity.MemoryInjectionEnabled = config.MemoryInjectionEnabled;
@@ -161,7 +164,7 @@ public class ConfigRepository : IConfigRepository
 
     public async Task<List<GroupConfig>> GetAllGroupConfigsAsync(CancellationToken ct = default)
     {
-        return await _dbContext.GroupConfigs
+        return (await _dbContext.GroupConfigs.AsNoTracking().ToListAsync(ct))
             .Select(e => new GroupConfig
             {
                 GroupId = e.GroupId,
@@ -170,11 +173,12 @@ public class ConfigRepository : IConfigRepository
                 CustomSystemPrompt = e.CustomSystemPrompt,
                 CustomTemperature = e.CustomTemperature,
                 AiProactiveEnabled = e.AiProactiveEnabled,
+                ProactiveOverrides = ProactiveOverridesCodec.Decode(e.ProactiveOverridesJson),
                 BotMentionOpenId = e.BotMentionOpenId,
                 ActiveCharacter = e.ActiveCharacter,
                 MemoryInjectionEnabled = e.MemoryInjectionEnabled
             })
-            .ToListAsync(ct);
+            .ToList();
     }
 
     public async Task<bool> IsPrivateChatEnabledAsync(string userId, CancellationToken ct = default)
