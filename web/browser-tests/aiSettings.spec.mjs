@@ -122,7 +122,7 @@ test('预算冲突自动展开，空数字不允许保存', async ({ page }) => 
   await page.getByLabel('回复输出上限', { exact: true }).fill('32768')
   await page.getByLabel('模型名称', { exact: true }).click()
   await expect(page.getByLabel('输入预算', { exact: true })).toBeVisible()
-  await expect(page.locator('.ai-form-error')).toContainText('超出容量')
+  await expect(page.locator('.ai-form-error')).toContainText('模型上下文容量不足')
   expect(state.writes).toHaveLength(0)
 })
 
