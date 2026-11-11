@@ -66,6 +66,11 @@ let pendingMessages = [], queuedRefresh = false
 const onScroll = () => { const el = stream.value; if (el) following.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48 }
 const scrollToLatest = () => nextTick(() => { if (stream.value && following.value) stream.value.scrollTop = stream.value.scrollHeight })
 const canAutoRefresh = () => !disposed && live.value && !loadError.value && page.value === 1 && !keyword.value && following.value && !drawerVisible.value
+const markNewRecords = () => {
+  hasNew.value = true
+  // 请求的快照可能早于这次事件；响应回来后仍需补齐或保留提醒。
+  if (request.pending) queuedRefresh = true
+}
 const viewIsCurrent = (group, filter) => group === groupId.value && filter === source.value
 const cancelAuto = () => { if (timer) { clearTimeout(timer); timer = null } }
 const cancelCount = () => {
@@ -123,7 +128,7 @@ const flushPendingMessages = () => {
   if (!pendingMessages.length) return
   const pending = pendingMessages
   pendingMessages = []
-  if (!canAutoRefresh()) { hasNew.value = true; return }
+  if (!canAutoRefresh() || hasNew.value || queuedRefresh) { markNewRecords(); return }
   for (const message of pending) mergeLiveMessage(message, { scroll: false })
   if (following.value) scrollToLatest()
 }
@@ -131,10 +136,16 @@ const finishLoad = () => {
   if (request.pending) return
   loading.value = false
   flushPendingMessages()
-  if (queuedRefresh && canAutoRefresh()) { queuedRefresh = false; scheduleAutoRefresh() }
+  if (queuedRefresh) {
+    queuedRefresh = false
+    if (canAutoRefresh()) scheduleAutoRefresh()
+    else markNewRecords()
+  }
 }
-const applyLatest = (data, group, filter) => {
+const applyLatest = (data, group, filter, quiet) => {
   if (!viewIsCurrent(group, filter) || page.value !== 1 || keyword.value) return
+  // 静默校准返回时用户可能已经开始阅读，不替换其正在看的内容。
+  if (quiet && !canAutoRefresh()) { markNewRecords(); return }
   items.value = Array.isArray(data.items) ? data.items : []
   total.value = Number.isInteger(data.totalCount) ? data.totalCount : null
   page.value = data.page || 1
@@ -150,7 +161,7 @@ const loadLatest = async ({ quiet = false } = {}) => {
   const params = { pageSize, groupId: group || undefined, source: filter || undefined }
   try {
     await request.run(signal => api.get('/chat/timeline/latest', { params, signal, skipErrorMessage: true }),
-      ({ data }) => applyLatest(data, group, filter))
+      ({ data }) => applyLatest(data, group, filter, quiet))
   } catch {
     if (!disposed && viewIsCurrent(group, filter)) { if (quiet) hasNew.value = true; else loadError.value = true }
   } finally { finishLoad() }
@@ -192,8 +203,9 @@ const applySearch = () => { keyword.value = searchInput.value.trim(); resetView(
 const clearSearch = () => { searchInput.value = ''; applySearch() }
 const showAll = () => { source.value = ''; searchInput.value = ''; keyword.value = ''; resetView() }
 const onPage = value => {
+  if (timer || queuedRefresh || pendingMessages.length) markNewRecords()
   cancelAuto(); cancelCount(); queuedRefresh = false; pendingMessages = []
-  page.value = value; following.value = true; hasNew.value = false; loadExact()
+  page.value = value; following.value = true; loadExact()
 }
 const openDetails = entry => { selectedEntry.value = entry; drawerVisible.value = true }
 const loadGroups = async () => {
@@ -207,20 +219,22 @@ const scheduleAutoRefresh = () => {
   timer = setTimeout(() => {
     timer = null
     if (disposed) return
-    if (!canAutoRefresh()) { hasNew.value = true; return }
+    if (!canAutoRefresh()) { markNewRecords(); return }
     if (request.pending) { queuedRefresh = true; return }
     loadLatest({ quiet: true })
   }, 1500)
 }
 const signalNew = () => {
   if (disposed || !live.value) return
-  if (!canAutoRefresh()) { hasNew.value = true; return }
+  if (!canAutoRefresh()) { markNewRecords(); return }
   if (request.pending) { queuedRefresh = true; return }
   scheduleAutoRefresh()
 }
 const handleReceiveMessage = message => {
   if (disposed || !live.value || source.value === 'decision' || !matchesChatMessage(message, { groupId: groupId.value, source: source.value })) return
-  if (!canAutoRefresh()) { hasNew.value = true; return }
+  if (!canAutoRefresh()) { markNewRecords(); return }
+  // 有跳过的记录或待校准的 Bot/重连事件时，单条推送不能证明新快照完整。
+  if (hasNew.value || queuedRefresh || timer) { signalNew(); return }
   if (request.pending) {
     if (advanceMessageSnapshot(snapshot.value, message.id)) {
       pendingMessages.push(message)
@@ -241,9 +255,13 @@ const connect = () => {
 }
 const disconnect = () => {
   unsubscribe?.(); unsubscribe = null
+  if (timer || queuedRefresh || pendingMessages.length) markNewRecords()
   cancelAuto(); queuedRefresh = false; pendingMessages = []
 }
-const toggleLive = on => { on ? connect() : disconnect() }
+const toggleLive = on => {
+  if (on) { connect(); signalNew() }
+  else disconnect()
+}
 onMounted(async () => { connect(); await Promise.allSettled([loadCurrent(), loadGroups()]) })
 onUnmounted(() => {
   disposed = true; disconnect(); cancelCount()
