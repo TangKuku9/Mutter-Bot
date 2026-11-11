@@ -55,7 +55,8 @@
         </el-button>
       </div>
       <div v-if="selectedPreset" class="ai-preset-note">
-        <el-tag size="small" type="info">{{ selectedPreset.hasApiKey ? '包含密钥' : '沿用当前密钥' }}</el-tag>
+        <el-tag size="small" type="info">{{ selectedPreset.hasApiKey ? '包含主模型密钥' : '沿用当前主模型密钥' }}</el-tag>
+        <el-tag v-if="selectedPresetApplied" size="small" type="success">已应用</el-tag>
         <span>{{ selectedPreset.description || '应用后立即保存当前 AI 配置。' }}</span>
         <span v-if="selectedPreset.personalityMissing" class="ai-warning">人设「{{ selectedPreset.personality }}」已不存在</span>
       </div>
@@ -392,6 +393,12 @@
             show-icon
             title="联网搜索已关闭。通道参数可先配置，开启总开关并保存后生效。"
           />
+          <div class="ai-search-probe">
+            <el-button :loading="probing" :disabled="formBusy" @click="probeWebSearch">检测联网搜索</el-button>
+            <small>
+              用当前表单的地址与模型实测「模型内建搜索」；独立搜索服务优先，内建策略仅在关闭独立搜索或开启失败兜底时生效。
+            </small>
+          </div>
           <template v-if="form.externalSearch.enabled">
             <div class="ai-search-fields ai-fields">
               <AiSettingField
@@ -401,7 +408,7 @@
                 :hint="esProviderHint"
                 @help="openHelp"
               >
-                <el-select id="ai-search-provider" v-model="form.externalSearch.provider">
+                <el-select id="ai-search-provider" v-model="form.externalSearch.provider" @change="onSearchProviderChange">
                   <el-option v-for="provider in ES_PROVIDERS" :key="provider.id" :label="provider.name" :value="provider.id" />
                 </el-select>
               </AiSettingField>
@@ -421,7 +428,7 @@
                 :hint="
                   form.externalSearch.provider === 'searxng'
                     ? 'SearXNG 不使用密钥。'
-                    : '留空或保持打码值表示不修改；页面不回显明文。'
+                    : 'Key 为当前服务商专属，切换服务商后必须重新填写；留空或保持打码值表示不修改，页面不回显明文。'
                 "
                 @help="openHelp"
               >
@@ -439,11 +446,18 @@
                 <el-button :loading="esProbing" :disabled="formBusy" @click="probeExternalSearch">测试搜索</el-button>
                 <ParamHelpButton :label="helpLabel('externalSearchTest')" @click="openHelp('externalSearchTest')" />
                 <p>
-                  最近验证：{{ form.externalSearchStatus.verifiedAt ? fmt(form.externalSearchStatus.verifiedAt) : '尚未验证' }}
+                  最近验证：{{ esTargetStale ? '参数已变更，需重新测试' : (form.externalSearchStatus.verifiedAt ? fmt(form.externalSearchStatus.verifiedAt) : '尚未验证') }}
                 </p>
                 <small>使用当前表单实测，不会保存配置。</small>
               </div>
             </div>
+            <el-alert
+              v-if="esKeyMissing"
+              type="warning"
+              :closable="false"
+              show-icon
+              title="当前搜索服务商还需要 API Key：填写后保存，独立搜索才会生效。"
+            />
             <el-collapse v-model="searchAdvancedOpen" class="ai-budget-collapse">
               <el-collapse-item name="search-advanced">
                 <template #title>
@@ -510,7 +524,7 @@
               <p v-if="form.webSearchShape">当前策略：{{ shapeLabel(form.webSearchShape) }}</p>
               <p v-else>尚未选用实测策略，当前按 API 地址推断。</p>
               <small v-if="form.webSearchShape">
-                文字已验证 ·
+                {{ builtinTargetStale ? '参数已变更，需重新检测' : '文字已验证' }} ·
                 {{
                   form.webSearchImageCapable === true
                     ? '带图已验证'
@@ -520,7 +534,6 @@
                 }}
               </small>
             </div>
-            <el-button :loading="probing" :disabled="formBusy" @click="probeWebSearch">检测联网搜索</el-button>
           </div>
           <AiSettingField
             label="带图时联网"
@@ -634,9 +647,9 @@
         <el-form-item label="备注">
           <el-input v-model="presetForm.description" maxlength="200" show-word-limit placeholder="可选，用来区分用途" />
         </el-form-item>
-        <el-form-item label="API Key">
+        <el-form-item label="API Key（仅模型连接；搜索服务 Key 不进入预设）">
           <el-switch v-model="presetForm.includeApiKey" active-text="一并保存" />
-          <div class="hint">关闭后预设不含密钥，应用时沿用当前配置的 Key。</div>
+          <div class="hint">关闭后预设不含主模型密钥，应用时沿用当前配置的 Key；搜索服务的 Key 永不进入预设。</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -673,7 +686,7 @@
           <div class="ai-preset-item-title">
             <strong>{{ row.name }}</strong>
             <el-tag v-if="!row.isValid" size="small" type="danger">数据损坏</el-tag>
-            <el-tag size="small" type="info">{{ row.hasApiKey ? '包含密钥' : '沿用当前密钥' }}</el-tag>
+            <el-tag size="small" type="info">{{ row.hasApiKey ? '包含主模型密钥' : '沿用当前主模型密钥' }}</el-tag>
           </div>
           <p v-if="row.description" class="ai-preset-description">{{ row.description }}</p>
           <div class="ai-preset-details">
@@ -826,7 +839,8 @@
           「已验证」= 响应携带检索证据字段，或带搜索比基线多出大量 prompt token（搜索结果被注入），
           或回答给出了与当前北京时间吻合的时刻而基线给不出（部分中转会抹掉前两种证据）。 「被静默忽略」= 请求 2xx
           但无任何检索证据——这正是开关打开却毫无效果的情形。
-          「选用」会把形状写入配置并打开联网搜索；换地址或模型后旧策略会自动清空，需要重新检测。
+          「选用」会把形状写入配置并打开联网搜索；独立搜索服务优先，内建策略仅在关闭独立搜索或开启失败兜底时生效；
+          换地址或模型后旧策略会自动清空，需要重新检测。
           「带图」列需要文字联网先通过才会测试；「看不到图」表示上游接受了请求但静默丢弃了图片。
         </div>
       </template>
@@ -867,14 +881,20 @@
           <el-tag :type="esVerdictType(esProbeResult.verdict)">{{ esVerdictLabel(esProbeResult.verdict) }}</el-tag>
           <span>{{ esProbeResult.detail }}</span>
         </div>
-        <div v-if="(esProbeResult.hits || []).length" class="es-hits">
-          <a v-for="h in esProbeResult.hits" :key="h.url" class="es-hit" :href="h.url" target="_blank" rel="noopener noreferrer">
-            <span class="es-hit-title">{{ h.title || h.url }}</span>
-            <span class="es-hit-url">{{ esHost(h.url) }}</span>
-          </a>
+        <div v-if="esHits.length" class="es-hits">
+          <template v-for="(h, index) in esHits" :key="h.safeUrl || `unsafe-${index}`">
+            <a v-if="h.safeUrl" class="es-hit" :href="h.safeUrl" target="_blank" rel="noopener noreferrer">
+              <span class="es-hit-title">{{ h.title || h.url }}</span>
+              <span class="es-hit-url">{{ esHost(h.url) }}</span>
+            </a>
+            <div v-else class="es-hit">
+              <span class="es-hit-title">{{ h.title || h.url }}</span>
+              <span class="es-hit-url">{{ esHost(h.url) }}</span>
+            </div>
+          </template>
         </div>
         <div class="probe-footnote">
-          测试使用表单当前值（含未保存的修改），Key 为打码值时按已保存的 Key 实测。
+          测试使用表单当前值（含未保存的修改）；Key 留空或为打码值时，按当前服务商已保存的 Key 实测，切换服务商后需重填。
           验证通过与当前保存一致时，「最近验证」时间会自动更新；服务商、地址或 Key 变更后需重新测试。
         </div>
       </template>
@@ -909,7 +929,7 @@ import { useParamHelp } from '../paramHelp'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
 import AiSettingField from '../components/AiSettingField.vue'
-import { normalizeAiSettings, aiSettingsError } from '../aiSettings'
+import { normalizeAiSettings, aiSettingsError, sanitizeAiSettingsForUi, safeHttpUrl, defaultExternalSearch } from '../aiSettings'
 
 const withExternalDefaults = normalizeAiSettings
 
@@ -921,8 +941,11 @@ const loadError = ref(false), presetsError = ref(false), presetsLoading = ref(fa
 const advancedOpen = ref([]), searchAdvancedOpen = ref([])
 
 // 配置预设：当前选中项、已保存列表与管理弹窗状态
+// selectedPresetId 只表示「选择待应用」；appliedPresetId 仅在应用成功后设置，
+// 取消确认不清空选择，方便直接重试。
 const presets = ref([])
 const selectedPresetId = ref(null)
+const appliedPresetId = ref(null)
 const applyingPreset = ref(false)
 const savePresetDialog = ref(false)
 const editPresetDialog = ref(false)
@@ -936,7 +959,16 @@ const dialogStyle = { maxWidth: 'calc(100vw - 32px)' }
 const baseline = ref('')
 const ready = computed(() => !!baseline.value)
 const formBusy = computed(() => loading.value || !ready.value || saving.value || applyingPreset.value || presetSaving.value)
-const formError = computed(() => aiSettingsError(form.value))
+// 应用预设/切换服务商后外搜 Key 会为空：在保存前就明确提示，避免必然被后端拒绝。
+const esKeyMissing = computed(() => {
+  const es = form.value.externalSearch
+  return !!es?.enabled
+    && es.provider !== 'searxng' && es.provider !== 'custom'
+    && !String(es.apiKey || '').trim()
+})
+const formError = computed(() =>
+  aiSettingsError(form.value)
+  || (esKeyMissing.value ? '当前搜索服务商需要 API Key，填写后才能保存。' : ''))
 const formatTokens = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '—'
 
 // 只取服务端可写字段；预设接口和 PUT /ai 共用同一份契约
@@ -974,11 +1006,40 @@ const isDirty = computed(() =>
 const budget = computed(() => tokenBudget(form.value))
 watch(() => budget.value.error, error => { if (error && !advancedOpen.value.includes('capacity')) advancedOpen.value.push('capacity') })
 watch(formError, error => { if (error.includes('检索') && !searchAdvancedOpen.value.includes('search-advanced')) searchAdvancedOpen.value.push('search-advanced') })
+// 表单一有未保存修改，「已选中/已应用」就不再成立：清掉标记，避免「已选中=已应用」的误解
+watch(isDirty, dirty => {
+  if (dirty) {
+    selectedPresetId.value = null
+    appliedPresetId.value = null
+  }
+})
 const confirmDiscard = useUnsavedChanges(isDirty)
 const reloadConfig = async () => { if (await confirmDiscard()) await load() }
 
 const selectedPreset = computed(() =>
   presets.value.find((p) => p.id === selectedPresetId.value) || null)
+const selectedPresetApplied = computed(() =>
+  !!selectedPreset.value && appliedPresetId.value === selectedPreset.value.id)
+
+// 保存/读取后的目标快照，用来判断「最近验证 / 已验证」结论是否还针对当前参数：
+// 参数一旦偏离基线就显示「需重新检测/测试」，而不是继续显示旧验证时间。
+const baselineConfig = computed(() => {
+  if (!baseline.value) return null
+  try { return JSON.parse(baseline.value) } catch { return null }
+})
+const builtinTargetStale = computed(() => {
+  const b = baselineConfig.value
+  if (!b) return false
+  return form.value.apiBaseUrl !== b.apiBaseUrl || form.value.modelName !== b.modelName
+})
+const esTargetStale = computed(() => {
+  const b = baselineConfig.value
+  if (!b?.externalSearch) return false
+  const es = form.value.externalSearch || {}
+  return es.provider !== b.externalSearch.provider
+    || String(es.baseUrl || '') !== String(b.externalSearch.baseUrl || '')
+    || String(es.apiKey || '') !== String(b.externalSearch.apiKey || '')
+})
 
 // 联网搜索探测：流式逐项进度；全部完成后展示报告，可对已验证形状“选用”
 const probing = ref(false)
@@ -1139,18 +1200,34 @@ const cancelProbe = () => {
 
 const applyProbe = async (row) => {
   if (row.status !== 'verified') return
+  // 先记住旧值：保存失败时回滚，按钮恢复「选用」，避免「已选用」假象（实际未保存）
+  const previous = {
+    endpoint: form.value.webSearchEndpoint,
+    shape: form.value.webSearchShape,
+    enabled: form.value.webSearchEnabled
+  }
   form.value.webSearchEndpoint = row.shape === 'gemini_native' ? 'gemini' : 'openai'
   form.value.webSearchShape = row.shape
+  // 只打开联网总开关，不改 externalSearch.enabled：选用内建策略不应顺带关闭独立搜索
   form.value.webSearchEnabled = true
   const imageNote = row.imageStatus === 'verified'
     ? '，带图联网已验证'
     : row.imageStatus === 'not_tested' || !row.imageStatus
       ? '，带图联网未测'
       : '，但带图联网未通过'
+  let ok = false
   try {
-    await save(`已选用「${shapeLabel(row.shape)}」${imageNote}；联网搜索已开启`)
-  } catch {
-    // 保存失败由 axios 拦截器提示，表单保留当前选择，方便重试
+    ok = await save(`已选用「${shapeLabel(row.shape)}」${imageNote}；联网搜索已开启`)
+  } catch { ok = false }
+  if (!ok) {
+    form.value.webSearchEndpoint = previous.endpoint
+    form.value.webSearchShape = previous.shape
+    form.value.webSearchEnabled = previous.enabled
+    ElMessage.error('保存失败，已回退本次选用的搜索策略')
+    return
+  }
+  if (form.value.externalSearch?.enabled) {
+    ElMessage.info('独立搜索服务优先：内建策略仅在关闭独立搜索或开启失败兜底时生效')
   }
 }
 
@@ -1167,9 +1244,8 @@ const ES_PROVIDERS = [
   { id: 'custom', name: '自定义（JSON API）' }
 ]
 const esProviderName = (id) => ES_PROVIDERS.find((p) => p.id === id)?.name || id
-// 与后端 ExternalSearchConfig.RequiresBaseUrl / RequiresApiKey 保持一致
+// 与后端 ExternalSearchConfig.RequiresBaseUrl 保持一致；Key 的必填判断由后端按 provider 归属给出
 const esNeedsBaseUrl = (id) => id === 'searxng' || id === 'custom'
-const esNeedsApiKey = (id) => id !== 'searxng' && id !== 'custom'
 const esBaseUrlPlaceholder = computed(() => ({
   searxng: 'https://searx.example.com（实例根地址）',
   tavily: '留空 = 官方端点 https://api.tavily.com',
@@ -1191,6 +1267,16 @@ const esProviderHint = computed(() => ({
   custom: '按固定契约接入：POST JSON {query,count}，返回 results[]（title/url/snippet）；Key 选填，填了则以 Bearer 发送。'
 }[form.value.externalSearch?.provider] || ''))
 
+// Key 与地址是服务商专属的：切换服务商后清空，避免旧服务商的打码 Key/网关地址
+// 被沿用发给新服务商（后端也会按 provider 归属拒绝解析旧 Key/旧网关）
+const onSearchProviderChange = () => {
+  const es = form.value.externalSearch
+  if (!es) return
+  es.apiKey = ''
+  es.baseUrl = ''
+  ElMessage.info('已切换搜索服务商，请重新填写该服务商的 Key 与地址')
+}
+
 const esVerdictLabel = (v) => ({
   verified: '验证通过', no_results: '连通但 0 条结果', auth_failed: '鉴权失败', failed: '测试失败'
 }[v] || v)
@@ -1198,6 +1284,9 @@ const esVerdictType = (v) => ({
   verified: 'success', no_results: 'warning', auth_failed: 'danger', failed: 'danger'
 }[v] || 'info')
 const esHost = (u) => { try { return new URL(u).host } catch { return u } }
+// 检索结果链接的 http/https 白名单：非 http(s) 的命中（畸形/恶意数据）降级为纯文本，不生成 <a href>
+const esHits = computed(() =>
+  (esProbeResult.value?.hits || []).map((h) => ({ ...h, safeUrl: safeHttpUrl(h.url) })))
 
 // 独立搜索测试：不落库、不依赖保存，直接测表单当前值（Key 打码值由后端按已存 Key 解析）
 const esProbing = ref(false)
@@ -1207,15 +1296,13 @@ const esProbeError = ref('')
 let esProbeAbort = null
 
 const probeExternalSearch = async () => {
-  const es = form.value.externalSearch
-  // 与后端校验同判据的前置检查：地址必填项与 Key 必填项按服务商能力判断
-  let missing = ''
-  if (esNeedsBaseUrl(es.provider) && !es.baseUrl.trim())
-    missing = es.provider === 'custom' ? '自定义通道需要填写服务地址' : 'SearXNG 需要填写实例地址'
-  else if (esNeedsApiKey(es.provider) && !es.apiKey.trim())
-    missing = `${esProviderName(es.provider)} 需要填写 API Key`
-  if (missing) {
-    ElMessage.warning(missing)
+  const es = form.value.externalSearch || defaultExternalSearch()
+  // 与后端校验同判据的前置检查：只拦地址必填项。
+  // Key 允许留空/打码：同一服务商时后端按已保存的 Key 实测；换了服务商则由后端判定并提示重填。
+  const baseUrl = String(es.baseUrl ?? '').trim()
+  const apiKey = String(es.apiKey ?? '').trim()
+  if (esNeedsBaseUrl(es.provider) && !baseUrl) {
+    ElMessage.warning(es.provider === 'custom' ? '自定义通道需要填写服务地址' : 'SearXNG 需要填写实例地址')
     return
   }
   esProbeAbort?.abort()
@@ -1229,8 +1316,8 @@ const probeExternalSearch = async () => {
     const { data } = await api.post('/config/ai/probe-search', {
       enabled: true,
       provider: es.provider,
-      baseUrl: es.baseUrl,
-      apiKey: es.apiKey,
+      baseUrl,
+      apiKey,
       maxResults: es.maxResults,
       timeoutSeconds: es.timeoutSeconds,
       fallbackToBuiltin: false
@@ -1297,6 +1384,7 @@ const HELP = {
     lines: [
       '把当前整套 AI 配置保存成快照，之后可以一键切换。',
       '「服务商」只填地址和模型；配置预设还会包含人设、提示词、参数和联网设置。',
+      '预设只保存主模型的 API Key；独立搜索服务的 Key 不进入预设，应用后若换了服务商或地址需要重填。',
       '「保存为预设」保存的是当前表单，包括还没点「保存配置」的修改。',
       '应用预设会立即覆盖并保存当前配置；之后对表单的修改不会自动同步回预设。'
     ]
@@ -1442,7 +1530,7 @@ const HELP = {
       'SearXNG：自建元搜索引擎，免 Key，需一个开了 JSON format 的实例。',
       'Tavily / 博查 / Brave / DeepSeek：商用搜索 API，Key 必填，服务地址可留空用官方端点。',
       '自定义：填完整搜索端点，按固定 JSON 契约（POST {query,count} → results[]）接入；Key 选填。',
-      '换服务商后需重新「测试搜索」获得新的验证时间。'
+      'Key 与地址是服务商专属的：切换服务商后两者都会清空，需重新填写并重新「测试搜索」。'
     ]
   },
   externalSearchBaseUrl: {
@@ -1467,7 +1555,8 @@ const HELP = {
       'SearXNG 免 Key，输入框禁用。',
       'Tavily / 博查 / Brave / DeepSeek 必填；自定义通道选填，填了则以 Bearer 发送。',
       '只存在本机数据库，页面不回显明文。',
-      '留空或保持打码值表示不修改；填新值会直接覆盖。'
+      'Key 是服务商专属的：切换服务商后不会带过去，必须重新填写。',
+      '同一服务商下，留空或保持打码值表示不修改；填新值会直接覆盖。'
     ]
   },
   externalSearchLimits: {
@@ -1494,7 +1583,8 @@ const HELP = {
     value: () => '用表单当前值实测',
     lines: [
       '直接用表单当前值（含未保存的修改）真实检索一次，不需要先保存。',
-      'Key 是打码值时按已保存的 Key 实测；不会保存任何配置。',
+      'Key 留空或为打码值时，按当前服务商已保存的 Key 实测；切换服务商后需重填，不会沿用旧 Key。',
+      '不会保存任何配置。',
       '验证通过与当前保存一致时，「最近验证」时间会自动更新。',
       '服务商、服务地址或 Key 变更后，旧验证作废，需要重新测试。'
     ]
@@ -1506,14 +1596,30 @@ const {
   lines: helpLines, current: helpCurrent, label: helpLabel, open: openHelp, step: stepHelp
 } = useParamHelp(HELP, HELP_ORDER, () => form.value)
 
+// 套用服务端配置。结构无效（如 `{}`、缺少可选字段列表）时返回 null 且不建立 baseline，
+// 避免空表单覆盖服务器配置；成功时返回 sanitize 是否收敛过（越界旧值被按界面范围显示）。
+const ingestConfig = (data) => {
+  if (!data || typeof data !== 'object'
+    || !Array.isArray(data.availableProviders) || !Array.isArray(data.availableCharacters)) return null
+  const next = withExternalDefaults(data)
+  const converged = sanitizeAiSettingsForUi(next)
+  form.value = next
+  baseline.value = JSON.stringify(configPayload())
+  return converged
+}
+
 const load = async () => {
   loading.value = true
   try {
     const { data } = await api.get('/config/ai')
-    form.value = withExternalDefaults(data)
-    baseline.value = JSON.stringify(configPayload())
+    const converged = ingestConfig(data)
+    if (converged == null) throw new Error('配置响应缺少可用字段，已按读取失败处理')
     presetId.value = ''
+    // 重新读取后原先选中的预设不再可信，选择与应用标记一并清空
+    selectedPresetId.value = null
+    appliedPresetId.value = null
     loadError.value = false
+    if (converged) ElMessage.info('部分参数超出界面范围，已按可用值显示，请确认后保存')
   } catch {
     loadError.value = true
     // API 层提示错误；读取失败时保留当前草稿，不开放空表单覆盖服务器配置。
@@ -1524,6 +1630,7 @@ const loadPresets = async () => {
   presetsLoading.value = true
   try {
     const { data } = await api.get('/config/ai/presets')
+    if (!Array.isArray(data)) throw new Error('预设列表格式异常')
     presets.value = data
     presetsError.value = false
   } catch { presetsError.value = true }
@@ -1652,7 +1759,13 @@ const presetCommand = (command, row) => {
 const applyPresetById = async (id, fromManage = false) => {
   if (formBusy.value) return
   const p = presets.value.find((x) => x.id === id)
-  if (!p) return
+  if (!p) {
+    ElMessage.error('预设已不存在，请刷新预设列表')
+    selectedPresetId.value = null
+    appliedPresetId.value = null
+    await loadPresets()
+    return
+  }
   if (!p.isValid) {
     ElMessage.error('预设数据损坏，无法应用')
     return
@@ -1660,23 +1773,38 @@ const applyPresetById = async (id, fromManage = false) => {
 
   const lines = [`应用预设「${p.name}」会覆盖当前表单并立即保存。`]
   if (isDirty.value) lines.push('当前表单有未保存修改，这些修改会丢失。')
-  if (!p.hasApiKey) lines.push('该预设未保存 API Key，将沿用当前 Key。')
+  if (!p.hasApiKey) lines.push('该预设未保存主模型密钥，将沿用当前 Key。')
   if (p.personalityMissing) lines.push(`人设「${p.personality}」已不存在，应用后会按自由文本处理。`)
+  // 预设不含搜索 Key：目标服务商/地址与当前不同时，应用后必须重填
+  if (p.externalSearchEnabled) {
+    const es = form.value.externalSearch || {}
+    const sameTarget = es.provider === p.externalSearchProvider
+      && String(es.baseUrl || '').replace(/\/+$/, '') === String(p.externalSearchBaseUrl || '').replace(/\/+$/, '')
+    if (!sameTarget) lines.push(`该预设使用 ${esProviderName(p.externalSearchProvider)} 搜索服务，应用后需重新填写搜索 Key。`)
+  }
   try {
     await ElMessageBox.confirm(lines.join(''), '应用预设', {
       type: 'warning', confirmButtonText: '应用并保存', cancelButtonText: '取消'
     })
   } catch {
-    return
+    return // 保留选中项，用户可直接重试
   }
 
   applyingPreset.value = true
   try {
     const { data } = await api.post(`/config/ai/presets/${id}/apply`)
-    form.value = withExternalDefaults(data)
-    baseline.value = JSON.stringify(configPayload())
+    const converged = ingestConfig(data)
+    if (converged == null) {
+      // 配置已在服务端生效，但响应异常：置顶横幅提示重新读取
+      loadError.value = true
+      ElMessage.warning('预设已应用，但读取最新配置失败，请重新读取')
+      return
+    }
     presetId.value = ''
     selectedPresetId.value = id
+    appliedPresetId.value = id
+    // 成功应用预设同样是一条可靠的配置来源，清除「暂时无法读取配置」横幅
+    loadError.value = false
     if (fromManage) managePresetDialog.value = false
     ElMessage.success(`已应用预设「${p.name}」`)
   } catch { /* API 层提示错误，应用失败时保留当前草稿。 */ }
@@ -1729,20 +1857,40 @@ const saveCharacter = async () => {
 const removeCharacter = async (row) => {
   await api.delete(`/config/characters/${row.name}`)
   ElMessage.success('人设已删除')
-  if (form.value.personality === row.name) form.value.personality = ''
+  // 后端按 OrdinalIgnoreCase 清理引用，前端同样大小写不敏感，避免残留已删除人设
+  if (form.value.personality && form.value.personality.toLowerCase() === String(row.name || '').toLowerCase()) {
+    // 删除前若没有其他未保存修改，清除引用后直接对齐基线，避免出现永久假脏
+    const wasClean = !isDirty.value
+    form.value.personality = ''
+    if (wasClean) baseline.value = JSON.stringify(configPayload())
+  }
   await refreshCharacters()
 }
 
 const save = async (successMessage = 'AI 配置已保存') => {
   if (formBusy.value) return false
   if (formError.value) { ElMessage.warning(formError.value); return false }
+  const payload = configPayload()
   saving.value = true
   try {
-    await api.put('/config/ai', configPayload())
-    ElMessage.success(successMessage)
-    await load()
-    // 手动保存后当前配置未必还等于选中的预设，清掉标记避免误导。
+    await api.put('/config/ai', payload)
+    // PUT 成功即服务端已接受本次提交：立刻以提交内容为新基线，
+    // 之后回读失败也不能让表单永远显示「有修改未保存」。
+    baseline.value = JSON.stringify(payload)
+    // 手动保存的配置未必等于选中的预设，清掉选择/应用标记，避免「已选中=已应用」的误解。
     selectedPresetId.value = null
+    appliedPresetId.value = null
+    ElMessage.success(successMessage)
+    // 回读是 best-effort 的服务端权威值同步，仍放在 saving=true 期间执行：
+    // 表单保持禁用，回读覆盖不会吃掉用户在等待期间的新输入。
+    // 回读失败只提示，脏状态以提交内容为准，loadError 保持 false。
+    try {
+      const converged = ingestConfig((await api.get('/config/ai')).data)
+      if (converged == null) ElMessage.warning('配置已保存，但最新配置格式异常，请稍后刷新')
+      else loadError.value = false
+    } catch {
+      ElMessage.warning('配置已保存，但读取最新配置失败，请稍后刷新')
+    }
     return true
   } catch { return false /* API 层提示错误；保留未保存的草稿。 */ }
   finally { saving.value = false }
@@ -1807,6 +1955,8 @@ onMounted(async () => {
 .ai-search-test p { margin: 10px 0 4px; line-height: 1.6; }
 .ai-search-test small { font-size: 12px; line-height: 1.7; }
 .ai-search-content > .ai-budget-collapse { margin-top: 0; }
+.ai-search-probe { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; padding: 12px 16px; border: 1px dashed var(--panel-border-soft); border-radius: 10px; }
+.ai-search-probe small { flex: 1; min-width: 240px; color: var(--panel-text-muted); font-size: 12px; line-height: 1.7; }
 .ai-builtin-search { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding: 16px 18px; border: 1px solid var(--panel-border-soft); border-radius: 10px; background: var(--panel-raised); }
 .ai-builtin-search h4 { margin: 0; font-size: 14px; font-weight: 500; color: var(--panel-text); }
 .ai-builtin-search p { margin: 6px 0 0; color: var(--panel-text-regular); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
