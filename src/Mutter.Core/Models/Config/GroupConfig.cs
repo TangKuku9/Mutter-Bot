@@ -13,6 +13,8 @@ public class GroupConfig
     /// <summary>本群是否参与 AI 择机发言（仍需全局开关同时打开）。</summary>
     public bool AiProactiveEnabled { get; set; }
 
+    public ProactiveOverrides? ProactiveOverrides { get; set; }
+
     /// <summary>
     /// 机器人在本群的 @ 识别码（QQ 下发的 member openid）。全量模式下平台不再单独下发
     /// @ 事件，只能靠 content 里的 &lt;@识别码&gt; 判断有没有人 @ 机器人；留空则完全不判。

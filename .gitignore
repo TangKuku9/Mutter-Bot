@@ -51,6 +51,9 @@ app-layer.json
 .zcode/
 tools/LoadCheck/
 
+# 品牌探索概念图（讨论稿，非生产资产；母版在 brand/source/，生成资产走 brand:generate）
+brand/concepts/
+
 # Logs
 logs/
 *.log

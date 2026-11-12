@@ -15,7 +15,7 @@ env:
   # 固定 SDK/运行时 patch：应用层包只在运行时版本一致时可用；runner 自动升级会让
   # 每次发布都悄悄变成“必须下完整包”。升级运行时应当是一次显式提交。
   DOTNET_VERSION: '9.0.316'
-  NODE_VERSION: '20'
+  NODE_VERSION: '22'
 
 jobs:
   panel:
@@ -40,9 +40,41 @@ jobs:
           test "$version" = "$web_version"
           test "$version" = "$tag_version"
 
-      - name: 安装与构建
+      - name: 安装
         working-directory: web
-        run: npm ci && npm run build
+        run: npm ci
+
+      # tag push 不会触发 CI，发布流水线必须自己跑面板逻辑测试与浏览器回归，
+      # 否则“tag 打得出去、面板坏了”只会在用户安装后才被发现。
+      - name: 面板交互逻辑自检
+        working-directory: web
+        run: npm test
+
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: 安装浏览器回归环境
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      # pretest:ui 会先 npm run build，构建产物同时用于上传 wwwroot。
+      - name: 浏览器回归与构建
+        working-directory: web
+        run: npm run test:ui
+
+      - name: 上传浏览器回归产物
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-panel-browser-test-results
+          path: artifacts/panel-browser-tests
+          if-no-files-found: ignore
+          retention-days: 7
 
       - uses: actions/upload-artifact@v7
         with:

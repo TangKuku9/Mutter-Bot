@@ -1,19 +1,21 @@
 <template>
   <el-card shadow="never" class="logs-card">
     <div class="toolbar">
-      <el-select v-model="levelFilter" placeholder="全部级别" clearable style="width: 140px">
+      <el-select v-model="levelFilter" placeholder="全部级别" aria-label="日志级别" clearable class="level-filter">
         <el-option v-for="l in levels" :key="l" :label="l" :value="l" />
       </el-select>
-      <el-input v-model="keyword" placeholder="关键词过滤" clearable style="width: 220px" />
-      <el-switch v-model="autoScroll" active-text="自动滚动" style="margin-left: 8px" />
-      <el-button @click="exportLogs">导出</el-button>
-      <el-button @click="clearView">清空视图</el-button>
-      <el-tag size="small" :type="connOk ? 'success' : 'danger'" style="margin-left: auto">
+      <el-input v-model="keyword" placeholder="关键词过滤" aria-label="关键词过滤" clearable class="keyword-filter" />
+      <div class="log-actions">
+        <el-switch v-model="autoScroll" active-text="自动滚动" />
+        <el-button @click="exportLogs">导出</el-button>
+        <el-button @click="clearView">清空视图</el-button>
+      </div>
+      <el-tag size="small" :type="connOk ? 'success' : 'danger'" class="stream-status">
         {{ connOk ? '实时流已连接' : '实时流未连接' }}
       </el-tag>
     </div>
 
-    <div class="log-box" ref="boxRef">
+    <div class="log-box" ref="boxRef" role="region" aria-label="实时日志流" tabindex="0">
       <div v-for="(l, i) in filtered" :key="i" class="log-line" :class="'lv-' + (l.level || '').toLowerCase()">
         <span class="ts">{{ fmt(l.timestamp) }}</span>
         <span class="lv">{{ l.level }}</span>
@@ -87,21 +89,35 @@ onUnmounted(() => {
   clearTimeout(flushTimer)
   pending = []
 })
-watch(filtered, () => {
+watch([filtered, autoScroll], () => {
   if (autoScroll.value) nextTick(() => { boxRef.value?.scrollTo(0, boxRef.value.scrollHeight) })
 })
 </script>
 
 <style scoped>
-.toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.log-box { height: min(640px, calc(100dvh - 340px)); min-height: 320px; overflow-y: auto; background: var(--panel-raised); border-radius: 8px; padding: 16px; font-family: ui-monospace, Consolas, Menlo, monospace; font-size: 13px; }
-.log-line { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; color: var(--panel-text-regular); }
-.ts { color: var(--panel-text-muted); margin-right: 8px; }
-.lv { display: inline-block; width: 82px; font-weight: 600; }
-.cat { color: var(--panel-accent-text); margin-right: 8px; }
+.logs-card { display: flex; flex: 1; flex-direction: column; min-height: min-content; container: logs / inline-size; }
+.logs-card :deep(.el-card__body) { display: flex; flex: 1; flex-direction: column; }
+.toolbar { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 12px; }
+.level-filter { width: 140px; max-width: 100%; }
+.keyword-filter { flex: 1 1 220px; max-width: 360px; }
+.log-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.log-actions .el-button + .el-button { margin-left: 0; }
+.stream-status { margin-left: auto; }
+.log-box { flex: 1 0 160px; min-height: 160px; overflow: auto; scrollbar-gutter: stable; overscroll-behavior: contain; background: var(--panel-raised); border-radius: 8px; padding: 12px 16px; font-family: ui-monospace, Consolas, Menlo, monospace; font-size: 13px; }
+.log-line { display: grid; grid-template-columns: 8ch minmax(0, 1fr); align-items: baseline; gap: 3px 12px; padding: 7px 0; line-height: 1.75; color: var(--panel-text-regular); }
+.log-line + .log-line { border-top: 1px solid var(--panel-border-soft); }
+.ts { color: var(--panel-text-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.lv { font-weight: 600; white-space: nowrap; }
+.cat { grid-column: 1 / -1; min-width: 0; white-space: normal; overflow-wrap: anywhere; color: var(--panel-accent-text); }
+.msg { grid-column: 1 / -1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .lv-information .lv { color: var(--el-color-success); }
 .lv-warning .lv, .lv-warning .msg { color: var(--el-color-warning); }
 .lv-error .lv, .lv-error .msg, .lv-critical .lv, .lv-critical .msg { color: var(--el-color-danger); }
 .lv-debug .lv, .lv-trace .lv { color: var(--panel-text-muted); }
 .empty { color: var(--panel-text-muted); text-align: center; padding: 40px 0; }
+@container logs (max-width: 540px) {
+  .keyword-filter { flex-basis: 100%; max-width: none; }
+  .log-box { padding: 8px 12px; }
+  .log-line { column-gap: 10px; }
+}
 </style>

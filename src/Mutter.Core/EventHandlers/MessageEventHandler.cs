@@ -390,18 +390,20 @@ public class MessageEventHandler
         }
         else if (route.ShouldProcess)
         {
-            await SaveIncomingAsync(chatMsg, ct);
-
-            try
+            // 重复事件不会入库，Id 仍是 0；只有真正保存才推送，避免面板把快照推过一条不存在的记录。
+            if (await SaveIncomingAsync(chatMsg, ct))
             {
-                await _notificationService.NotifyNewMessageAsync(new
+                try
                 {
-                    chatMsg.Id, chatMsg.ChatType, chatMsg.GroupId, chatMsg.UserId,
-                    chatMsg.UserName, chatMsg.PlainText, chatMsg.HasImage,
-                    chatMsg.HasAtBot, chatMsg.IsBotMessage, chatMsg.CreatedAt
-                });
+                    await _notificationService.NotifyNewMessageAsync(new
+                    {
+                        chatMsg.Id, chatMsg.ChatType, chatMsg.GroupId, chatMsg.UserId,
+                        chatMsg.UserName, chatMsg.PlainText, chatMsg.HasImage,
+                        chatMsg.HasAtBot, chatMsg.IsBotMessage, chatMsg.CreatedAt
+                    });
+                }
+                catch (Exception ex) { _logger.LogError(ex, "Notify new message failed"); }
             }
-            catch (Exception ex) { _logger.LogError(ex, "Notify new message failed"); }
         }
 
         _logger.LogDebug("Message queued: MsgId={MessageId}, Type={MessageType}, User={UserName}",
@@ -457,18 +459,20 @@ public class MessageEventHandler
             CreatedAt = DateTime.UtcNow
         };
 
-        await SaveIncomingAsync(chatMsg, ct);
-
-        try
+        // 私聊没有“重复事件由 reprocessAsAt 补标记”的分支，同样只在真正入库后推送。
+        if (await SaveIncomingAsync(chatMsg, ct))
         {
-            await _notificationService.NotifyNewMessageAsync(new
+            try
             {
-                chatMsg.Id, chatMsg.ChatType, chatMsg.GroupId, chatMsg.UserId,
-                chatMsg.UserName, chatMsg.PlainText, chatMsg.HasImage,
-                chatMsg.HasAtBot, chatMsg.IsBotMessage, chatMsg.CreatedAt
-            });
+                await _notificationService.NotifyNewMessageAsync(new
+                {
+                    chatMsg.Id, chatMsg.ChatType, chatMsg.GroupId, chatMsg.UserId,
+                    chatMsg.UserName, chatMsg.PlainText, chatMsg.HasImage,
+                    chatMsg.HasAtBot, chatMsg.IsBotMessage, chatMsg.CreatedAt
+                });
+            }
+            catch (Exception ex) { _logger.LogError(ex, "Notify new message failed"); }
         }
-        catch (Exception ex) { _logger.LogError(ex, "Notify new message failed"); }
 
         _logger.LogDebug("Message queued: MsgId={MessageId}, Type={MessageType}, User={UserName}",
             evt.Id, "private", senderName);
@@ -491,12 +495,14 @@ public class MessageEventHandler
         await EnqueueAiReplyAsync(chatMsg, parsed, ct);
     }
 
-    private async Task SaveIncomingAsync(ChatMessage message, CancellationToken ct)
+    /// <summary>返回是否真正入库；重复事件不落库，也不再把 Id=0 推送给面板。</summary>
+    private async Task<bool> SaveIncomingAsync(ChatMessage message, CancellationToken ct)
     {
         using var scope = _scopeFactory.CreateScope();
         var repo = scope.ServiceProvider.GetRequiredService<IMessageRepository>();
-        if (!await repo.IsMessageIdExistsAsync(message.MessageId, ct))
-            await repo.SaveMessageAsync(message, ct);
+        if (await repo.IsMessageIdExistsAsync(message.MessageId, ct)) return false;
+        await repo.SaveMessageAsync(message, ct);
+        return true;
     }
 
     private Task EnqueueAiReplyAsync(ChatMessage incoming, ParsedMessage parsed, CancellationToken ct)

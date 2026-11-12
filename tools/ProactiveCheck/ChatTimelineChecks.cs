@@ -1,9 +1,14 @@
+using System.Collections;
+using System.Reflection;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Mutter.Core.Models;
 using Mutter.Core.Proactive;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
+using Mutter.Web.Controllers;
+using Mutter.Web.Models;
 using Mutter.Web.Services;
 
 internal static partial class RuntimeChecks
@@ -35,13 +40,30 @@ internal static partial class RuntimeChecks
             "schema upgrade leaves old evaluation phases unknown rather than writing false");
         var reader = new ChatTimelineReader(db);
         var first = await reader.ReadAsync("GROUP", null, null, 1, 50, null);
-        Require(first.Items.Count == 50 && first.TotalCount == 73, "messages and silent decisions form one paged timeline");
+        Require(first.Items.Count == 50 && first.TotalCount == 73 && first.HasMore, "messages and silent decisions form one paged timeline");
+        var latest = await reader.ReadLatestAsync("GROUP", null, 50);
+        Require(latest.TotalCount is null && latest.Items.Count == 50 && latest.HasMore,
+            "the lightweight first page skips the exact total but still reports that older records exist");
+        Require(latest.Items.Select(i => $"{i.Kind}:{i.Id}").SequenceEqual(first.Items.Select(i => $"{i.Kind}:{i.Id}")),
+            "the lightweight first page keeps the exact page's order and decision linking");
+        var clamped = await reader.ReadLatestAsync("GROUP", null, 0);
+        Require(clamped.Items.Count == 1 && clamped.HasMore, "the reader clamps its own page size instead of returning an empty lightweight page with hasMore");
+        var frozenCount = await reader.CountAsync("GROUP", null, null, latest.Snapshot);
+        Require(frozenCount.TotalCount == 73 && frozenCount.Snapshot == latest.Snapshot,
+            "the deferred count uses the first page's frozen snapshot");
         var second = await reader.ReadAsync("GROUP", null, null, 2, 50, first.Snapshot);
         Require(second.Items.Count == 23 && !first.Items.Select(i => $"{i.Kind}:{i.Id}").Intersect(second.Items.Select(i => $"{i.Kind}:{i.Id}")).Any(), "pages do not overlap");
-        db.ChatMessages.Add(new ChatMessage { MessageId = "new-after-snapshot", GroupId = "GROUP", UserId = "x", UserName = "新消息", PlainText = "新增", CreatedAt = time.AddDays(1) });
+        var newArrival = new ChatMessage { MessageId = "new-after-snapshot", GroupId = "GROUP", UserId = "x", UserName = "新消息", PlainText = "新增", CreatedAt = time.AddDays(1) };
+        db.ChatMessages.Add(newArrival);
         await db.SaveChangesAsync();
         var frozen = await reader.ReadAsync("GROUP", null, null, 2, 50, first.Snapshot);
         Require(frozen.TotalCount == 73 && frozen.Items.Select(i => i.Id).SequenceEqual(second.Items.Select(i => i.Id)), "new arrivals do not shift older pages");
+        var frozenLatest = await reader.ReadLatestAsync("GROUP", null, 50);
+        Require(frozenLatest.Items[0].Id == newArrival.Id && frozenLatest.TotalCount is null,
+            "the lightweight page observes new arrivals without pretending to know their count");
+        Require((await reader.CountAsync("GROUP", null, null, first.Snapshot)).TotalCount == 73
+            && (await reader.CountAsync("GROUP", null, null, frozenLatest.Snapshot)).TotalCount == 74,
+            "deferred counts follow both an old snapshot and the newly opened range");
         Require((await reader.ReadAsync("GROUP", null, "历史关键字", 1, 50, null)).TotalCount == 1, "search reaches records beyond the first page");
         Require((await reader.ReadAsync("GROUP", "observe", "甲同学", 1, 50, null)).TotalCount == 72, "sender search composes with group and source filters");
         Require((await reader.ReadAsync("GROUP", null, "%_", 1, 50, null)).TotalCount == 1, "SQL wildcard characters are searched literally");
@@ -121,6 +143,45 @@ internal static partial class RuntimeChecks
         Require(decision.WindowSnapshotJson is not null && !decision.WindowSnapshotJson.Contains("temporary-image"),
             "temporary image addresses are not persisted in window snapshots");
         Require(await reader.DecisionAsync(long.MaxValue) is null, "missing old logs degrade without affecting messages");
+
+        // 轻量首屏不接受查找参数：直接构造控制器验证契约（Bad Result 不依赖 HttpContext）。
+        var controller = new ChatTimelineController(reader);
+        Require(await controller.Latest("GROUP", null, 50, "关键字") is { Result: BadRequestObjectResult },
+            "the lightweight endpoint rejects search explicitly instead of silently ignoring it");
+
+        // 取键与取行之间 DataRetentionService 可能已清理记录，键列表会引用不存在的行。
+        // 私有方法不改可见性，用反射构造含已删除行的键列表，回归“跳过而不是 KeyNotFound”。
+        var goneMessage = new ChatMessage { MessageId = "deleted-before-materialize", GroupId = "GROUP",
+            UserId = "x", UserName = "用户", PlainText = "已被清理", CreatedAt = time.AddMinutes(6) };
+        var goneLog = new ProactiveChatLogEntity { GroupId = "GROUP", EvaluatedAt = time.AddMinutes(6),
+            Outcome = ProactiveOutcomes.SkippedAiDeclined };
+        db.ChatMessages.Add(goneMessage);
+        db.ProactiveChatLogs.Add(goneLog);
+        await db.SaveChangesAsync();
+        var goneMessageId = goneMessage.Id;
+        var goneLogId = goneLog.Id;
+        db.ChatMessages.Remove(goneMessage);
+        db.ProactiveChatLogs.Remove(goneLog);
+        await db.SaveChangesAsync();
+        var memberFlags = BindingFlags.NonPublic | BindingFlags.Instance;
+        var keyType = typeof(ChatTimelineReader).GetNestedType("TimelineKey", memberFlags);
+        var materialize = typeof(ChatTimelineReader).GetMethod("MaterializeAsync", memberFlags);
+        Require(keyType is not null && materialize is not null, "the private materialize step remains reachable for the deleted-row regression");
+        object MakeKey(int kind, long id)
+        {
+            var key = Activator.CreateInstance(keyType!)!;
+            keyType!.GetProperty("Kind")!.SetValue(key, kind);
+            keyType.GetProperty("Id")!.SetValue(key, id);
+            keyType.GetProperty("Time")!.SetValue(key, time);
+            return key;
+        }
+        var keyList = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(keyType!))!;
+        keyList.Add(MakeKey(0, bot.Id)); keyList.Add(MakeKey(0, goneMessageId));
+        keyList.Add(MakeKey(1, decision.Id)); keyList.Add(MakeKey(1, goneLogId));
+        var materialized = await (Task<List<ChatTimelineItemDto>>)materialize!.Invoke(reader, [keyList, decision.Id, CancellationToken.None])!;
+        Require(materialized.Select(i => $"{i.Kind}:{i.Id}").SequenceEqual([$"message:{bot.Id}", $"decision:{decision.Id}"]),
+            "materializing a page skips rows deleted between the key and row queries instead of failing with KeyNotFound");
+
         Require(!ChatTimelineReader.TrySnapshot("1:-1", out _, out _) && !ChatTimelineReader.TrySnapshot("bad", out _, out _), "invalid pagination snapshots rejected");
         Require(await db.ChatMessages.AnyAsync(m => m.MessageId == "legacy-row" && m.PlainText == "合成旧数据"), "existing database content remains unchanged");
     }

@@ -41,7 +41,8 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          # Node 20 已于 2026-04 进入 EOL；22 是当前 LTS，满足 Playwright >=20 的要求。
+          node-version: '22'
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -65,3 +66,29 @@ jobs:
       - name: Build
         working-directory: web
         run: npm run build
+
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: 安装浏览器回归环境
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: 弹窗尺寸与离开确认回归
+        working-directory: web
+        run: npm run test:ui
+
+      # trace 只有失败时才保留，必须显式上传，否则 CI 日志里看不到现场。
+      - name: 上传浏览器回归产物
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: panel-browser-test-results
+          path: artifacts/panel-browser-tests
+          if-no-files-found: ignore
+          retention-days: 7

@@ -96,7 +96,12 @@ public class ActiveMessageService : IActiveMessageService
 
         using var serviceScope = _scopeFactory.CreateScope();
         var db = serviceScope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var config = await LoadLimitsAsync(serviceScope, ct);
+        var config = await LoadLimitsAsync(serviceScope, key, scope, ct);
+
+        // 主动通道总开关按生效配置判定（群已带 overrides，私聊用全局）；
+        // 服务自身把关，避免依赖调用方逐一自查。
+        if (!config.AllowActiveChannel)
+            return new ActiveMessageSendResult { Success = false, Reason = "active_channel_disabled" };
 
         var entity = await db.ActiveMessageQuotas
             .FirstOrDefaultAsync(q => q.Key == key && q.Scope == scope && q.Month == month, ct);
@@ -183,7 +188,7 @@ public class ActiveMessageService : IActiveMessageService
         var month = _clock.GetUtcNow().UtcDateTime.ToString("yyyy-MM");
         using var serviceScope = _scopeFactory.CreateScope();
         var db = serviceScope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var config = await LoadLimitsAsync(serviceScope, ct);
+        var config = await LoadLimitsAsync(serviceScope, key, scope, ct);
         var limits = ResolveLimits(scope, config);
 
         var entity = await db.ActiveMessageQuotas
@@ -224,10 +229,13 @@ public class ActiveMessageService : IActiveMessageService
         await db.SaveChangesAsync(ct);
     }
 
-    private static async Task<ProactiveChatConfig> LoadLimitsAsync(IServiceScope serviceScope, CancellationToken ct)
+    private static async Task<ProactiveChatConfig> LoadLimitsAsync(IServiceScope serviceScope, string key, string scope, CancellationToken ct)
     {
         var repo = serviceScope.ServiceProvider.GetRequiredService<IConfigRepository>();
-        return await repo.GetProactiveConfigAsync(ct);
+        var global = await repo.GetProactiveConfigAsync(ct);
+        return scope == ScopeGroup
+            ? global.WithOverrides((await repo.GetGroupConfigAsync(key, ct))?.ProactiveOverrides)
+            : global;
     }
 
     private static (int PerMinute, int PerDay, int AccountPerMinute) ResolveLimits(

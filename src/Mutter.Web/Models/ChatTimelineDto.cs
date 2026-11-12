@@ -5,9 +5,17 @@ namespace Mutter.Web.Models;
 public sealed class ChatTimelinePageDto
 {
     public List<ChatTimelineItemDto> Items { get; set; } = [];
-    public int TotalCount { get; set; }
+    /// <summary>精确总数；轻量首屏尚未计数时为 null，不能当作 0。</summary>
+    public int? TotalCount { get; set; }
     public int Page { get; set; }
     public int PageSize { get; set; }
+    public bool HasMore { get; set; }
+    public string Snapshot { get; set; } = string.Empty;
+}
+
+public sealed class ChatTimelineCountDto
+{
+    public int TotalCount { get; set; }
     public string Snapshot { get; set; } = string.Empty;
 }
 
