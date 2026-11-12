@@ -216,9 +216,9 @@
 | `dotnet build Mutter.sln -c Release` | 0 warning / 0 error |
 | `dotnet run --project tools/ProactiveCheck -c Release --no-build -- --logic-only` | 全部通过；含群级参数/预设、群级调度与投递限制、10 万消息时间线去重 |
 | 3 万消息 × 4 热群 × 48 次切换 | p50 9ms / p95 11ms / max 14ms；精确总数 32001 |
-| `cd web && npm test` | 审查时 43/43；修复并补用例后 64/64（见 8.6） |
+| `cd web && npm test` | 审查时 43/43；修复并补用例后 67/67（见 8.6） |
 | `cd web && npm run build` | 成功（约 7.4 秒） |
-| `cd web && npx playwright test` | 23/23 通过 |
+| `cd web && npx playwright test` | 审查时 23/23；最终 34/34（见 8.6） |
 | `git merge-tree --write-tree main HEAD` | exit 0，同一 tree `29b0908`，合并无冲突 |
 | `git show 6f86258 \| git patch-id --stable` 对比 aecf843 的 panel.css | 相同 patch-id，确认已逐字补回 |
 | 较新库副本的完整 ProactiveCheck | 第 1~6 段全部通过 |
@@ -326,9 +326,9 @@
 |---|---|
 | `dotnet build Mutter.sln -c Release` | 0 warning / 0 error |
 | `dotnet run --project tools/ProactiveCheck -c Release --no-build -- --logic-only` | 41/41 组通过（含聊天、择机覆盖/预设/调度、外搜 Key 归属、时间线规模） |
-| `cd web && npm test` | 64/64 通过 |
+| `cd web && npm test` | 67/67 通过 |
 | `cd web && npm run build` | 成功（约 6.8 秒） |
-| `cd web && npx playwright test` | 23/23 通过 |
+| `cd web && npx playwright test` | 34/34 通过 |
 | 3 万消息 × 4 热群 × 48 次切换 | p50 9ms / p95 11ms / max 13ms；精确总数 32001 |
 | `git merge main` | 无冲突，带入 `6953bf3` |
 | 合成 10 万消息 + 1 万留痕 | 首页 54ms；单群 11ms；来源 45–51ms；查找 92ms |
@@ -345,5 +345,6 @@
 | 界面收敛值被当作已经保存 | `ingestConfig` 保留服务器原值作为基线，精度或范围调整成为待确认草稿，允许保存并触发离开提醒；保存成功后才清除修改状态。真实 SFC setup 与浏览器回归覆盖 `0.75 → 0.8`、失败重试和保存后的状态。 |
 | 群记忆生效状态与运行时不同 | 全局记忆是可覆盖的默认值；先应用群级覆盖，再与群管理权限取 AND。后端自检穷举全局默认、群管理权限和三态覆盖的 12 种组合。 |
 | 快照内延迟消息重复增加总数 | 总数单独维护最近精确统计的快照与其后已计数的消息 ID，避免用当前页判断是否计过数；不推进快照的推送不取消或延后统计。状态测试覆盖旧消息、实时消息滑出当前页、乱序新消息和统计回读。 |
+| 实时日志多行正文错位、窄屏工具栏拥挤 | 日志行改为两列 grid，时间与级别对齐、分类与正文跨列自动换行；卡片改为纵向 flex 填满剩余高度，工具栏可换行，窄容器下关键词输入独占一行；新增日志布局与滚动/筛选/导出浏览器回归。 |
 
-验证：`dotnet build Mutter.sln --no-restore` 为 0 warning / 0 error；`ProactiveCheck --logic-only` 41/41 组通过；`npm test` 67/67；`npm run test:ui`（含构建）24/24。验证使用合成库与假 HTTP。
+验证：`dotnet build Mutter.sln --no-restore` 为 0 warning / 0 error；`ProactiveCheck --logic-only` 41/41 组通过；`npm test` 67/67；`npm run test:ui`（含构建）34/34。验证使用合成库与假 HTTP。
