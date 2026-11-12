@@ -972,32 +972,32 @@ const formError = computed(() =>
 const formatTokens = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '—'
 
 // 只取服务端可写字段；预设接口和 PUT /ai 共用同一份契约
-const configPayload = () => ({
-  apiBaseUrl: form.value.apiBaseUrl || '',
-  apiKey: form.value.apiKey || '',
-  modelName: form.value.modelName || '',
-  systemPrompt: form.value.systemPrompt || '',
-  personality: form.value.personality || '',
-  temperature: form.value.temperature ?? 0.7,
-  maxTokens: form.value.maxTokens ?? 2048,
-  maxContextMessages: form.value.maxContextMessages ?? 20,
-  contextWindowTokens: form.value.contextWindowTokens ?? 32768,
-  maxInputTokens: form.value.maxInputTokens ?? DEFAULT_INPUT_BUDGET,
-  groupMemoryInjectionEnabled: form.value.groupMemoryInjectionEnabled ?? true,
-  maxAttachedImages: form.value.maxAttachedImages ?? 3,
-  webSearchEnabled: !!form.value.webSearchEnabled,
-  webSearchEndpoint: form.value.webSearchEndpoint || '',
-  webSearchShape: form.value.webSearchShape || '',
-  webSearchImageMode: form.value.webSearchImageMode || 'auto',
+const configPayload = (config = form.value) => ({
+  apiBaseUrl: config.apiBaseUrl || '',
+  apiKey: config.apiKey || '',
+  modelName: config.modelName || '',
+  systemPrompt: config.systemPrompt || '',
+  personality: config.personality || '',
+  temperature: config.temperature ?? 0.7,
+  maxTokens: config.maxTokens ?? 2048,
+  maxContextMessages: config.maxContextMessages ?? 20,
+  contextWindowTokens: config.contextWindowTokens ?? 32768,
+  maxInputTokens: config.maxInputTokens ?? DEFAULT_INPUT_BUDGET,
+  groupMemoryInjectionEnabled: config.groupMemoryInjectionEnabled ?? true,
+  maxAttachedImages: config.maxAttachedImages ?? 3,
+  webSearchEnabled: !!config.webSearchEnabled,
+  webSearchEndpoint: config.webSearchEndpoint || '',
+  webSearchShape: config.webSearchShape || '',
+  webSearchImageMode: config.webSearchImageMode || 'auto',
   // 独立搜索服务整卡随表单一起提交（Key 打码值=不修改），预设快照继承同一字段
   externalSearch: {
-    enabled: !!form.value.externalSearch?.enabled,
-    provider: form.value.externalSearch?.provider || 'searxng',
-    baseUrl: form.value.externalSearch?.baseUrl || '',
-    apiKey: form.value.externalSearch?.apiKey || '',
-    maxResults: form.value.externalSearch?.maxResults ?? 5,
-    timeoutSeconds: form.value.externalSearch?.timeoutSeconds ?? 8,
-    fallbackToBuiltin: !!form.value.externalSearch?.fallbackToBuiltin
+    enabled: !!config.externalSearch?.enabled,
+    provider: config.externalSearch?.provider || 'searxng',
+    baseUrl: config.externalSearch?.baseUrl || '',
+    apiKey: config.externalSearch?.apiKey || '',
+    maxResults: config.externalSearch?.maxResults ?? 5,
+    timeoutSeconds: config.externalSearch?.timeoutSeconds ?? 8,
+    fallbackToBuiltin: !!config.externalSearch?.fallbackToBuiltin
   }
 })
 
@@ -1602,9 +1602,11 @@ const ingestConfig = (data) => {
   if (!data || typeof data !== 'object'
     || !Array.isArray(data.availableProviders) || !Array.isArray(data.availableCharacters)) return null
   const next = withExternalDefaults(data)
+  const savedPayload = JSON.stringify(configPayload(next))
   const converged = sanitizeAiSettingsForUi(next)
   form.value = next
-  baseline.value = JSON.stringify(configPayload())
+  // 界面收敛后的值属于待确认草稿，基线仍是服务器实际保存的值。
+  baseline.value = savedPayload
   return converged
 }
 
@@ -1619,7 +1621,7 @@ const load = async () => {
     selectedPresetId.value = null
     appliedPresetId.value = null
     loadError.value = false
-    if (converged) ElMessage.info('部分参数超出界面范围，已按可用值显示，请确认后保存')
+    if (converged) ElMessage.info('部分参数已按界面精度或范围调整，确认并保存后生效')
   } catch {
     loadError.value = true
     // API 层提示错误；读取失败时保留当前草稿，不开放空表单覆盖服务器配置。
@@ -1807,6 +1809,7 @@ const applyPresetById = async (id, fromManage = false) => {
     loadError.value = false
     if (fromManage) managePresetDialog.value = false
     ElMessage.success(`已应用预设「${p.name}」`)
+    if (converged) ElMessage.info('部分参数已按界面精度或范围调整，确认并保存后生效')
   } catch { /* API 层提示错误，应用失败时保留当前草稿。 */ }
   finally { applyingPreset.value = false }
 }

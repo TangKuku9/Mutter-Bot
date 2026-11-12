@@ -56,13 +56,12 @@ public sealed class ProactiveParametersController(AppDbContext db, IConfigReposi
         // 与 MessageRouter 的“无配置 @ 默认放行”一致：已知群没有配置行时按参与响应展示，不显示成停用。
         var isEnabled = group?.IsEnabled ?? true;
         // MemoryAllowed 只反映「群管理是否允许」，供面板区分提示来源；
-        // 全局记忆开关与群级择机覆盖的最终 AND 体现在 EffectiveConfig.MemoryInjectionEnabled。
+        // 全局默认经群级覆盖后，再与群管理权限取 AND，和工作流、状态接口保持一致。
         var memoryAllowed = group?.MemoryInjectionEnabled != false;
         var effective = global.WithOverrides(overrides);
         // EffectiveConfig 反映最终生效状态：总开关 + 群响应开关 + 参与择机开关的 AND。
         effective.Enabled = effective.Enabled && isEnabled && (group?.AiProactiveEnabled ?? false);
-        effective.MemoryInjectionEnabled = global.MemoryInjectionEnabled && memoryAllowed
-            && overrides.MemoryInjectionEnabled != false;
+        effective.MemoryInjectionEnabled = effective.MemoryInjectionEnabled && memoryAllowed;
         return Ok(new
         {
             GroupId = id, Name = known?.Name, IsEnabled = isEnabled,

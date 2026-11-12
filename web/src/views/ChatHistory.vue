@@ -63,6 +63,16 @@ const entries = computed(() => timelineEntries(items.value))
 const shortId = id => id ? `${id.slice(0, 8)}…` : '未记录群聊'
 let unsubscribe = null, timer = null, countTimer = null, calibrationTimer = null, disposed = false
 let pendingMessages = [], queuedRefresh = false, countRetries = 0
+// 最近一次精确总数覆盖的快照，与展示用的实时快照分开维护。
+// 快照外的新消息逐条去重，不能用“是否仍在当前页”判断是否已经计过数。
+let countedSnapshot = null
+const countedLiveMessages = new Set()
+const applyTotal = (value, atSnapshot) => {
+  total.value = Number.isInteger(value) ? value : null
+  countedSnapshot = total.value === null ? null : atSnapshot
+  countedLiveMessages.clear()
+  if (total.value !== null) countRetries = 0
+}
 const countRetryDelays = [5000, 10000]
 const onScroll = () => { const el = stream.value; if (el) following.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48 }
 const scrollToLatest = () => nextTick(() => { if (stream.value && following.value) stream.value.scrollTop = stream.value.scrollHeight })
@@ -95,9 +105,8 @@ const loadCount = async () => {
   try {
     await countRequest.run(signal => api.get('/chat/timeline/count', { params, signal, skipErrorMessage: true }), ({ data }) => {
       if (!disposed && page.value === 1 && key === countKey() && Number.isInteger(data.totalCount)) {
-        total.value = data.totalCount
+        applyTotal(data.totalCount, params.snapshot)
         countFailed.value = false
-        countRetries = 0
       }
     })
   } catch {
@@ -121,10 +130,14 @@ const mergeLiveMessage = (message, { scroll = true } = {}) => {
   if (!existed) {
     items.value = merged
     if (fullBefore) hasMore.value = true
-    // 已有精确总数时直接 +1，避免每条实时消息都把总数打回“统计中”；未知时交给重新调度的 count 补齐。
-    if (Number.isInteger(total.value)) total.value += 1
-    cancelCount()
-    scheduleCount(650)
+    const beyondCounted = advanceMessageSnapshot(countedSnapshot, message.id)
+    if (Number.isInteger(total.value) && beyondCounted && beyondCounted !== countedSnapshot
+      && !countedLiveMessages.has(key)) {
+      total.value += 1
+      countedLiveMessages.add(key)
+    }
+    // 老消息不推进快照，也不能把正在统计同一快照的请求或重试不断推迟。
+    if (advanced !== snapshot.value) { cancelCount(); scheduleCount(650) }
     if (scroll) scrollToLatest()
   }
   snapshot.value = advanced
@@ -152,9 +165,7 @@ const applyLatest = (data, group, filter, quiet) => {
   // 静默校准返回时用户可能已经开始阅读，不替换其正在看的内容。
   if (quiet && !canAutoRefresh()) { markNewRecords(); return }
   items.value = Array.isArray(data.items) ? data.items : []
-  total.value = Number.isInteger(data.totalCount) ? data.totalCount : null
-  // 新总数落定后重置 count 的重试预算，下一次统计从零开始退避。
-  if (total.value !== null) countRetries = 0
+  applyTotal(data.totalCount, data.snapshot || null)
   page.value = data.page || 1
   snapshot.value = data.snapshot || null
   hasMore.value = !!data.hasMore
@@ -182,8 +193,7 @@ const loadExact = async () => {
       if (!viewIsCurrent(group, filter) || keyword.value !== query || page.value !== wantedPage) return
       items.value = Array.isArray(data.items) ? data.items : []
       // 精确端点在深分页等场景可能返回未知总数；null 不能当成 0。
-      total.value = Number.isInteger(data.totalCount) ? data.totalCount : null
-      if (total.value !== null) countRetries = 0
+      applyTotal(data.totalCount, data.snapshot || null)
       page.value = data.page || 1
       snapshot.value = data.snapshot || null
       hasMore.value = !!data.hasMore
@@ -198,12 +208,12 @@ const loadCurrent = async ({ quiet = false } = {}) =>
   page.value === 1 && !keyword.value ? loadLatest({ quiet }) : loadExact()
 const resetView = () => {
   cancelAuto(); cancelCount(); queuedRefresh = false; pendingMessages = []
-  snapshot.value = null; page.value = 1; items.value = []; total.value = null; hasMore.value = false; countFailed.value = false; countRetries = 0
+  snapshot.value = null; page.value = 1; items.value = []; applyTotal(null, null); hasMore.value = false; countFailed.value = false; countRetries = 0
   following.value = true; hasNew.value = false; loadCurrent()
 }
 const refreshLatest = () => {
   cancelAuto(); cancelCount(); queuedRefresh = false; pendingMessages = []
-  snapshot.value = null; page.value = 1; total.value = null; hasMore.value = false; countFailed.value = false; countRetries = 0
+  snapshot.value = null; page.value = 1; applyTotal(null, null); hasMore.value = false; countFailed.value = false; countRetries = 0
   following.value = true; hasNew.value = false; loadCurrent()
 }
 const selectGroup = value => { if (groupId.value !== value) { groupId.value = value; resetView() } }

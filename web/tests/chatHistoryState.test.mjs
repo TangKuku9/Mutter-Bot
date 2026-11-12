@@ -258,6 +258,52 @@ test('连续实时消息期间总数保持精确，不再长期显示统计中',
   assert.equal(page.countFailed.value, false)
 })
 
+test('已计入快照和已滑出当前页的延迟推送不重复增加总数', async t => {
+  const { component: page, request, reply, tick, receive, requests } = await createPage(t)
+  await tick(300)
+  await reply(request('/chat/timeline/count'))
+  page.handleReceiveMessage(message(100))
+  assert.equal(page.total.value, 150)
+  assert.equal(page.snapshot.value, '150:0')
+  const countCalls = () => requests.filter(entry => entry.url.endsWith('/count')).length
+  const initialCalls = countCalls()
+  await tick(650)
+  assert.equal(countCalls(), initialCalls, '旧推送不额外触发同一快照的统计')
+
+  for (let id = 151; id <= 220; id++) receive(id)
+  assert.equal(page.total.value, 220)
+  assert.equal(page.items.value.some(row => row.id === 151), false)
+  page.handleReceiveMessage(message(151))
+  page.handleReceiveMessage(message(100))
+  assert.equal(page.total.value, 220, '新消息滑出当前页后仍保留计数去重信息')
+  await tick(650)
+  await reply(request('/chat/timeline/count'))
+  page.handleReceiveMessage(message(151))
+  assert.equal(page.total.value, 220, '回读后的快照包含之前的实时消息')
+  receive(221)
+  assert.equal(page.total.value, 221)
+})
+
+test('快照外的新消息乱序到达仍各计一次，且不延后已有统计', async t => {
+  const { component: page, request, reply, tick, receive, requests } = await createPage(t)
+  await tick(300)
+  await reply(request('/chat/timeline/count'))
+  receive(152)
+  await tick(600)
+  receive(151)
+  assert.equal(page.total.value, 152)
+  assert.equal(page.snapshot.value, '152:0')
+  await tick(50)
+  const count = request('/chat/timeline/count')
+  const calls = requests.filter(entry => entry.url.endsWith('/count')).length
+  page.handleReceiveMessage(message(100))
+  assert.equal(count.signal.aborted, false, '快照内推送不能取消已发出的统计')
+  await reply(count)
+  assert.equal(page.total.value, 152)
+  await tick(650)
+  assert.equal(requests.filter(entry => entry.url.endsWith('/count')).length, calls)
+})
+
 test('总数统计失败时按 5s/10s 退避自动重试，重置视图后重新预算', async t => {
   const { component: page, request, reply, tick, failures } = await createPage(t)
   failures.add('/chat/timeline/count')

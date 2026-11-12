@@ -121,6 +121,24 @@ internal static partial class RuntimeChecks
             && !overrideOff.GetProperty("EffectiveConfig").GetProperty("MemoryInjectionEnabled").GetBoolean(),
             "the proactive memory override alone turns off effective injection");
 
+        // 全局是可覆盖的默认值，群管理才是硬权限；覆盖 true 必须能打开默认关闭的记忆。
+        var memoryDefaults = await repo.GetProactiveConfigAsync();
+        foreach (var defaultEnabled in new[] { false, true })
+        foreach (var allowed in new[] { false, true })
+        foreach (var memoryOverride in new bool?[] { null, false, true })
+        {
+            memoryDefaults.MemoryInjectionEnabled = defaultEnabled;
+            await repo.SaveProactiveConfigAsync(memoryDefaults);
+            managed.MemoryInjectionEnabled = allowed;
+            managed.ProactiveOverrides!.MemoryInjectionEnabled = memoryOverride;
+            await repo.SaveGroupConfigAsync(managed);
+            var result = JsonBody(await api.GetGroup("FRESH", default));
+            Require(result.GetProperty("MemoryAllowed").GetBoolean() == allowed
+                && result.GetProperty("EffectiveConfig").GetProperty("MemoryInjectionEnabled").GetBoolean()
+                    == ((memoryOverride ?? defaultEnabled) && allowed),
+                "the effective group memory state matches runtime for every default, override and permission combination");
+        }
+
         // 预设：控制字符清洗、更新接口、重名校验、数量上限。
         var created = (ProactiveParametersController.PresetDto)((OkObjectResult)await api.CreatePreset(
             new() { Name = "\u0007晚\u000B间 ", Description = " 说明\t", Values = new() { Liveliness = 1 } }, default)).Value!;

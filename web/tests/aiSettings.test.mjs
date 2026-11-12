@@ -210,6 +210,24 @@ test('PUT 成功但回读失败后，表单不再永久假脏（P1-3）', async 
   assert.ok(messages.some(m => m.kind === 'warning' && m.text.includes('配置已保存，但读取最新配置失败')))
 })
 
+test('读取后的精度调整保留服务器基线，失败可重试，保存后才清除草稿', async t => {
+  const { component, state, writes, setSaveFailure } = await createPage(t)
+  state.config = { ...state.config, temperature: 0.75 }
+  await component.reloadConfig()
+  assert.equal(component.form.value.temperature, 0.8)
+  assert.equal(JSON.parse(component.baseline.value).temperature, 0.75)
+  assert.equal(component.isDirty.value, true)
+  assert.equal(component.formError.value, '')
+  setSaveFailure()
+  assert.equal(await component.save(), false)
+  assert.equal(component.isDirty.value, true)
+  assert.equal(state.config.temperature, 0.75)
+  assert.equal(await component.save(), true)
+  assert.equal(writes[0].body.temperature, 0.8)
+  assert.equal(state.config.temperature, 0.8)
+  assert.equal(component.isDirty.value, false)
+})
+
 test('畸形响应（缺少可选字段列表）不建立基线，也不清掉已有草稿', async t => {
   const { component, state } = await createPage(t, { initialModel: 'base-model' })
   state.config = {}

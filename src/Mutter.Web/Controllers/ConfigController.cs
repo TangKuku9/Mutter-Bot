@@ -293,19 +293,6 @@ public class ConfigController : ControllerBase
 
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
 
-        // 预设快照不保存外搜 Key；同服务商且同地址时沿用当前 Key 再校验，
-        // 否则提示用户补 Key，不能把已配置的服务应用成不可用。
-        if (config.ExternalSearch is { } presetExternal
-            && string.IsNullOrEmpty(presetExternal.ApiKey)
-            && entity is not null)
-        {
-            var currentExternal = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
-            if (string.Equals(currentExternal.Provider, presetExternal.Provider, StringComparison.Ordinal)
-                && string.Equals(currentExternal.BaseUrl.TrimEnd('/'), presetExternal.BaseUrl.TrimEnd('/'),
-                    StringComparison.Ordinal))
-                presetExternal.ApiKey = currentExternal.ApiKey;
-        }
-
         var error = NormalizeAndValidateAiConfigInput(config, allowMissingExternalSearchKey: true);
         if (error != null)
             return BadRequest(new { error = $"预设内容无效：{error}" });
@@ -316,9 +303,19 @@ public class ConfigController : ControllerBase
             _dbContext.AiConfigs.Add(entity);
         }
 
+        // 预设不保存搜索 Key，只能从完全相同的服务商和地址继承。
+        // 恢复时显式写入这个结果，不能再走普通表单“空值=沿用”的解析路径。
+        if (config.ExternalSearch is { } presetExternal)
+        {
+            var currentExternal = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
+            presetExternal.ApiKey = string.Equals(currentExternal.Provider, presetExternal.Provider, StringComparison.Ordinal)
+                && string.Equals(currentExternal.BaseUrl.TrimEnd('/'), presetExternal.BaseUrl.TrimEnd('/'), StringComparison.Ordinal)
+                    ? currentExternal.ApiKey : string.Empty;
+        }
+
         // 预设没存 Key 就沿用当前 Key；存了则整份恢复，换服务商时不用重填。
         var apiKey = string.IsNullOrEmpty(preset.ApiKey) ? entity.ApiKey : preset.ApiKey;
-        ApplyNormalizedAiConfigInput(entity, config, apiKey);
+        ApplyNormalizedAiConfigInput(entity, config, apiKey, applyingPreset: true);
         await _dbContext.SaveChangesAsync();
 
         return Ok(await BuildAiConfigDtoAsync());
@@ -432,7 +429,8 @@ public class ConfigController : ControllerBase
     /// <summary>
     /// 把已校验的配置写进实体。调用方负责先解析出要落库的 Key。
     /// </summary>
-    private void ApplyNormalizedAiConfigInput(AiConfigEntity entity, AiConfigInputDto dto, string apiKey)
+    private void ApplyNormalizedAiConfigInput(AiConfigEntity entity, AiConfigInputDto dto, string apiKey,
+        bool applyingPreset = false)
     {
         // 先记住旧目标：下面会立刻把 dto 值写进 entity，再比较就永远相等了。
         var previousBaseUrl = entity.ApiBaseUrl;
@@ -499,24 +497,27 @@ public class ConfigController : ControllerBase
             entity.WebSearchImageVerifiedAt = DateTime.UtcNow;
         }
 
-        ApplyExternalSearch(entity, dto.ExternalSearch);
+        ApplyExternalSearch(entity, dto.ExternalSearch, applyingPreset);
     }
 
     /// <summary>
     /// 外搜卡片落库。dto 为 null（面板没提交这块）时完全不动库值；
-    /// Key 按 provider 归属解析（<see cref="ResolveProviderAwareApiKey"/>）；服务商/地址/Key 任一变化即清空验证结论。
+    /// 普通保存按 provider 解析 Key；预设恢复使用调用方已按完整目标解析的 Key（空值也明确写空）。
+    /// 服务商/地址/Key 任一变化即清空验证结论。
     /// </summary>
-    private static void ApplyExternalSearch(AiConfigEntity entity, ExternalSearchInputDto? dto)
+    private static void ApplyExternalSearch(AiConfigEntity entity, ExternalSearchInputDto? dto, bool applyingPreset)
     {
         if (dto is null) return;
 
         var current = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
         // 双保险：面板路径已在 NormalizeAndValidateAiConfigInput 清过一次；这里兜底
         // 未来绕过校验的写路径，确保旧服务商的 Key/网关不会跟着换 provider 落库。
-        if (!string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal))
+        if (!applyingPreset && !string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal))
             ClearStaleExternalSearchSubmit(dto, current);
         // SearXNG 免 Key，落库清空，避免旧服务商的 Key 残留；其余服务按归属沿用或覆盖。
-        var resolvedKey = ResolveProviderAwareApiKey(current.Provider, current.ApiKey, dto.Provider, dto.ApiKey);
+        var resolvedKey = applyingPreset
+            ? ExternalSearchConfig.SupportsApiKey(dto.Provider) ? dto.ApiKey : string.Empty
+            : ResolveProviderAwareApiKey(current.Provider, current.ApiKey, dto.Provider, dto.ApiKey);
 
         var targetChanged = !string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal)
                             || !string.Equals(current.BaseUrl.TrimEnd('/'), dto.BaseUrl.TrimEnd('/'), StringComparison.Ordinal)
@@ -661,7 +662,7 @@ public class ConfigController : ControllerBase
 
     private static string SerializePresetConfig(AiPresetConfigDto config)
     {
-        // 双保险：主 Key 只走单独一列；外搜 Key 不进入预设快照，应用预设时沿用当前值。
+        // 双保险：主 Key 只走单独一列；外搜 Key 不进入预设快照，仅在应用到相同目标时继承。
         config.Version = 1;
         config.ApiKey = string.Empty;
         if (config.ExternalSearch is not null)

@@ -1,11 +1,11 @@
 import { test, expect } from '@playwright/test'
 import { normalizeAiSettings } from '../src/aiSettings.js'
 
-async function setup(page, { failLoad = false } = {}) {
+async function setup(page, { failLoad = false, initialTemperature = 0.7 } = {}) {
   const state = {
     config: normalizeAiSettings({
       apiBaseUrl: 'https://model.example.test/v1', apiKey: 'sk-****', modelName: 'daily-model', personality: 'helper',
-      defaultSystemPrompt: '内置提示词示例', webSearchEnabled: true,
+      defaultSystemPrompt: '内置提示词示例', webSearchEnabled: true, temperature: initialTemperature,
       availableProviders: [{ id: 'example', name: '示例服务商', apiBaseUrl: 'https://other.example.test/v1', defaultModel: 'other-model', keyHelpText: '服务商提供的密钥' }],
       availableCharacters: [{ name: 'helper', displayName: '默认助手', isCustom: false, description: '内置人设', systemPrompt: '友好回答' }],
       externalSearch: { baseUrl: 'https://search.example.test', apiKey: 'search-****' }
@@ -91,6 +91,19 @@ test('服务商填入、零值、草稿保存和重新加载', async ({ page }) 
   await page.getByRole('button', { name: '重新加载', exact: true }).click()
   await page.locator('.el-message-box').getByRole('button', { name: '放弃修改', exact: true }).click()
   await expect(page.getByLabel('模型名称', { exact: true })).toHaveValue('other-model')
+})
+
+test('界面精度调整后显示待保存，允许确认并保存调整值', async ({ page }) => {
+  const state = await setup(page, { initialTemperature: 0.75 })
+  await expect(page.getByLabel('回复随机度', { exact: true })).toHaveValue('0.8')
+  await expect(page.locator('.ai-save-status')).toHaveText('有修改未保存')
+  await expect(page.getByRole('button', { name: '保存配置', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: '重新加载', exact: true }).click()
+  await page.locator('.el-message-box').getByRole('button', { name: '继续编辑', exact: true }).click()
+  expect(state.config.temperature).toBe(0.75)
+  await page.getByRole('button', { name: '保存配置', exact: true }).click()
+  await expect(page.locator('.ai-save-status')).toHaveText('当前设置已保存')
+  expect(state.writes[0].body.temperature).toBe(0.8)
 })
 
 test('读取失败阻止空表单覆盖，保存失败保留草稿', async ({ page }) => {
