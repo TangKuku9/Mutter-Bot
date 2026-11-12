@@ -33,6 +33,7 @@ public sealed class ReplyDispatcher(
             var group = await configs.GetGroupConfigAsync(reply.GroupId!, ct);
             if (!limits.Enabled || group is not { IsEnabled: true, AiProactiveEnabled: true })
                 return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedDisabled);
+            limits = limits.WithOverrides(group.ProactiveOverrides);
             if (limits.IsQuietNow(clock.GetUtcNow().UtcDateTime))
                 return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedQuietHours);
             allowActive = limits.AllowActiveChannel;

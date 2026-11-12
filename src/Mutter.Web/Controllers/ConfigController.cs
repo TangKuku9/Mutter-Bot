@@ -126,7 +126,7 @@ public class ConfigController : ControllerBase
             _dbContext.AiConfigs.Add(entity);
         }
 
-        var error = NormalizeAndValidateAiConfigInput(dto);
+        var error = NormalizeAndValidateAiConfigInput(dto, ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson));
         if (error != null)
             return BadRequest(new { error });
 
@@ -293,20 +293,7 @@ public class ConfigController : ControllerBase
 
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
 
-        // 预设快照不保存外搜 Key；同服务商且同地址时沿用当前 Key 再校验，
-        // 否则提示用户补 Key，不能把已配置的服务应用成不可用。
-        if (config.ExternalSearch is { } presetExternal
-            && string.IsNullOrEmpty(presetExternal.ApiKey)
-            && entity is not null)
-        {
-            var currentExternal = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
-            if (string.Equals(currentExternal.Provider, presetExternal.Provider, StringComparison.Ordinal)
-                && string.Equals(currentExternal.BaseUrl.TrimEnd('/'), presetExternal.BaseUrl.TrimEnd('/'),
-                    StringComparison.Ordinal))
-                presetExternal.ApiKey = currentExternal.ApiKey;
-        }
-
-        var error = NormalizeAndValidateAiConfigInput(config);
+        var error = NormalizeAndValidateAiConfigInput(config, allowMissingExternalSearchKey: true);
         if (error != null)
             return BadRequest(new { error = $"预设内容无效：{error}" });
 
@@ -316,9 +303,19 @@ public class ConfigController : ControllerBase
             _dbContext.AiConfigs.Add(entity);
         }
 
+        // 预设不保存搜索 Key，只能从完全相同的服务商和地址继承。
+        // 恢复时显式写入这个结果，不能再走普通表单“空值=沿用”的解析路径。
+        if (config.ExternalSearch is { } presetExternal)
+        {
+            var currentExternal = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
+            presetExternal.ApiKey = string.Equals(currentExternal.Provider, presetExternal.Provider, StringComparison.Ordinal)
+                && string.Equals(currentExternal.BaseUrl.TrimEnd('/'), presetExternal.BaseUrl.TrimEnd('/'), StringComparison.Ordinal)
+                    ? currentExternal.ApiKey : string.Empty;
+        }
+
         // 预设没存 Key 就沿用当前 Key；存了则整份恢复，换服务商时不用重填。
         var apiKey = string.IsNullOrEmpty(preset.ApiKey) ? entity.ApiKey : preset.ApiKey;
-        ApplyNormalizedAiConfigInput(entity, config, apiKey);
+        ApplyNormalizedAiConfigInput(entity, config, apiKey, applyingPreset: true);
         await _dbContext.SaveChangesAsync();
 
         return Ok(await BuildAiConfigDtoAsync());
@@ -338,8 +335,13 @@ public class ConfigController : ControllerBase
     /// <summary>
     /// 校验并就地裁剪可写配置。PUT /ai 与预设的创建/覆盖/应用共用，
     /// 防止几条写入路径对同一个字段给出不同结论。
+    /// <paramref name="currentExternal"/> 仅 PUT /ai 传入（当前已保存的外搜配置）：
+    /// 服务商变更时清掉「沿用旧服务商」的 Key/地址提交，让必填校验生效；
+    /// <paramref name="allowMissingExternalSearchKey"/> 仅应用预设时传入：
+    /// 预设不含外搜 Key，允许先应用配置（面板提示重填），避免目标服务商变化时整份预设无法应用。
     /// </summary>
-    private static string? NormalizeAndValidateAiConfigInput(AiConfigInputDto dto)
+    private static string? NormalizeAndValidateAiConfigInput(AiConfigInputDto dto,
+        ExternalSearchConfig? currentExternal = null, bool allowMissingExternalSearchKey = false)
     {
         dto.ApiBaseUrl = (dto.ApiBaseUrl ?? string.Empty).Trim();
         dto.ApiKey = (dto.ApiKey ?? string.Empty).Trim();
@@ -388,6 +390,13 @@ public class ConfigController : ControllerBase
                 return $"未知的搜索服务商：{external.Provider}";
             external.BaseUrl = (external.BaseUrl ?? string.Empty).Trim();
             external.ApiKey = (external.ApiKey ?? string.Empty).Trim();
+
+            // 服务商变更时，空值/旧打码 Key 与旧网关地址都不代表「沿用」：
+            // 一律置空，让启用状态下的必填校验生效，避免旧密钥/旧网关被发给新服务商。
+            if (currentExternal is { } current
+                && !string.Equals(current.Provider, external.Provider, StringComparison.Ordinal))
+                ClearStaleExternalSearchSubmit(external, current);
+
             if (external.BaseUrl.Length > 0)
             {
                 // 只放行 http/https，与运行时 RequireHttpUrl 同一条规则
@@ -405,7 +414,9 @@ public class ConfigController : ControllerBase
                         ? "自定义搜索通道必须填写服务地址"
                         : "SearXNG 必须填写实例地址";
                 // Key 必填项：SearXNG 免 Key，自定义通道选填，其余必须有 Key（打码值视为已配置）。
-                if (ExternalSearchConfig.RequiresApiKey(external.Provider) && external.ApiKey.Length == 0)
+                // 应用预设时预设本身从不携带外搜 Key，允许先落库再在面板补填。
+                if (!allowMissingExternalSearchKey
+                    && ExternalSearchConfig.RequiresApiKey(external.Provider) && external.ApiKey.Length == 0)
                     return $"{external.Provider} 需要 API Key";
             }
             external.MaxResults = Math.Clamp(external.MaxResults, 1, ExternalSearchConfig.CeilingMaxResults);
@@ -418,7 +429,8 @@ public class ConfigController : ControllerBase
     /// <summary>
     /// 把已校验的配置写进实体。调用方负责先解析出要落库的 Key。
     /// </summary>
-    private void ApplyNormalizedAiConfigInput(AiConfigEntity entity, AiConfigInputDto dto, string apiKey)
+    private void ApplyNormalizedAiConfigInput(AiConfigEntity entity, AiConfigInputDto dto, string apiKey,
+        bool applyingPreset = false)
     {
         // 先记住旧目标：下面会立刻把 dto 值写进 entity，再比较就永远相等了。
         var previousBaseUrl = entity.ApiBaseUrl;
@@ -485,25 +497,27 @@ public class ConfigController : ControllerBase
             entity.WebSearchImageVerifiedAt = DateTime.UtcNow;
         }
 
-        ApplyExternalSearch(entity, dto.ExternalSearch);
+        ApplyExternalSearch(entity, dto.ExternalSearch, applyingPreset);
     }
 
     /// <summary>
     /// 外搜卡片落库。dto 为 null（面板没提交这块）时完全不动库值；
-    /// Key 沿用「打码值=未修改」规则；服务商/地址/Key 任一变化即清空验证结论。
+    /// 普通保存按 provider 解析 Key；预设恢复使用调用方已按完整目标解析的 Key（空值也明确写空）。
+    /// 服务商/地址/Key 任一变化即清空验证结论。
     /// </summary>
-    private static void ApplyExternalSearch(AiConfigEntity entity, ExternalSearchInputDto? dto)
+    private static void ApplyExternalSearch(AiConfigEntity entity, ExternalSearchInputDto? dto, bool applyingPreset)
     {
         if (dto is null) return;
 
         var current = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
-        // SearXNG 免 Key，落库清空，避免旧服务商的 Key 残留；其余服务（含自定义通道）
-        // 沿用「打码值=未修改」。
-        var resolvedKey = !ExternalSearchConfig.SupportsApiKey(dto.Provider)
-            ? string.Empty
-            : string.IsNullOrEmpty(dto.ApiKey) && current.ApiKey.Length > 0
-                ? current.ApiKey
-                : ResolveSubmittedApiKey(current.ApiKey, dto.ApiKey);
+        // 双保险：面板路径已在 NormalizeAndValidateAiConfigInput 清过一次；这里兜底
+        // 未来绕过校验的写路径，确保旧服务商的 Key/网关不会跟着换 provider 落库。
+        if (!applyingPreset && !string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal))
+            ClearStaleExternalSearchSubmit(dto, current);
+        // SearXNG 免 Key，落库清空，避免旧服务商的 Key 残留；其余服务按归属沿用或覆盖。
+        var resolvedKey = applyingPreset
+            ? ExternalSearchConfig.SupportsApiKey(dto.Provider) ? dto.ApiKey : string.Empty
+            : ResolveProviderAwareApiKey(current.Provider, current.ApiKey, dto.Provider, dto.ApiKey);
 
         var targetChanged = !string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal)
                             || !string.Equals(current.BaseUrl.TrimEnd('/'), dto.BaseUrl.TrimEnd('/'), StringComparison.Ordinal)
@@ -528,9 +542,61 @@ public class ConfigController : ControllerBase
     private static string ResolveSubmittedApiKey(string? currentKey, string? submittedKey)
     {
         currentKey ??= string.Empty;
-        if (string.IsNullOrWhiteSpace(submittedKey) || submittedKey == MaskApiKey(currentKey))
+        if (string.IsNullOrWhiteSpace(submittedKey) || IsMaskedKey(currentKey, submittedKey))
             return currentKey;
         return submittedKey;
+    }
+
+    /// <summary>
+    /// 是否为当前 Key 的“打码值”。同时接受旧版 9–12 位 Key 的 4+****+4 打码，
+    /// 避免升级前打开的旧页面把打码文本当成新 Key 写回。
+    /// </summary>
+    private static bool IsMaskedKey(string currentKey, string submittedKey)
+    {
+        if (currentKey.Length == 0) return false;
+        if (submittedKey == MaskApiKey(currentKey)) return true;
+        // 旧规则：>8 位显示前 4 后 4；仅 9–12 位的结果与新版不同。
+        return currentKey.Length is > 8 and <= 12
+               && submittedKey == $"{currentKey[..4]}****{currentKey[^4..]}";
+    }
+
+    /// <summary>
+    /// 按 provider 归属解析提交的外搜 Key（纯函数，供落库/探测与自检复用）：
+    /// 同一服务商时空值/打码值=沿用已存 Key；换了服务商时空值或等于旧 Key 打码值的提交一律解析为空，
+    /// 绝不把旧服务商的真实 Key 发给新服务商；SearXNG 免 Key，恒为空。
+    /// </summary>
+    internal static string ResolveProviderAwareApiKey(
+        string? currentProvider, string? currentKey, string? submittedProvider, string? submittedKey)
+    {
+        currentKey ??= string.Empty;
+        submittedKey ??= string.Empty;
+        if (!ExternalSearchConfig.SupportsApiKey(submittedProvider))
+            return string.Empty;
+        var sameProvider = string.Equals(currentProvider ?? string.Empty, submittedProvider ?? string.Empty, StringComparison.Ordinal);
+        if (!sameProvider)
+        {
+            if (string.IsNullOrWhiteSpace(submittedKey)
+                || IsMaskedKey(currentKey, submittedKey))
+                return string.Empty;
+            return submittedKey;
+        }
+        return ResolveSubmittedApiKey(currentKey, submittedKey);
+    }
+
+    /// <summary>
+    /// 服务商变更时清掉「沿用旧服务商」的提交（就地修改，纯函数可测）：
+    /// Key 为空或等于旧 Key 打码值 → 置空（启用时的必填校验会要求重填）；
+    /// 地址与旧网关相同（TrimEnd('/') 比较）→ 置空（官方端点自动用默认，避免商用服务打到旧网关）。
+    /// provider 未变时不做任何事。
+    /// </summary>
+    internal static void ClearStaleExternalSearchSubmit(ExternalSearchInputDto submitted, ExternalSearchConfig current)
+    {
+        if (string.IsNullOrWhiteSpace(submitted.ApiKey)
+            || IsMaskedKey(current.ApiKey, submitted.ApiKey))
+            submitted.ApiKey = string.Empty;
+        if (submitted.BaseUrl.TrimEnd('/').Length > 0
+            && string.Equals(current.BaseUrl.TrimEnd('/'), submitted.BaseUrl.TrimEnd('/'), StringComparison.Ordinal))
+            submitted.BaseUrl = string.Empty;
     }
 
     private static ExternalSearchInputDto ToExternalSearchInput(ExternalSearchConfig config) => new()
@@ -596,7 +662,7 @@ public class ConfigController : ControllerBase
 
     private static string SerializePresetConfig(AiPresetConfigDto config)
     {
-        // 双保险：主 Key 只走单独一列；外搜 Key 不进入预设快照，应用预设时沿用当前值。
+        // 双保险：主 Key 只走单独一列；外搜 Key 不进入预设快照，仅在应用到相同目标时继承。
         config.Version = 1;
         config.ApiKey = string.Empty;
         if (config.ExternalSearch is not null)
@@ -664,6 +730,10 @@ public class ConfigController : ControllerBase
             PersonalityMissing = personalityMissing,
             WebSearchEnabled = config.WebSearchEnabled,
             WebSearchShape = config.WebSearchShape ?? string.Empty,
+            // 外搜卡片信息供应用确认时提示「需重填搜索 Key」；快照本身不含外搜 Key
+            ExternalSearchEnabled = config.ExternalSearch?.Enabled ?? false,
+            ExternalSearchProvider = config.ExternalSearch?.Provider ?? string.Empty,
+            ExternalSearchBaseUrl = config.ExternalSearch?.BaseUrl ?? string.Empty,
             HasApiKey = !string.IsNullOrEmpty(entity.ApiKey),
             IsValid = valid,
             CreatedAt = entity.CreatedAt,
@@ -691,6 +761,9 @@ public class ConfigController : ControllerBase
             PersonalityMissing = summary.PersonalityMissing,
             WebSearchEnabled = summary.WebSearchEnabled,
             WebSearchShape = summary.WebSearchShape,
+            ExternalSearchEnabled = summary.ExternalSearchEnabled,
+            ExternalSearchProvider = summary.ExternalSearchProvider,
+            ExternalSearchBaseUrl = summary.ExternalSearchBaseUrl,
             HasApiKey = summary.HasApiKey,
             IsValid = summary.IsValid,
             CreatedAt = summary.CreatedAt,
@@ -758,11 +831,14 @@ public class ConfigController : ControllerBase
         dto.MaxResults = Math.Clamp(dto.MaxResults, 1, ExternalSearchConfig.CeilingMaxResults);
         dto.TimeoutSeconds = Math.Clamp(dto.TimeoutSeconds, 1, ExternalSearchConfig.CeilingTimeoutSeconds);
 
-        // 探测也要求配置完整：地址必填项与 Key 必填项按服务商能力判断
-        //（打码值视为未修改，回库里取）。
+        // 探测也要求配置完整：地址必填项与 Key 必填项按服务商能力判断。
+        // Key 按 provider 归属解析：同一服务商时空值/打码值=沿用已存 Key；
+        // 换了服务商时空值或旧打码值/旧网关地址一律视为未提交，由 IsConfigured 返回 400 提示重填。
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync(ct);
         var current = ExternalSearchJsonCodec.Decode(entity?.ExternalSearchJson);
-        var apiKey = ResolveSubmittedApiKey(current.ApiKey, dto.ApiKey);
+        if (!string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal))
+            ClearStaleExternalSearchSubmit(dto, current);
+        var apiKey = ResolveProviderAwareApiKey(current.Provider, current.ApiKey, dto.Provider, dto.ApiKey);
 
         var probeConfig = new AiConfig
         {
@@ -819,9 +895,11 @@ public class ConfigController : ControllerBase
         if (verdict == "verified" && entity is not null)
         {
             var saved = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
+            // SearXNG 免 Key：库里可能残留旧服务商 Key，比对时忽略，避免验证时间永远无法记录
+            var savedKey = ExternalSearchConfig.SupportsApiKey(saved.Provider) ? saved.ApiKey : string.Empty;
             var matchesForm = string.Equals(saved.Provider, dto.Provider, StringComparison.Ordinal)
                               && string.Equals(saved.BaseUrl.TrimEnd('/'), dto.BaseUrl.TrimEnd('/'), StringComparison.Ordinal)
-                              && string.Equals(saved.ApiKey, apiKey, StringComparison.Ordinal);
+                              && string.Equals(savedKey, apiKey, StringComparison.Ordinal);
             if (matchesForm)
             {
                 entity.ExternalSearchJson = ExternalSearchJsonCodec.Encode(saved with { VerifiedAt = DateTime.UtcNow });
@@ -1190,9 +1268,13 @@ public class ConfigController : ControllerBase
             string.Equals(aiConfig.Personality, name, StringComparison.OrdinalIgnoreCase))
             aiConfig.Personality = string.Empty;
 
+        // SQLite 的 ==/LIKE 默认区分大小写，而人设标识按 OrdinalIgnoreCase 语义管理：
+        // 先取出带人设的行，在内存中做大小写不敏感比较，避免大小写变体残留引用。
         var groupConfigs = await _dbContext.GroupConfigs
-            .Where(g => g.ActiveCharacter == name).ToListAsync();
-        foreach (var g in groupConfigs)
+            .Where(g => g.ActiveCharacter != null)
+            .ToListAsync();
+        foreach (var g in groupConfigs.Where(g =>
+                     string.Equals(g.ActiveCharacter, name, StringComparison.OrdinalIgnoreCase)))
             g.ActiveCharacter = null;
 
         // 预设里引用同一人设的也清掉，否则应用预设时那个标识会被当成自由文本性格塞进提示词。
@@ -1259,15 +1341,15 @@ public class ConfigController : ControllerBase
 
     /// <summary>
     /// 将 ApiKey 打码，仅显示前4位和后4位，中间用 **** 替代。
-    /// 长度不足8位时全部打码为 ****。
+    /// 长度不足12位时全部打码为 ****（9 位 Key 只隐藏 1 位等于没打码）。
     /// </summary>
     private static string MaskApiKey(string? apiKey)
     {
         if (string.IsNullOrEmpty(apiKey))
             return string.Empty;
 
-        // 短 Key（<=8字符）无法安全分段展示，统一返回 ****
-        if (apiKey.Length <= 8)
+        // 短 Key（<=12字符）分段展示会泄露过多内容，统一返回 ****
+        if (apiKey.Length <= 12)
             return "****";
 
         // 格式：前4位 + **** + 后4位，例如 "sk-a****xyz"

@@ -121,6 +121,6 @@ onUnmounted(() => qqRequest.abort())
   .stat-grid { gap: 12px; margin-bottom: 16px; }
   .stat-label { font-size: 12px; }
   .stat-label .el-icon { display: none; }
-  .stat-value { font-size: 25px; }
+  .stat-value { font-size: clamp(20px, 6.4vw, 25px); }
 }
 </style>

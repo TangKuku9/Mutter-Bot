@@ -99,6 +99,90 @@ internal static partial class RuntimeChecks
             $"searched timeline must stay bounded (took {searchElapsed.ElapsedMilliseconds} ms)");
         Console.WriteLine(
             $"      合成 10 万消息 + 1 万留痕：首页 {elapsed.ElapsedMilliseconds} ms；单群 {groupElapsed.ElapsedMilliseconds} ms；来源 {sourceElapsed.ElapsedMilliseconds} ms；查找 {searchElapsed.ElapsedMilliseconds} ms");
+
+        // 生产上的卡顿来自少数热群，而不是消息均匀分散。这里额外构造 4 个各 3 万条消息的热群，
+        // 并混入直接关联、回执映射和没有对应消息的留痕，验证切换首屏不等待全量统计。
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "ChatMessages"
+                ("MessageId","ChatType","GroupId","UserId","UserName","PlainText","RawSegmentsJson",
+                 "HasImage","HasAtBot","IsBotMessage","IsProactive","CreatedAt")
+            WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 30000),
+                hot(g) AS (VALUES(0),(1),(2),(3))
+            SELECT 'hot-'||g||'-'||i, 0, 'HOT-'||g,
+                   CASE WHEN i%20=0 THEN 'BOT' ELSE 'hot-user-'||(i%300) END,
+                   CASE WHEN i%20=0 THEN 'Bot' ELSE '热群用户'||(i%300) END,
+                   '热群第'||i||'条消息：用于验证数万条记录下的切换体验',
+                   '', 0, 0, CASE WHEN i%20=0 THEN 1 ELSE 0 END,
+                   CASE WHEN i%20=0 THEN 1 ELSE 0 END,
+                   datetime('2026-09-01 00:00:00', '+'||(g*3600)||' seconds', '+'||(i*2)||' seconds')
+            FROM hot CROSS JOIN n;
+            """);
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "OutgoingReplies"
+                ("Id","GroupId","BotId","Content","IsProactive","PromptTokens","CompletionTokens",
+                 "State","PlatformMessageId","CreatedAt")
+            WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 30000),
+                hot(g) AS (VALUES(0),(1),(2),(3))
+            SELECT 'hot-'||g||'-'||i, 'HOT-'||g, 'BOT', '热群主动回复', 1, 10, 20, 'sent',
+                   'p-hot-'||g||'-'||i,
+                   datetime('2026-09-01 00:00:00', '+'||(g*3600)||' seconds', '+'||(i*2)||' seconds')
+            FROM hot CROSS JOIN n WHERE i%20=0;
+            """);
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "ProactiveChatLogs"
+                ("GroupId","EvaluatedAt","MessageCount","DetailVersion","WindowSnapshotJson","ImageCount",
+                 "MemoryCount","MemoryPromptChars","Outcome","ShouldSpeak","Topic","Line","Reason","Detail",
+                 "SentMessageId","Model","PromptTokens","CompletionTokens","SearchQuery","SearchUsed",
+                 "SpeechPromptTokens","SpeechCompletionTokens")
+            WITH RECURSIVE n(j) AS (SELECT 1 UNION ALL SELECT j+1 FROM n WHERE j < 4000),
+                hot(g) AS (VALUES(0),(1),(2),(3))
+            SELECT 'HOT-'||g,
+                   datetime('2026-09-01 00:00:00', '+'||(g*3600)||' seconds', '+'||(j*10)||' seconds'),
+                   12, 1, NULL, 0, 0, 0,
+                   CASE WHEN j%4<2 THEN 'sent_active' ELSE 'skipped_cooldown' END,
+                   CASE WHEN j%4<2 THEN 1 ELSE 0 END,
+                   '热群话题'||j, CASE WHEN j%4<2 THEN '热群回复'||j ELSE NULL END,
+                   '热群第'||j||'条理由', NULL,
+                   CASE WHEN j%4=0 THEN 'hot-'||g||'-'||(20*((j/4)%1500))
+                        WHEN j%4=1 THEN 'p-hot-'||g||'-'||(20*((j/4)%1500))
+                        ELSE NULL END,
+                   'synthetic-model', 100, 50, NULL, 0, 0, 0
+            FROM hot CROSS JOIN n;
+            """);
+        db.ChangeTracker.Clear();
+
+        using var hotCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var hotExact = await reader.ReadAsync("HOT-0", null, null, 1, 50, null, hotCts.Token);
+        var hotLatest = await reader.ReadLatestAsync("HOT-0", null, 50, hotCts.Token);
+        Require(hotLatest.TotalCount is null && hotLatest.Items.Count == 50 && hotLatest.HasMore,
+            "hot-group first page skips the exact total and still exposes older records");
+        Require(hotLatest.Items.Select(i => $"{i.Kind}:{i.Id}").SequenceEqual(hotExact.Items.Select(i => $"{i.Kind}:{i.Id}")),
+            "hot-group lightweight page preserves exact ordering and decision attachment");
+        var hotCount = await reader.CountAsync("HOT-0", null, null, hotLatest.Snapshot, hotCts.Token);
+        Require(hotCount.TotalCount == hotExact.TotalCount,
+            "deferred count for a hot group matches the exact pagination total");
+
+        var hotGroups = new[] { "HOT-0", "HOT-1", "HOT-2", "HOT-3" };
+        foreach (var hotGroup in hotGroups) _ = await reader.ReadLatestAsync(hotGroup, null, 50, hotCts.Token);
+        var switchSamples = new List<double>();
+        for (var round = 0; round < 12; round++)
+            foreach (var hotGroup in hotGroups)
+            {
+                var sample = Stopwatch.StartNew();
+                var pageResult = await reader.ReadLatestAsync(hotGroup, null, 50, hotCts.Token);
+                sample.Stop();
+                Require(pageResult.Items.Count == 50 && pageResult.Items.All(i => i.GroupId == hotGroup),
+                    "rapid hot-group switching returns only the selected group's latest page");
+                switchSamples.Add(sample.Elapsed.TotalMilliseconds);
+            }
+        switchSamples.Sort();
+        var p50 = switchSamples[(int)Math.Ceiling(switchSamples.Count * 0.50) - 1];
+        var p95 = switchSamples[(int)Math.Ceiling(switchSamples.Count * 0.95) - 1];
+        var max = switchSamples[^1];
+        Require(p95 < 250 && max < 1000,
+            $"hot-group switching must stay responsive (p50 {p50:F0} ms, p95 {p95:F0} ms, max {max:F0} ms)");
+        Console.WriteLine(
+            $"      4 个 3 万消息热群 × 48 次切换：p50 {p50:F0} ms；p95 {p95:F0} ms；max {max:F0} ms；精确总数 {hotCount.TotalCount} 条");
     }
 
     private static async Task UsageLedgerAsync()

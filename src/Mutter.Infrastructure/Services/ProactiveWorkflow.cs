@@ -57,6 +57,7 @@ public sealed class ProactiveWorkflow
             await WriteLogAsync(window, new LogNote(ProactiveOutcomes.SkippedDisabled), ct);
             return;
         }
+        config = config.WithOverrides(group.ProactiveOverrides);
         var blocked = _observe.BlockReason(window.GroupId, config, _clock.GetUtcNow().UtcDateTime);
         if (blocked is not null)
         {

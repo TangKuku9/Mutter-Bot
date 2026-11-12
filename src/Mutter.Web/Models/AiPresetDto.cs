@@ -21,6 +21,16 @@ public class AiPresetSummaryDto
     public bool PersonalityMissing { get; set; }
     public bool WebSearchEnabled { get; set; }
     public string WebSearchShape { get; set; } = string.Empty;
+
+    /// <summary>快照中的独立搜索开关。预设不含外搜 Key：开启且目标与当前不同时，应用后需重填搜索 Key。</summary>
+    public bool ExternalSearchEnabled { get; set; }
+
+    /// <summary>快照中的搜索服务商 id。</summary>
+    public string ExternalSearchProvider { get; set; } = string.Empty;
+
+    /// <summary>快照中的搜索服务地址。</summary>
+    public string ExternalSearchBaseUrl { get; set; } = string.Empty;
+
     public bool HasApiKey { get; set; }
     public bool IsValid { get; set; } = true;
     public DateTime CreatedAt { get; set; }

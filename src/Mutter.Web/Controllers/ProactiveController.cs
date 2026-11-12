@@ -6,6 +6,7 @@ using Mutter.Core.Proactive;
 using Mutter.Core.Services;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
+using Mutter.Infrastructure.Repositories;
 
 namespace Mutter.Web.Controllers;
 
@@ -248,6 +249,11 @@ public class ProactiveController : ControllerBase
             .Where(g => g.AiProactiveEnabled && g.IsEnabled)
             .Select(g => g.GroupId)
             .ToListAsync(ct);
+        // 群级有效参数随群取：待评估列表与配额展示都用生效值，不再与全局值混用。
+        var overridesByGroup = await _db.GroupConfigs.AsNoTracking()
+            .Where(g => g.AiProactiveEnabled && g.IsEnabled)
+            .Select(g => new { g.GroupId, g.ProactiveOverridesJson, g.MemoryInjectionEnabled })
+            .ToDictionaryAsync(g => g.GroupId, g => new { g.ProactiveOverridesJson, g.MemoryInjectionEnabled }, ct);
 
         // 今天有多少次判定真的带了群记忆。留痕里已经有每次的记录，这里给一个一眼能看的数，
         // 否则"记忆到底有没有在工作"只能去翻日志或读代码。
@@ -261,6 +267,12 @@ public class ProactiveController : ControllerBase
         foreach (var groupId in participating)
         {
             var quota = await _activeMessage.GetGroupQuotaStatusAsync(groupId, ct);
+            // 该群的生效参数（全局 + 群级覆盖 + 群管理记忆开关），供面板区分「全局值」与「本群实际值」。
+            var groupRow = overridesByGroup.GetValueOrDefault(groupId);
+            var effective = config.WithOverrides(
+                ProactiveOverridesCodec.Decode(groupRow?.ProactiveOverridesJson));
+            effective.MemoryInjectionEnabled = effective.MemoryInjectionEnabled
+                && groupRow?.MemoryInjectionEnabled != false;
             quotas.Add(new
             {
                 GroupId = groupId,
@@ -270,13 +282,32 @@ public class ProactiveController : ControllerBase
                 quota.SentLastMinute,
                 quota.MinuteQuota,
                 quota.Rejected,
-                quota.LastSentAt
+                quota.LastSentAt,
+                Effective = new
+                {
+                    effective.WindowSeconds,
+                    effective.CooldownMinutes,
+                    effective.MaxPerGroupPerDay,
+                    effective.QuietStartHour,
+                    effective.QuietEndHour,
+                    effective.Liveliness,
+                    effective.WebSearchEnabled,
+                    effective.MemoryInjectionEnabled,
+                    effective.AllowActiveChannel,
+                    effective.ActivePerGroupPerMinute,
+                    effective.ActivePerGroupPerDay
+                }
             });
         }
 
         var events = _gateway.EventCounts;
         events.TryGetValue("GROUP_MESSAGE_CREATE", out var fullMode);
         events.TryGetValue("GROUP_AT_MESSAGE_CREATE", out var atMode);
+
+        // 待评估窗口只列真正会参与评估的群：全局开启 + 群响应开启 + 参与择机。
+        var pendingList = config.Enabled
+            ? _observe.PendingWindows().Where(p => participating.Contains(p.GroupId)).ToList()
+            : new List<(string GroupId, int Pending)>();
 
         var hint = fullMode > 0
             ? $"全量群消息已到达 {fullMode} 条，围观链路正常"
@@ -304,7 +335,7 @@ public class ProactiveController : ControllerBase
             TodayEvaluations = sinceRows.Sum(r => r.Count),
             TodayDecisions = todayDecisions,
             Quotas = quotas,
-            PendingWindows = _observe.PendingWindows()
+            PendingWindows = pendingList
                 .Select(p => new
                 {
                     GroupId = p.GroupId,

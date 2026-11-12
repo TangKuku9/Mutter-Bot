@@ -18,4 +18,9 @@ defineProps({
 }
 .q:hover { color: var(--panel-accent-text); border-color: var(--panel-accent-text); background: var(--panel-accent-soft); }
 .q:focus-visible { outline: 2px solid var(--panel-accent-text); outline-offset: 2px; }
+/* Keep the visible dot small but give touch screens a full-size hit area. */
+@media (pointer: coarse) {
+  .q { position: relative; }
+  .q::before { content: ''; position: absolute; inset: -12px -6px; }
+}
 </style>

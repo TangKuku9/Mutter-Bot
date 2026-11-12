@@ -133,6 +133,11 @@ html.dark .brand-lockup-dark { display: block; }
 .panel-main { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 28px var(--panel-page-padding) 24px; }
 .panel-main:focus { outline: none; }
 .page-container { width: 100%; max-width: 1600px; margin: 0 auto; }
+/* The live log stream uses the space left after the heading and footer. */
+.panel-main:has(> .page-container > .logs-card) { flex: 1; }
+.page-container:has(> .logs-card) { display: flex; flex-direction: column; height: 100%; }
+.page-container:has(> .logs-card) > .page-heading,
+.page-container:has(> .logs-card) > .panel-page-footer { flex: none; }
 .page-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
 .page-section { margin: 0 0 5px; font-size: 12px; font-weight: 500; color: var(--panel-text-muted); }
 .page-heading h1 { margin: 0; color: var(--panel-text); font-size: 26px; line-height: 1.4; font-weight: 650; letter-spacing: -.5px; }
@@ -166,7 +171,10 @@ html.dark .brand-lockup-dark { display: block; }
 .panel-main .card-head { display: flex; align-items: center; justify-content: space-between; }
 .panel-main .card-head > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .panel-main .el-pagination { flex-wrap: wrap; row-gap: 10px; }
-.el-dialog, .el-message-box { max-width: calc(100vw - 32px); }
+.el-dialog { max-width: calc(100vw - 32px); }
+/* MessageBox is width:100% by default, so it must keep its own 420px cap and
+   only shrink on narrow screens; a bare 100vw max-width stretches it full-bleed. */
+.el-message-box { max-width: min(var(--el-messagebox-width, 420px), calc(100vw - 32px)); }
 .el-dialog__title { font-weight: 600; font-size: 18px; }
 .el-tag { font-size: 12px; }
 html .el-button { --el-button-outline-color: var(--panel-accent-text); }

@@ -13,7 +13,7 @@
       发布版本采用日期命名（YYMMDD，例如 261109）；同日再次发布可追加 .1 区分。
       发版时修改此处，并同步 web/package.json；CI 会校验两者一致。
     -->
-    <Version>261110</Version>
+    <Version>261112</Version>
 
     <!--
       程序集版本每段上限 65535，纯日期 261109 无法写进 AssemblyVersion/FileVersion。
