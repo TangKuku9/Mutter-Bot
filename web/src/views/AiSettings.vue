@@ -49,10 +49,18 @@
             </div>
           </el-option>
         </el-select>
-        <el-button :disabled="!selectedPresetId || formBusy" :loading="applyingPreset" @click="applySelectedPreset()">
-          应用并保存
-          <el-icon class="ai-action-icon"><ArrowRight /></el-icon>
-        </el-button>
+        <el-tooltip :disabled="!selectedPresetUnbound" content="该预设尚未绑定服务商连接，请先在预设库中编辑并选择连接与模型" placement="top">
+          <span class="ai-preset-apply">
+            <el-button
+              :disabled="!selectedPresetId || formBusy || !selectedPreset?.providerConnectionId"
+              :loading="applyingPreset"
+              @click="applySelectedPreset()"
+            >
+              应用并保存
+              <el-icon class="ai-action-icon"><ArrowRight /></el-icon>
+            </el-button>
+          </span>
+        </el-tooltip>
       </div>
       <div v-if="selectedPreset" class="ai-preset-note">
         <el-tag size="small" :type="selectedPreset.providerConnectionId ? 'info' : 'warning'">{{ connectionLabel(selectedPreset.providerConnectionId) }}</el-tag>
@@ -615,6 +623,7 @@
         <ProviderModelPicker v-model:connection-id="presetEditForm.providerConnectionId" v-model:model-name="presetEditForm.modelName"
           id-prefix="preset-edit" :connections="form.connections" :disabled="presetSaving" />
         <p class="hint">修改连接与模型会保留预设原有的人设和行为参数。</p>
+        <p class="hint">切换连接或模型后需要重新检测联网搜索。</p>
       </el-form>
       <template #footer>
         <el-button @click="editPresetDialog = false">取消</el-button>
@@ -649,15 +658,19 @@
           <div class="ai-preset-item-footer">
             <small>更新于 {{ fmt(row.updatedAt) }}</small>
             <div class="ai-preset-item-actions">
-              <el-button
-                size="small"
-                type="primary"
-                plain
-                :disabled="formBusy || !row.isValid"
-                @click="applyPresetById(row.id, true)"
-              >
-                应用并保存
-              </el-button>
+              <el-tooltip :disabled="!!row.providerConnectionId" content="该预设尚未绑定服务商连接，请先编辑并选择连接与模型" placement="top">
+                <span class="ai-preset-apply">
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    :disabled="formBusy || !row.isValid || !row.providerConnectionId"
+                    @click="applyPresetById(row.id, true)"
+                  >
+                    应用并保存
+                  </el-button>
+                </span>
+              </el-tooltip>
               <el-dropdown trigger="click" :disabled="formBusy" @command="(command) => presetCommand(command, row)">
                 <el-button size="small" :disabled="formBusy" :aria-label="`${row.name}的更多操作`">
                   更多操作
@@ -855,7 +868,8 @@
     </el-dialog>
 
     <AiConnectionManager ref="connectionManager" v-model="connectionManagerVisible" :connections="form.connections"
-      :templates="form.availableProviders" @saved="connectionSaved" @removed="connectionRemoved" />
+      :templates="form.availableProviders" @update:dirty="syncManagerDirty"
+      @saved="connectionSaved" @removed="connectionRemoved" />
 
     <ParamHelpDrawer
       v-model="helpVisible"
@@ -887,11 +901,15 @@ import { normalizeAiSettings, aiSettingsError, sanitizeAiSettingsForUi, safeHttp
 const withExternalDefaults = normalizeAiSettings
 
 const form = ref(withExternalDefaults({ availableProviders: [], availableCharacters: [] }))
-const connectionManager = ref(null), connectionManagerVisible = ref(false)
+const connectionManager = ref(null), connectionManagerVisible = ref(false), managerDirty = ref(false)
+const syncManagerDirty = value => { managerDirty.value = !!value }
 const connectionTesting = ref(false), connectionTestResult = ref('')
 const selectedConnection = computed(() => form.value.connections.find(c => c.id === form.value.providerConnectionId))
 const selectedModel = computed(() => selectedConnection.value?.models.find(m => m.id === form.value.modelName))
-const connectionLabel = id => form.value.connections.find(c => c.id === id)?.name || '待绑定连接'
+const connectionLabel = id => {
+  if (!id) return '未绑定连接'
+  return form.value.connections.find(c => c.id === id)?.name || '连接已不存在'
+}
 const loading = ref(false)
 const saving = ref(false)
 const loadError = ref(false), presetsError = ref(false), presetsLoading = ref(false)
@@ -915,6 +933,9 @@ const defaultPromptDialog = ref(false)
 const dialogStyle = { maxWidth: 'calc(100vw - 32px)' }
 // 上次读取/应用/保存后的表单快照，用来判断有没有未保存修改
 const baseline = ref('')
+// 会话内按连接记住用户调整过的预算，避免连接 A→B→A 后被永久压小
+const budgetSnapshots = new Map()
+let budgetConnectionId = ''
 const ready = computed(() => !!baseline.value)
 const formBusy = computed(() => loading.value || !ready.value || saving.value || applyingPreset.value || presetSaving.value || connectionTesting.value)
 // 应用预设/切换服务商后外搜 Key 会为空：在保存前就明确提示，避免必然被后端拒绝。
@@ -975,11 +996,13 @@ watch(isDirty, dirty => {
     appliedPresetId.value = null
   }
 })
-const confirmDiscard = useUnsavedChanges(isDirty)
+const confirmDiscard = useUnsavedChanges(computed(() => isDirty.value || managerDirty.value))
 const reloadConfig = async () => { if (await confirmDiscard()) await load() }
 
 const selectedPreset = computed(() =>
   presets.value.find((p) => p.id === selectedPresetId.value) || null)
+const selectedPresetUnbound = computed(() =>
+  !!selectedPreset.value && !selectedPreset.value.providerConnectionId)
 const selectedPresetApplied = computed(() =>
   !!selectedPreset.value && appliedPresetId.value === selectedPreset.value.id)
 
@@ -1328,7 +1351,7 @@ const editTitle = computed(() => {
 })
 
 const HELP_ORDER = [
-  'configPreset', 'presetId', 'apiBaseUrl', 'apiKey', 'modelName', 'personality', 'temperature', 'systemPrompt',
+  'configPreset', 'personality', 'temperature', 'systemPrompt',
   'maxTokens', 'maxContextMessages', 'maxAttachedImages', 'groupMemoryInjectionEnabled', 'contextWindowTokens', 'maxInputTokens',
   'webSearchEnabled', 'webSearchImageMode',
   'externalSearchEnabled', 'externalSearchProvider', 'externalSearchBaseUrl', 'externalSearchApiKey',
@@ -1345,39 +1368,6 @@ const HELP = {
       '主模型 Key 由服务商连接统一管理；独立搜索服务的 Key 不进入预设。',
       '「保存为预设」保存的是当前表单，包括还没点「保存配置」的修改。',
       '应用预设会立即覆盖并保存当前配置；之后对表单的修改不会自动同步回预设。'
-    ]
-  },
-  presetId: {
-    title: '服务商',
-    value: () => selectedConnection.value?.name || '未选择',
-    lines: [
-      '在「管理服务商」中保存连接，每条连接独立管理地址、密钥和模型目录。',
-      '可以从内置模板添加，也可以添加自定义兼容接口。',
-      'AI 配置与预设引用相同连接；更新密钥后，相关预设会使用新值。'
-    ]
-  },
-  apiBaseUrl: {
-    title: 'API 地址',
-    value: (f) => f.apiBaseUrl || '未填写',
-    lines: [
-      'OpenAI 兼容接口的根地址，一般以 /v1 结尾。',
-      '在「管理服务商」中编辑地址，引用该连接的配置会共同使用更新后的地址。'
-    ]
-  },
-  apiKey: {
-    title: 'API Key',
-    value: (f) => (f.apiKey ? '已配置' : '未配置'),
-    lines: [
-      '由服务商连接统一保存，页面不回显明文。',
-      '在「管理服务商」中保持打码值会保留密钥；清空后保存会移除密钥。'
-    ]
-  },
-  modelName: {
-    title: '模型',
-    value: (f) => f.modelName || '未填写',
-    lines: [
-      '从当前连接的模型目录选择，支持搜索、收藏与最近使用。',
-      '新模型可在「管理服务商」中获取或按准确模型 ID 手动添加。'
     ]
   },
   personality: {
@@ -1563,6 +1553,10 @@ const ingestConfig = (data) => {
   const savedPayload = JSON.stringify(configPayload(next))
   const converged = sanitizeAiSettingsForUi(next)
   form.value = next
+  // 新读入的配置代表该连接的最新基线，避免把旧连接的预算记到新连接名下；
+  // 旧快照也可能来自预设应用/重载之前的表单状态，继续保留会在切回时覆盖新基线。
+  budgetSnapshots.clear()
+  budgetConnectionId = next.providerConnectionId || ''
   // 界面收敛后的值属于待确认草稿，基线仍是服务器实际保存的值。
   baseline.value = savedPayload
   return converged
@@ -1632,6 +1626,11 @@ const openManagePresets = async () => {
 }
 
 const openPresetMeta = (row) => {
+  // 损坏的预设没有可信快照：允许改连接/模型只会把坏数据洗成另一份错误配置
+  if (!row.isValid) {
+    ElMessage.error('预设数据损坏，无法编辑')
+    return
+  }
   presetEditForm.value = { id: row.id, name: row.name, description: row.description || '', providerConnectionId: row.providerConnectionId || '', modelName: row.modelName || '' }
   presetEditOriginal.value = { providerConnectionId: row.providerConnectionId || '', modelName: row.modelName || '' }
   editPresetDialog.value = true
@@ -1649,7 +1648,18 @@ const savePresetMeta = async () => {
     if (presetEditForm.value.providerConnectionId !== presetEditOriginal.value.providerConnectionId
       || presetEditForm.value.modelName !== presetEditOriginal.value.modelName) {
       const { data } = await api.get(`/config/ai/presets/${presetEditForm.value.id}`)
-      config = { ...data.config, providerConnectionId: presetEditForm.value.providerConnectionId, modelName: presetEditForm.value.modelName, apiKey: '' }
+      // 连接/模型变了，旧策略的“已验证”不再成立；不清空会在跨协议时 400，
+      // 同协议时也会留下假的可用结论。字段名对齐后端 AiPresetConfigDto / ToPresetConfig。
+      config = {
+        ...data.config,
+        providerConnectionId: presetEditForm.value.providerConnectionId,
+        modelName: presetEditForm.value.modelName,
+        apiKey: '',
+        webSearchEndpoint: '',
+        webSearchShape: ''
+      }
+      // 只读验证字段不在预设 DTO 契约内；若旧响应带回也一并移除，避免写入伪结论
+      for (const key of ['webSearchVerifiedAt', 'webSearchImageCapable', 'webSearchImageVerifiedAt']) delete config[key]
     }
     await api.put(`/config/ai/presets/${presetEditForm.value.id}`, {
       name,
@@ -1785,7 +1795,19 @@ const applySelectedPreset = () => {
   if (selectedPresetId.value) applyPresetById(selectedPresetId.value)
 }
 
+// 切换连接前把当前预算记到原连接名下；切回时恢复，避免 A→B→A 后 A 的预算被 B 的上限永久压小。
+const captureBudgetSnapshot = () => {
+  if (!budgetConnectionId) return
+  budgetSnapshots.set(budgetConnectionId, {
+    contextWindowTokens: form.value.contextWindowTokens,
+    maxTokens: form.value.maxTokens,
+    maxInputTokens: form.value.maxInputTokens
+  })
+}
 const connectionChanged = ({ connection, model }) => {
+  if (!connection) return
+  const switched = connection.id !== budgetConnectionId
+  if (switched) captureBudgetSnapshot()
   form.value.providerConnectionVersion = connection.revision || ''
   form.value.apiBaseUrl = connection.apiBaseUrl
   form.value.apiKey = connection.apiKey || ''
@@ -1795,6 +1817,15 @@ const connectionChanged = ({ connection, model }) => {
   form.value.webSearchImageCapable = null
   form.value.webSearchImageVerifiedAt = null
   connectionTestResult.value = ''
+  if (switched) {
+    budgetConnectionId = connection.id
+    const snapshot = budgetSnapshots.get(connection.id)
+    if (snapshot) {
+      form.value.contextWindowTokens = snapshot.contextWindowTokens
+      form.value.maxTokens = snapshot.maxTokens
+      form.value.maxInputTokens = snapshot.maxInputTokens
+    }
+  }
   let adjusted = false
   if (model?.contextWindowTokens && form.value.contextWindowTokens > model.contextWindowTokens) {
     form.value.contextWindowTokens = model.contextWindowTokens; adjusted = true
@@ -1841,8 +1872,16 @@ const connectionSaved = async connection => {
 }
 const connectionRemoved = id => {
   form.value.connections = form.value.connections.filter(c => c.id !== id)
+  budgetSnapshots.delete(id)
   if (form.value.providerConnectionId === id) {
     form.value.providerConnectionId = ''; form.value.modelName = ''; form.value.apiBaseUrl = ''; form.value.apiKey = ''
+    form.value.providerConnectionVersion = ''
+    form.value.webSearchEndpoint = ''
+    form.value.webSearchShape = ''
+    form.value.webSearchVerifiedAt = null
+    form.value.webSearchImageCapable = null
+    form.value.webSearchImageVerifiedAt = null
+    if (budgetConnectionId === id) budgetConnectionId = ''
   }
 }
 const testCurrentModel = async () => {
@@ -1949,6 +1988,7 @@ onMounted(async () => {
 .ai-preset-toolbar { padding: 16px 18px; background: var(--panel-raised); border-radius: 10px; border: 1px solid var(--panel-border-soft); }
 .ai-preset-toolbar label { font-size: 13px; color: var(--panel-text-regular); }
 .ai-preset-toolbar :deep(.el-select) { width: 300px; max-width: 100%; }
+.ai-preset-apply { display: inline-flex; }
 .ai-preset-note { margin-top: 12px; font-size: 12px; color: var(--panel-text-regular); overflow-wrap: anywhere; }
 .ai-preset-footnote { font-size: 12px; color: var(--panel-text-muted); line-height: 1.7; margin: 12px 0 0; }
 .ai-preset-card { margin-bottom: 16px; }

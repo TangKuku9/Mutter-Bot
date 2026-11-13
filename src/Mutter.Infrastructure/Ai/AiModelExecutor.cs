@@ -18,7 +18,12 @@ public sealed class AiModelExecutor(HttpModelTransport transport, ILogger<AiMode
         if (config.Protocol == "gemini")
             strategy = new AiSearchStrategy("gemini", strategy.WithSearch ? "gemini_native" : null);
         else if (config.Protocol == "openai" && strategy.Endpoint == "gemini")
+        {
+            // 连接已固定为 OpenAI 兼容协议：内置检索请求无法送达，静默丢弃会让人以为“搜了但没搜到”。
+            if (strategy.WithSearch)
+                logger.LogWarning("协议为 openai 但检索策略指向 gemini，本次不检索 model={Model}", config.ModelName);
             strategy = AiSearchStrategy.CompatNoSearch;
+        }
         try
         {
             request = AiRequestBudget.Fit(request, config);

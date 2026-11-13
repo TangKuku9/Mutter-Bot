@@ -6,9 +6,9 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
     config: normalizeAiSettings({
       providerConnectionId: 'primary',
       connections: [
-        { id: 'primary', name: '主账号', protocol: 'openai', apiBaseUrl: 'https://model.example.test/v1', apiKey: '********', hasApiKey: true, defaultModel: 'daily-model',
+        { id: 'primary', name: '主账号', protocol: 'openai', apiBaseUrl: 'https://model.example.test/v1', apiKey: '********', hasApiKey: true, defaultModel: 'daily-model', timeoutSeconds: 60,
           models: ['daily-model', 'draft-model', 'keep-draft', 'snapshot-model', 'preset-model', 'library-draft', 'unsaved-model'].map(id => ({ id, name: id, isManual: true })) },
-        { id: 'alternate', name: '示例服务商', protocol: 'openai', apiBaseUrl: 'https://other.example.test/v1', apiKey: '********', hasApiKey: true, defaultModel: 'other-model',
+        { id: 'alternate', name: '示例服务商', protocol: 'openai', apiBaseUrl: 'https://other.example.test/v1', apiKey: '********', hasApiKey: true, defaultModel: 'other-model', timeoutSeconds: 90,
           models: ['other-model', 'draft-model'].map(id => ({ id, name: id, isManual: true })) }
       ],
       apiBaseUrl: 'https://model.example.test/v1', apiKey: 'sk-****', modelName: 'daily-model', personality: 'helper',
@@ -77,7 +77,7 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
       Object.assign(state.presets[0], body(), body().config ? { modelName: body().config.modelName } : {})
       return route.fulfill({ json: state.presets[0] })
     }
-    if (path === '/api/config/ai/presets/daily' && method === 'GET') return route.fulfill({ json: { ...state.presets[0], config: { ...state.config, modelName: state.presets[0].modelName } } })
+    if (path === '/api/config/ai/presets/daily' && method === 'GET') return route.fulfill({ json: { ...state.presets[0], config: { ...state.config, modelName: state.presets[0].modelName, webSearchEndpoint: 'openai', webSearchShape: 'enable_search' } } })
     if (path.endsWith('/daily/duplicate')) {
       const copy = { ...state.presets[0], id: 'daily-copy', name: `${state.presets[0].name}副本` }
       state.presets.push(copy)
@@ -96,14 +96,18 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
       state.probes.push(body())
       return route.fulfill({ contentType: 'application/x-ndjson', body: JSON.stringify({ type: 'done', report: { reachable: true, basePromptTokens: 12, results: [{ shape: 'enable_search', description: '示例策略', status: 'verified', imageStatus: 'not_tested', note: '合成验证结果' }] } }) + '\n' })
     }
-    return route.fulfill({ json: path === '/api/status' ? { isConnected: false } : [] })
+    if (path === '/api/config/characters' && method === 'GET') return route.fulfill({ json: [] })
+    if (path === '/api/status') return route.fulfill({ json: { isConnected: false } })
+    // 未列出的路径必须显式失败，避免 200 空响应掩盖错误端点或漏掉的 mock
+    return route.fulfill({ status: 404, json: { error: `测试：未处理的 API 请求 ${method} ${path}` } })
   })
   await page.goto('/#/ai-settings')
   if (!failLoad && !emptyConnections) await expectModel(page, 'daily-model')
   return state
 }
 
-const modelSelect = page => page.locator('.provider-model-picker').first().locator('.el-select').nth(1)
+const connectionSelect = page => page.getByTestId('connection-select')
+const modelSelect = page => page.getByTestId('model-select')
 async function expectModel(page, id) { await expect(modelSelect(page)).toContainText(id) }
 async function selectModel(page, id) {
   await modelSelect(page).click()
@@ -130,7 +134,7 @@ test('自定义服务商保存、模型获取失败保留手动目录、选用�
   await expect(dialog.locator('.connection-list')).toContainText('自建中转')
   expect(state.writes.filter(w => w.path === '/api/config/ai')).toHaveLength(0)
   await dialog.getByRole('button', { name: '关闭', exact: true }).click()
-  await page.locator('.provider-model-picker').first().locator('.el-select').first().click()
+  await connectionSelect(page).click()
   await page.getByRole('option', { name: /自建中转/ }).click()
   await selectModel(page, 'discovered-model')
   await page.getByRole('button', { name: '测试当前模型', exact: true }).click()
@@ -199,13 +203,28 @@ test('旧连接可补充新内置模型，保留旧模型、显示名、默认�
   expect(state.writes.filter(w => w.path === '/api/config/ai')).toHaveLength(0)
 })
 
+test('连接超时清空后保存仍按默认 60 秒提交', async ({ page }) => {
+  const state = await setup(page)
+  await page.getByRole('button', { name: '管理服务商', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '管理服务商', exact: true })
+  await dialog.getByRole('button', { name: '高级连接选项', exact: true }).click()
+  const timeout = dialog.getByLabel('连接超时（秒）', { exact: true })
+  await expect(timeout).toHaveValue('60')
+  await timeout.fill('')
+  await timeout.press('Tab')
+  await expect(timeout).toHaveValue('60')
+  await dialog.getByRole('button', { name: '保存连接', exact: true }).click()
+  const saved = state.writes.filter(write => write.path === '/api/config/ai/connections/primary').at(-1)
+  expect(saved.body.timeoutSeconds).toBe(60)
+})
+
 test('切回连接恢复上次模型，收藏按连接保存', async ({ page }) => {
   await setup(page)
   await selectModel(page, 'snapshot-model')
   await modelSelect(page).click()
   await page.getByRole('button', { name: '收藏 snapshot-model', exact: true }).click()
   await page.keyboard.press('Escape')
-  const provider = page.locator('.provider-model-picker').first().locator('.el-select').first()
+  const provider = connectionSelect(page)
   await provider.click()
   await page.getByRole('option', { name: /示例服务商/ }).click()
   await selectModel(page, 'draft-model')
@@ -217,18 +236,22 @@ test('切回连接恢复上次模型，收藏按连接保存', async ({ page }) 
   expect(preferences.last).toMatchObject({ primary: 'snapshot-model', alternate: 'draft-model' })
 })
 
-test('编辑预设可以切换连接和模型，并保留其他行为参数', async ({ page }) => {
+test('编辑预设可以切换连接和模型，并清空旧搜索策略', async ({ page }) => {
   const state = await setup(page)
   await page.getByRole('button', { name: '预设库', exact: true }).click()
   const library = page.getByRole('dialog', { name: 'AI 配置预设', exact: true })
   await library.getByRole('button', { name: /更多操作/ }).click()
   await page.getByRole('menuitem', { name: '编辑预设', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '编辑预设', exact: true })
-  await dialog.locator('.provider-model-picker .el-select').first().click()
+  await dialog.getByTestId('preset-edit-connection-select').click()
   await page.getByRole('option', { name: /示例服务商/ }).click()
+  await expect(dialog.getByTestId('preset-edit-provider-model-summary')).toContainText('other-model')
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
   await expect(dialog).toBeHidden()
-  expect(state.writes.at(-1).body.config).toMatchObject({ providerConnectionId: 'alternate', modelName: 'other-model', temperature: 0.7, personality: 'helper' })
+  expect(state.writes.at(-1).body.config).toMatchObject({
+    providerConnectionId: 'alternate', modelName: 'other-model', temperature: 0.7, personality: 'helper',
+    webSearchEndpoint: '', webSearchShape: ''
+  })
   expect(state.writes.every(w => w.path !== '/api/config/ai')).toBe(true)
 })
 
@@ -248,7 +271,7 @@ for (const width of [390, 1440]) {
 
 test('服务商填入、零值、草稿保存和重新加载', async ({ page }) => {
   const state = await setup(page)
-  await page.locator('.el-select').filter({ has: page.getByLabel('服务商', { exact: true }) }).click()
+  await connectionSelect(page).click()
   await page.getByRole('option', { name: /示例服务商/ }).click()
   await expectModel(page, 'other-model')
   await expect(page.locator('.picker-summary')).toContainText('密钥已配置')

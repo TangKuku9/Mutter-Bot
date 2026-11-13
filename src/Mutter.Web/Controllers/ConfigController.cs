@@ -79,13 +79,15 @@ public partial class ConfigController : ControllerBase
         }
 
         var external = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
+        // Key 只回显“是否已保存”：部分打码会泄露首尾 8 个字符，未绑定连接的旧配置也要用完整掩码。
+        var hasKey = connection != null ? connection.ApiKey.Length > 0 : entity.ApiKey.Length > 0;
         return new AiConfigDto
         {
             ProviderConnectionId = entity.ProviderConnectionId,
             ProviderConnectionVersion = connection?.Revision ?? "",
             Connections = connections,
             ApiBaseUrl = connection?.ApiBaseUrl ?? entity.ApiBaseUrl,
-            ApiKey = MaskApiKey(connection?.ApiKey ?? entity.ApiKey),
+            ApiKey = hasKey ? AiConnectionStore.SecretMask : "",
             ModelName = entity.ModelName,
             SystemPrompt = entity.SystemPrompt,
             Personality = entity.Personality,
@@ -110,9 +112,9 @@ public partial class ConfigController : ControllerBase
                 Enabled = external.Enabled ?? false,
                 Provider = external.Provider,
                 BaseUrl = external.BaseUrl,
-                // SearXNG 不使用 Key：不回显旧服务商的残留 Key；其余服务（含自定义通道）打码回显。
-                ApiKey = ExternalSearchConfig.SupportsApiKey(external.Provider)
-                    ? MaskApiKey(external.ApiKey)
+                // SearXNG 不使用 Key：不回显旧服务商的残留 Key；其余服务（含自定义通道）只回显完整掩码。
+                ApiKey = ExternalSearchConfig.SupportsApiKey(external.Provider) && external.ApiKey.Length > 0
+                    ? AiConnectionStore.SecretMask
                     : string.Empty,
                 MaxResults = external.MaxResults,
                 TimeoutSeconds = external.TimeoutSeconds,
@@ -142,8 +144,21 @@ public partial class ConfigController : ControllerBase
         if (error != null)
             return BadRequest(new { error });
 
-        ApplyNormalizedAiConfigInput(entity, dto, dto.ProviderConnectionId.Length > 0 ? dto.ApiKey
-            : ResolveSubmittedApiKey(entity.ApiKey, dto.ApiKey));
+        var wasBound = entity.ProviderConnectionId.Length > 0;
+        // 未绑定的旧配置可能还留着密钥副本：换了地址 origin 又不重填 Key 时，
+        // 打码值只代表“旧地址的旧 Key”，不能跟着新地址落库。地址留空不算换地址（部分更新）。
+        if (dto.ProviderConnectionId.Length == 0 && !wasBound && entity.ApiKey.Length > 0
+            && dto.ApiBaseUrl.Length > 0
+            && (string.IsNullOrWhiteSpace(dto.ApiKey) || IsMaskedKey(entity.ApiKey, dto.ApiKey))
+            && !AiConnectionStore.SameOrigin(entity.ApiBaseUrl, dto.ApiBaseUrl))
+            return BadRequest(new { error = "更换接口地址后请重新填写 API Key" });
+        var apiKey = dto.ProviderConnectionId.Length > 0
+            ? dto.ApiKey
+            // 解绑连接时不要把连接密钥的兼容副本继续留在主配置里；只有显式重填才写新值。
+            : wasBound && (string.IsNullOrWhiteSpace(dto.ApiKey) || IsMaskedKey(entity.ApiKey, dto.ApiKey))
+                ? string.Empty
+                : ResolveSubmittedApiKey(entity.ApiKey, dto.ApiKey);
+        ApplyNormalizedAiConfigInput(entity, dto, apiKey);
         await _dbContext.SaveChangesAsync();
         return NoContent();
     }
@@ -193,6 +208,11 @@ public partial class ConfigController : ControllerBase
         if (dto.Config == null)
         {
             config = SnapshotAiConfig(current);
+            // 服务端快照必须自带当前连接版本，否则下面的版本校验会把快照里的搜索策略当成过期清掉。
+            if (config.ProviderConnectionId.Length > 0)
+                config.ProviderConnectionVersion = await _dbContext.AiProviderConnections.AsNoTracking()
+                    .Where(c => c.Id == config.ProviderConnectionId).Select(c => c.Revision)
+                    .FirstOrDefaultAsync() ?? string.Empty;
             var connectionError = await ResolveConnectionAsync(config);
             if (connectionError != null) return BadRequest(new { error = connectionError });
         }
@@ -247,11 +267,11 @@ public partial class ConfigController : ControllerBase
             var inputError = await ResolveConnectionAsync(dto.Config) ?? NormalizeAndValidateAiConfigInput(dto.Config);
             if (inputError != null) return BadRequest(new { error = inputError });
 
-            var current = await _dbContext.AiConfigs.FirstOrDefaultAsync();
             entity.ApiKey = dto.Config.ProviderConnectionId.Length > 0 ? string.Empty : dto.IncludeApiKey switch
             {
                 false => string.Empty,
-                true => ResolveSubmittedApiKey(current?.ApiKey, dto.Config.ApiKey),
+                // 打码值只能解析成“这个预设自己的”旧 Key；拿主配置的 Key 顶替会把另一个账号的密钥写进预设。
+                true => ResolveSubmittedApiKey(entity.ApiKey, dto.Config.ApiKey),
                 null => entity.ApiKey
             };
 
@@ -309,7 +329,7 @@ public partial class ConfigController : ControllerBase
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
 
         if (config.ProviderConnectionId.Length == 0 && await _dbContext.AiProviderConnections.AnyAsync())
-            return BadRequest(new { error = "该旧预设尚未绑定连接，请编辑预设并选择服务商与模型" });
+            return BadRequest(new { error = "该旧预设尚未绑定服务商连接：请在「管理预设」中编辑它并选择连接与模型后再应用" });
         var error = await ResolveConnectionAsync(config)
             ?? NormalizeAndValidateAiConfigInput(config, allowMissingExternalSearchKey: true);
         if (error != null)
@@ -416,6 +436,18 @@ public partial class ConfigController : ControllerBase
                 && !string.Equals(current.Provider, external.Provider, StringComparison.Ordinal))
                 ClearStaleExternalSearchSubmit(external, current);
 
+            // 服务商不变但地址 origin 变了：空值/打码值仍代表“沿用旧 Key”，而旧 Key 只属于旧网关。
+            // 必须在落库前拒绝，否则一次保存就能把真 Key 绑到新地址（之后的探测会以已保存地址为基准通过校验）。
+            if (currentExternal is { } currentTarget && currentTarget.ApiKey.Length > 0
+                && string.Equals(currentTarget.Provider, external.Provider, StringComparison.Ordinal)
+                && (external.ApiKey.Length == 0 || IsMaskedKey(currentTarget.ApiKey, external.ApiKey)))
+            {
+                var sameEndpoint = currentTarget.BaseUrl.Trim().Length == 0 && external.BaseUrl.Length == 0
+                    || AiConnectionStore.SameOrigin(currentTarget.BaseUrl, external.BaseUrl);
+                if (!sameEndpoint)
+                    return "搜索地址已变更，请重新填写 API Key 后再保存";
+            }
+
             if (external.BaseUrl.Length > 0)
             {
                 // 只放行 http/https，与运行时 RequireHttpUrl 同一条规则
@@ -474,12 +506,19 @@ public partial class ConfigController : ControllerBase
 
         var endpoint = dto.WebSearchEndpoint;
         var shape = dto.WebSearchShape;
+        var targetBaseUrl = dto.ApiBaseUrl;
+        var targetModel = dto.ModelName;
+
+        // 先取本次探测对“提交策略”的结论：刚探测并选用的形状即使目标同时变了也必须保留。
+        var probed = shape.Length > 0
+            ? _capabilities.GetProbeImageCapability(targetBaseUrl, targetModel, shape, dto.ProviderConnectionId)
+            : null;
 
         // 换了地址或模型，旧策略的验证结论不再可信：除了本次同时选用的新策略，一律清空回退自动推断。
         var targetChanged = !string.Equals(previousBaseUrl, dto.ApiBaseUrl, StringComparison.Ordinal)
                          || previousConnection != dto.ProviderConnectionId
                          || !string.Equals(previousModelName, dto.ModelName, StringComparison.Ordinal);
-        if (targetChanged &&
+        if (targetChanged && probed is null &&
             string.Equals(shape, entity.WebSearchShape, StringComparison.Ordinal) &&
             string.Equals(endpoint, entity.WebSearchEndpoint, StringComparison.Ordinal))
         {
@@ -489,16 +528,11 @@ public partial class ConfigController : ControllerBase
 
         var strategyChanged = !string.Equals(shape, entity.WebSearchShape, StringComparison.Ordinal)
                            || !string.Equals(endpoint, entity.WebSearchEndpoint, StringComparison.Ordinal);
-        var targetBaseUrl = dto.ApiBaseUrl;
-        var targetModel = dto.ModelName;
 
-        // 先取本次探测对“新策略”的结论，再清运行时负缓存——Clear 会连探测账本一起清掉，
-        // 顺序反了就会出现“刚测出带图可用、一保存又变成未测”。
-        var probed = shape.Length > 0
-            ? _capabilities.GetProbeImageCapability(targetBaseUrl, targetModel, shape, dto.ProviderConnectionId)
-            : null;
+        // 顺序不能反：Clear 会连探测账本一起清掉，先 Clear 再把“刚测出的结论”读成 undefined。
+        // 用提交时的形状清理，而不是上面可能已被重置为空的 shape。
         if (targetChanged || strategyChanged)
-            _capabilities.Clear(targetBaseUrl, targetModel, shape, dto.ProviderConnectionId);
+            _capabilities.Clear(targetBaseUrl, targetModel, dto.WebSearchShape, dto.ProviderConnectionId);
 
         entity.WebSearchEndpoint = endpoint;
         entity.WebSearchShape = shape;
@@ -539,7 +573,8 @@ public partial class ConfigController : ControllerBase
         // SearXNG 免 Key，落库清空，避免旧服务商的 Key 残留；其余服务按归属沿用或覆盖。
         var resolvedKey = applyingPreset
             ? ExternalSearchConfig.SupportsApiKey(dto.Provider) ? dto.ApiKey : string.Empty
-            : ResolveProviderAwareApiKey(current.Provider, current.ApiKey, dto.Provider, dto.ApiKey);
+            : ResolveProviderAwareApiKey(current.Provider, current.ApiKey, current.BaseUrl,
+                dto.Provider, dto.ApiKey, dto.BaseUrl);
 
         var targetChanged = !string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal)
                             || !string.Equals(current.BaseUrl.TrimEnd('/'), dto.BaseUrl.TrimEnd('/'), StringComparison.Ordinal)
@@ -570,25 +605,21 @@ public partial class ConfigController : ControllerBase
     }
 
     /// <summary>
-    /// 是否为当前 Key 的“打码值”。同时接受旧版 9–12 位 Key 的 4+****+4 打码，
+    /// 是否为当前 Key 的“打码值”。接受完整掩码与旧版 4+****+4 打码，
     /// 避免升级前打开的旧页面把打码文本当成新 Key 写回。
     /// </summary>
-    private static bool IsMaskedKey(string currentKey, string submittedKey)
-    {
-        if (currentKey.Length == 0) return false;
-        if (submittedKey == MaskApiKey(currentKey)) return true;
-        // 旧规则：>8 位显示前 4 后 4；仅 9–12 位的结果与新版不同。
-        return currentKey.Length is > 8 and <= 12
-               && submittedKey == $"{currentKey[..4]}****{currentKey[^4..]}";
-    }
+    private static bool IsMaskedKey(string currentKey, string submittedKey) =>
+        AiConnectionStore.IsMaskedSecret(currentKey, submittedKey);
 
     /// <summary>
-    /// 按 provider 归属解析提交的外搜 Key（纯函数，供落库/探测与自检复用）：
-    /// 同一服务商时空值/打码值=沿用已存 Key；换了服务商时空值或等于旧 Key 打码值的提交一律解析为空，
-    /// 绝不把旧服务商的真实 Key 发给新服务商；SearXNG 免 Key，恒为空。
+    /// 按 provider 与地址归属解析提交的外搜 Key（纯函数，供落库/探测与自检复用）：
+    /// 同一服务商且同一 origin 时空值/打码值=沿用已存 Key；换了服务商、或地址 origin 变了，
+    /// 空值与打码值一律解析为空（必填校验会要求重填），绝不把已存 Key 发给改后的网关；
+    /// SearXNG 免 Key，恒为空。
     /// </summary>
     internal static string ResolveProviderAwareApiKey(
-        string? currentProvider, string? currentKey, string? submittedProvider, string? submittedKey)
+        string? currentProvider, string? currentKey, string? currentBaseUrl,
+        string? submittedProvider, string? submittedKey, string? submittedBaseUrl)
     {
         currentKey ??= string.Empty;
         submittedKey ??= string.Empty;
@@ -602,7 +633,13 @@ public partial class ConfigController : ControllerBase
                 return string.Empty;
             return submittedKey;
         }
-        return ResolveSubmittedApiKey(currentKey, submittedKey);
+        if (!string.IsNullOrWhiteSpace(submittedKey) && !IsMaskedKey(currentKey, submittedKey))
+            return submittedKey;
+        // 沿用已存 Key 时地址必须是保存时的 origin：否则一次保存就能把真 Key 绑到攻击者网关，
+        // 之后的探测会因为“当前地址”已被改掉而通过 origin 校验。
+        var sameEndpoint = string.IsNullOrWhiteSpace(currentBaseUrl) && string.IsNullOrWhiteSpace(submittedBaseUrl)
+            || AiConnectionStore.SameOrigin(currentBaseUrl ?? string.Empty, submittedBaseUrl ?? string.Empty);
+        return sameEndpoint ? currentKey : string.Empty;
     }
 
     /// <summary>
@@ -707,7 +744,8 @@ public partial class ConfigController : ControllerBase
             config = parsed;
             return true;
         }
-        catch (JsonException)
+        // 重复键会让 STJ 抛 ArgumentException 而不是 JsonException：同样按损坏处理，不让详情/应用 500。
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
         {
             return false;
         }
@@ -774,6 +812,8 @@ public partial class ConfigController : ControllerBase
         var summary = BuildAiPresetSummary(entity, characters);
         TryReadPresetConfig(entity.ConfigJson, out var config);
         config.ApiKey = string.Empty;
+        // 双保险：旧数据里若残留外搜 Key，详情接口也不回显。
+        if (config.ExternalSearch is not null) config.ExternalSearch.ApiKey = string.Empty;
 
         return new AiPresetDetailDto
         {
@@ -796,7 +836,10 @@ public partial class ConfigController : ControllerBase
             CreatedAt = summary.CreatedAt,
             UpdatedAt = summary.UpdatedAt,
             Config = config,
-            ApiKey = MaskApiKey(entity.ApiKey)
+            // 已绑定的预设从连接取 Key：旧列里的残留副本连部分打码都不回显。
+            // 未绑定的预设也只回显完整掩码，避免泄露首尾字符。
+            ApiKey = summary.ProviderConnectionId.Length > 0 || entity.ApiKey.Length == 0
+                ? string.Empty : AiConnectionStore.SecretMask
         };
     }
 
@@ -865,7 +908,18 @@ public partial class ConfigController : ControllerBase
         var current = ExternalSearchJsonCodec.Decode(entity?.ExternalSearchJson);
         if (!string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal))
             ClearStaleExternalSearchSubmit(dto, current);
-        var apiKey = ResolveProviderAwareApiKey(current.Provider, current.ApiKey, dto.Provider, dto.ApiKey);
+        // 沿用已保存的搜索 Key 时，地址必须仍是保存时的 origin，避免把 Key 发往任意网关。
+        // 换了服务商时 Key 已经被清空、根本不会沿用，不能再报“地址变更”拦下免 Key 的 SearXNG/自定义通道。
+        var sameProvider = string.Equals(current.Provider, dto.Provider, StringComparison.Ordinal);
+        var submittedKey = dto.ApiKey ?? string.Empty;
+        var reusesSavedKey = submittedKey.Length == 0
+            || AiConnectionStore.IsMaskedSecret(current.ApiKey, submittedKey);
+        var sameEndpoint = string.IsNullOrWhiteSpace(current.BaseUrl) && string.IsNullOrWhiteSpace(dto.BaseUrl)
+            || AiConnectionStore.SameOrigin(current.BaseUrl, dto.BaseUrl);
+        if (sameProvider && reusesSavedKey && current.ApiKey.Length > 0 && !sameEndpoint)
+            return BadRequest(new { error = "搜索地址已变更，请重新填写 API Key 后再测试" });
+        var apiKey = ResolveProviderAwareApiKey(current.Provider, current.ApiKey, current.BaseUrl,
+            dto.Provider, dto.ApiKey, dto.BaseUrl);
 
         var probeConfig = new AiConfig
         {
@@ -958,13 +1012,13 @@ public partial class ConfigController : ControllerBase
         if (!TryReadProbeTarget(dto, out var apiBaseUrl, out var model, out var badRequest))
             return BadRequest(new { error = badRequest });
 
-        var apiKey = await ResolveProbeApiKeyAsync(dto);
+        var (apiKey, keyError) = await ResolveProbeApiKeyAsync(dto);
         if (apiKey is null)
-            return BadRequest(new { error = "尚未保存过 API Key，请先填写并保存配置再探测" });
+            return BadRequest(new { error = keyError ?? "尚未保存过 API Key，请先填写并保存配置再探测" });
 
         WebSearchProbeReportDto? report = null;
         WebSearchProbeEventDto? failure = null;
-        await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct, dto.ProviderConnectionId))
+        await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct, dto.ProviderConnectionId ?? ""))
         {
             if (ev.Type == "done") report = ev.Report;
             else if (ev.Type == "error") failure = ev;
@@ -999,11 +1053,11 @@ public partial class ConfigController : ControllerBase
             return;
         }
 
-        var apiKey = await ResolveProbeApiKeyAsync(dto);
+        var (apiKey, keyError) = await ResolveProbeApiKeyAsync(dto);
         if (apiKey is null)
         {
             Response.StatusCode = StatusCodes.Status400BadRequest;
-            await Response.WriteAsJsonAsync(new { error = "尚未保存过 API Key，请先填写并保存配置再探测" }, ct);
+            await Response.WriteAsJsonAsync(new { error = keyError ?? "尚未保存过 API Key，请先填写并保存配置再探测" }, ct);
             return;
         }
 
@@ -1015,7 +1069,7 @@ public partial class ConfigController : ControllerBase
         var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         try
         {
-            await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct, dto.ProviderConnectionId))
+            await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct, dto.ProviderConnectionId ?? ""))
             {
                 await Response.WriteAsync(JsonSerializer.Serialize(ev, jsonOptions) + "\n", ct);
                 await Response.Body.FlushAsync(ct);
@@ -1039,22 +1093,35 @@ public partial class ConfigController : ControllerBase
         return error.Length == 0;
     }
 
-    /// <summary>Key 传打码值说明表单没改：探测必须用真 Key，从库里取。</summary>
-    private async Task<string?> ResolveProbeApiKeyAsync(WebSearchProbeDto dto)
+    /// <summary>
+    /// Key 传打码值说明表单没改：探测必须用真 Key，从库里取。
+    /// 沿用已保存 Key 时目标必须仍是保存时的 origin，否则打码值会把密钥带去任意主机。
+    /// </summary>
+    private async Task<(string? Key, string? Error)> ResolveProbeApiKeyAsync(WebSearchProbeDto dto)
     {
-        if (dto.ProviderConnectionId.Length > 0)
+        var connectionId = dto.ProviderConnectionId ?? string.Empty;
+        if (connectionId.Length > 0)
         {
             var connection = await _dbContext.AiProviderConnections.AsNoTracking()
-                .FirstOrDefaultAsync(c => c.Id == dto.ProviderConnectionId);
-            if (connection == null || AiConnectionStore.NormalizeUrl(connection.ApiBaseUrl) != AiConnectionStore.NormalizeUrl(dto.ApiBaseUrl)
-                || AiConnectionStore.Models(connection).All(m => m.Id != dto.ModelName)) return null;
-            return connection.ApiKey;
+                .FirstOrDefaultAsync(c => c.Id == connectionId);
+            if (connection == null) return (null, "选中的服务商连接已不存在，请重新选择");
+            if (!AiConnectionStore.SameOrigin(connection.ApiBaseUrl, dto.ApiBaseUrl))
+                return (null, "探测地址与所选连接不一致，请先保存连接或重新填写 API Key");
+            if (AiConnectionStore.Models(connection).All(m => m.Id != dto.ModelName))
+                return (null, "该连接下没有选中模型，请先在管理服务商中添加模型");
+            return (connection.ApiKey, null);
         }
         var apiKey = dto.ApiKey;
-        var saved = (await _dbContext.AiConfigs.FirstOrDefaultAsync())?.ApiKey;
-        if (string.IsNullOrWhiteSpace(apiKey) || apiKey == MaskApiKey(saved ?? string.Empty))
-            return string.IsNullOrWhiteSpace(saved) ? null : saved;
-        return apiKey;
+        var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
+        var saved = entity?.ApiKey;
+        if (string.IsNullOrWhiteSpace(apiKey) || AiConnectionStore.IsMaskedSecret(saved, apiKey))
+        {
+            if (string.IsNullOrWhiteSpace(saved)) return (null, "尚未保存过 API Key，请先填写并保存配置再探测");
+            if (entity != null && !AiConnectionStore.SameOrigin(entity.ApiBaseUrl, dto.ApiBaseUrl))
+                return (null, "探测地址与已保存配置不一致，请重新填写 API Key");
+            return (saved, null);
+        }
+        return (apiKey, null);
     }
 
     /// <summary>
@@ -1065,11 +1132,18 @@ public partial class ConfigController : ControllerBase
         Mutter.Core.Services.WebSearchProbeRunner runner,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct, string providerConnectionId = "")
     {
+        var connectionProtocol = string.Empty;
         if (providerConnectionId.Length > 0)
         {
             var connection = await _dbContext.AiProviderConnections.AsNoTracking()
                 .FirstOrDefaultAsync(c => c.Id == providerConnectionId, ct);
-            if (connection != null) runner = runner.WithHeaders(AiConnectionStore.Headers(connection));
+            if (connection != null)
+            {
+                // 探测与正式请求必须同模板、同超时，否则会出现“探测通过、线上 400”的假阴性。
+                runner = runner.WithConnection(AiConnectionStore.Headers(connection),
+                    connection.TemplateId, connection.TimeoutSeconds);
+                connectionProtocol = connection.Protocol;
+            }
         }
         using var overallCts = new CancellationTokenSource(TimeSpan.FromSeconds(180));
         using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct, overallCts.Token);
@@ -1092,12 +1166,16 @@ public partial class ConfigController : ControllerBase
         }
         if (baseStatus is 401 or 403)
         {
-            yield return new WebSearchProbeEventDto
+            // Gemini 原生连接可能根本没挂 OpenAI 兼容层：以 gemini 基线的结论为准，不在这里终止。
+            if (connectionProtocol != "gemini")
             {
-                Type = "error", Reachable = true, AuthFailed = true,
-                Error = $"鉴权失败（{baseStatus}）：Key 无效或无权限，搜索结论无从谈起"
-            };
-            yield break;
+                yield return new WebSearchProbeEventDto
+                {
+                    Type = "error", Reachable = true, AuthFailed = true,
+                    Error = $"鉴权失败（{baseStatus}）：Key 无效或无权限，搜索结论无从谈起"
+                };
+                yield break;
+            }
         }
 
         var baseTokens = Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(baseRoot ?? default);
@@ -1134,6 +1212,16 @@ public partial class ConfigController : ControllerBase
                 var (gs, gr, _) = await runner.SendAsync(apiBaseUrl, apiKey, "gemini", null, model, probeCt);
                 geminiBaseTokens = gs is null ? null : Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(gr ?? default);
                 geminiBaseText = gr is null ? null : Mutter.Core.Services.WebSearchProbe.ReadResponseText(gr.Value);
+                // 两个通道都拒绝鉴权时才是真的 Key 无效。
+                if (gs is 401 or 403 && baseStatus is 401 or 403)
+                {
+                    yield return new WebSearchProbeEventDto
+                    {
+                        Type = "error", Reachable = true, AuthFailed = true,
+                        Error = "鉴权失败：Key 无效或无权限，搜索结论无从谈起"
+                    };
+                    yield break;
+                }
             }
 
             var (status, root, error) = await runner.SendAsync(apiBaseUrl, apiKey, probeCase.Endpoint, probeCase.Shape, model, probeCt);
@@ -1378,23 +1466,6 @@ public partial class ConfigController : ControllerBase
             ApiBaseUrl = o.ApiBaseUrl,
             IsConnected = connection.IsConnected
         });
-    }
-
-    /// <summary>
-    /// 将 ApiKey 打码，仅显示前4位和后4位，中间用 **** 替代。
-    /// 长度不足12位时全部打码为 ****（9 位 Key 只隐藏 1 位等于没打码）。
-    /// </summary>
-    private static string MaskApiKey(string? apiKey)
-    {
-        if (string.IsNullOrEmpty(apiKey))
-            return string.Empty;
-
-        // 短 Key（<=12字符）分段展示会泄露过多内容，统一返回 ****
-        if (apiKey.Length <= 12)
-            return "****";
-
-        // 格式：前4位 + **** + 后4位，例如 "sk-a****xyz"
-        return $"{apiKey[..4]}****{apiKey[^4..]}";
     }
 
     private static string MaskAppId(string? appId)

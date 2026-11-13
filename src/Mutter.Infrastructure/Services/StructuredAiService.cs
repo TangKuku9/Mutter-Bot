@@ -142,7 +142,10 @@ public class StructuredAiService : IStructuredAiService
             var formatRejected = ex is AiRequestException { IsDeterministicRejection: true }
                 && (ex.Message.Contains("response_format", StringComparison.OrdinalIgnoreCase)
                     || ex.Message.Contains("json_object", StringComparison.OrdinalIgnoreCase)
-                    || ex.Message.Contains("json mode", StringComparison.OrdinalIgnoreCase));
+                    || ex.Message.Contains("json mode", StringComparison.OrdinalIgnoreCase)
+                    // 本地适配器拒绝 JSON 约束时也属于“格式不支持”，应允许降级为提示词约束。
+                    || ex.Message.Contains("结构化输出", StringComparison.OrdinalIgnoreCase)
+                    || ex.Message.Contains("json", StringComparison.OrdinalIgnoreCase));
             return (null, ex.Message, formatRejected);
         }
     }

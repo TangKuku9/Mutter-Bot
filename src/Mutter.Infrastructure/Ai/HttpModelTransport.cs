@@ -66,8 +66,9 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogError("AI error: {StatusCode}, Body: {Body}",
-                    (int)response.StatusCode, raw.Length > 500 ? raw[..500] : raw);
-                throw new AiRequestException((int)response.StatusCode, raw);
+                    (int)response.StatusCode, RedactForLog(raw));
+                // 异常消息会被上层原样写进日志：上游回显的 Key 不能绕过 RedactForLog。
+                throw new AiRequestException((int)response.StatusCode, RedactForLog(raw));
             }
 
             JsonElement json;
@@ -111,10 +112,14 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
         foreach (var url in WebSearchProbe.GeminiUrlCandidates(config.ApiBaseUrl, config.ModelName))
         {
             using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url);
-            httpRequest.Headers.Add("x-goog-api-key", config.ApiKey);
-            // Google 官方 Key 认 x-goog-api-key；中转通常认 Bearer。Key 不是 AIza 开头时两个都带，无害。
-            if (!config.ApiKey.StartsWith("AIza", StringComparison.Ordinal))
-                httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", config.ApiKey);
+            // 本地无认证代理可以留空 Key：不要发送空的 x-goog-api-key / Bearer。
+            if (config.ApiKey.Length > 0)
+            {
+                httpRequest.Headers.Add("x-goog-api-key", config.ApiKey);
+                // Google 官方 Key 认 x-goog-api-key；中转通常认 Bearer。Key 不是 AIza 开头时两个都带，无害。
+                if (!config.ApiKey.StartsWith("AIza", StringComparison.Ordinal))
+                    httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", config.ApiKey);
+            }
             httpRequest.Content = JsonContent.Create(requestBody);
 
             _logger.LogInformation(
@@ -144,8 +149,8 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
                 if (!response.IsSuccessStatusCode)
                 {
                     _logger.LogError("Gemini native error: {StatusCode}, Body: {Body}",
-                        (int)response.StatusCode, raw.Length > 500 ? raw[..500] : raw);
-                    throw new AiRequestException((int)response.StatusCode, raw);
+                        (int)response.StatusCode, RedactForLog(raw));
+                    throw new AiRequestException((int)response.StatusCode, RedactForLog(raw));
                 }
 
                 JsonElement json;
@@ -200,7 +205,8 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
         string transport, bool search, CancellationToken ct)
     {
         var cap = _health is { IsDegraded: true } ? _degradedAttemptCap : _attemptCap;
-        if (config.ConnectionTimeoutSeconds is int timeout && TimeSpan.FromSeconds(timeout) < cap)
+        // 连接上的超时是显式用户设置，允许比默认尝试上限更短或更长；仍需受根期限约束。
+        if (config.ConnectionTimeoutSeconds is int timeout)
             cap = TimeSpan.FromSeconds(timeout);
         foreach (var (name, value) in config.Headers)
         {
@@ -287,6 +293,29 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
             ? ct.GetInt32()
             : 0;
         return (prompt, completion);
+    }
+
+    /// <summary>
+    /// 上游错误体只用于排障：压成单行、去掉控制字符（防日志注入/伪造行），
+    /// 并把疑似密钥打码——部分网关会在 401 里回显收到的 Key。
+    /// </summary>
+    internal static string RedactForLog(string? body)
+    {
+        if (string.IsNullOrEmpty(body)) return string.Empty;
+        var text = System.Text.RegularExpressions.Regex.Replace(body, @"\s+", " ");
+        text = System.Text.RegularExpressions.Regex.Replace(text,
+            @"(?i)(sk-[A-Za-z0-9_\-]{6,})", "sk-***");
+        // Google 官方 Key 以 AIza 开头，不属于 sk- 形态。
+        text = System.Text.RegularExpressions.Regex.Replace(text,
+            @"(?i)(AIza[0-9A-Za-z_\-]{10,})", "AIza***");
+        text = System.Text.RegularExpressions.Regex.Replace(text,
+            @"(?i)(bearer\s+)[A-Za-z0-9_\-\.]{8,}", "$1***");
+        // 网关常以 JSON 回显入参：把常见密钥字段的值一并打码。
+        text = System.Text.RegularExpressions.Regex.Replace(text,
+            @"(?i)(""(?:api[_-]?key|apikey|key|token|secret|authorization|x-goog-api-key)""\s*:\s*"")[^""]{6,}("")",
+            "$1***$2");
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"[\x00-\x1F\x7F]", "");
+        return text.Length > 200 ? text[..200] : text;
     }
 
 }

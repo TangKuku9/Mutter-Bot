@@ -39,10 +39,11 @@
               <el-input id="connection-name" v-model="draft.name" maxlength="64" placeholder="例如：公司网关、百炼 · 备用账号" />
             </el-form-item>
             <el-form-item label="接口协议" for="connection-protocol" required>
-              <el-select id="connection-protocol" v-model="draft.protocol">
+              <el-select id="connection-protocol" v-model="draft.protocol" :disabled="protocolLocked">
                 <el-option value="openai" label="OpenAI 兼容（Chat Completions）" />
                 <el-option value="gemini" label="Gemini 原生（generateContent）" />
               </el-select>
+              <p v-if="protocolLocked" class="connection-hint">协议由所选服务商模板决定，切换模板即可更换。</p>
             </el-form-item>
           </div>
           <el-form-item label="API 地址" for="connection-url" required>
@@ -56,6 +57,7 @@
           </el-form-item>
           <div class="connection-model-heading">
             <h4>模型目录 <small>{{ draft.models.length }}</small></h4>
+            <el-input v-model="modelSearch" placeholder="搜索模型 ID 或名称" clearable aria-label="搜索模型" class="connection-model-search" />
             <div class="connection-model-actions">
               <el-button v-if="draft.id && selectedTemplate?.models?.length" @click="mergeBuiltinModels">补充最新内置模型</el-button>
               <el-button :loading="discovering" @click="discover">获取模型列表</el-button>
@@ -66,15 +68,19 @@
             <el-input v-model="modelEntry" placeholder="输入模型 ID，按 Enter 添加" aria-label="新增模型 ID" @keyup.enter="addModel" />
             <el-button @click="addModel">添加模型</el-button>
           </div>
-          <el-table v-if="draft.models.length" :data="draft.models" max-height="260" size="small" class="connection-models">
+          <el-table v-if="draft.models.length" :data="pagedModels" max-height="260" size="small" class="connection-models"
+            empty-text="没有匹配的模型">
             <el-table-column prop="id" label="模型 ID" min-width="160" show-overflow-tooltip />
             <el-table-column label="显示名称" min-width="150">
               <template #default="{ row }"><el-input v-model="row.name" :aria-label="`模型 ${row.id} 的显示名称`" /></template>
             </el-table-column>
-            <el-table-column label="来源" width="64"><template #default="{ row }">{{ row.isManual ? '手动' : '获取' }}</template></el-table-column>
+            <el-table-column label="来源" width="64"><template #default="{ row }">{{ modelSource(row) }}</template></el-table-column>
             <el-table-column width="60"><template #default="{ row }"><el-button link type="danger" :aria-label="`移除模型 ${row.id}`" @click="removeModel(row.id)">移除</el-button></template></el-table-column>
           </el-table>
           <el-empty v-else description="添加至少一个模型后即可保存连接" :image-size="44" />
+          <el-pagination v-if="filteredModels.length > MODEL_PAGE_SIZE" v-model:current-page="modelPage"
+            :page-size="MODEL_PAGE_SIZE" :total="filteredModels.length" layout="prev, pager, next"
+            small background class="connection-model-pager" />
           <el-form-item label="默认模型" for="connection-default-model" required>
             <el-select id="connection-default-model" v-model="draft.defaultModel" filterable placeholder="选择默认模型">
               <el-option v-for="model in draft.models" :key="model.id" :value="model.id" :label="model.name || model.id" />
@@ -83,9 +89,10 @@
           <el-collapse v-model="advanced">
             <el-collapse-item title="高级连接选项" name="advanced">
               <el-form-item label="连接超时（秒）" for="connection-timeout">
-                <el-input-number id="connection-timeout" v-model="draft.timeoutSeconds" :min="5" :max="120" />
+                <el-input-number id="connection-timeout" v-model="draft.timeoutSeconds" :min="5" :max="120" :value-on-clear="60" />
               </el-form-item>
               <div class="connection-model-heading"><h4>自定义请求头</h4><el-button link type="primary" @click="headers.push({ name: '', value: '' })">添加请求头</el-button></div>
+              <p class="connection-hint">同名请求头会覆盖内置 Authorization / x-goog-api-key。</p>
               <div v-for="(header, index) in headers" :key="index" class="connection-header-row">
                 <el-input v-model="header.name" placeholder="Header 名称" :aria-label="`请求头 ${index + 1} 名称`" />
                 <el-input v-model="header.value" type="password" show-password placeholder="Header 内容" :aria-label="`请求头 ${index + 1} 内容`" />
@@ -117,14 +124,17 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
-import { mergeConnectionModels, groupProviderTemplates } from '../aiConnections'
+import {
+  appendConnectionModel, connectionHeaderError, filterConnectionModels,
+  groupProviderTemplates, mergeConnectionModelsWithinLimit
+} from '../aiConnections'
 import { safeHttpUrl } from '../aiSettings'
 
 const props = defineProps({ modelValue: Boolean, connections: { type: Array, default: () => [] }, templates: { type: Array, default: () => [] } })
-const emit = defineEmits(['update:modelValue', 'saved', 'removed'])
+const emit = defineEmits(['update:modelValue', 'update:dirty', 'saved', 'removed'])
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) })
 const blank = () => ({ id: null, name: '', templateId: 'custom', protocol: 'openai', apiBaseUrl: '', apiKey: '', timeoutSeconds: 60, defaultModel: '', models: [] })
-const draft = ref(blank()), headers = ref([]), search = ref(''), modelEntry = ref(''), advanced = ref([])
+const draft = ref(blank()), headers = ref([]), search = ref(''), modelEntry = ref(''), modelSearch = ref(''), advanced = ref([])
 const saving = ref(false), testing = ref(false), discovering = ref(false), error = ref(''), testResult = ref(''), baseline = ref('')
 const busy = computed(() => saving.value || testing.value || discovering.value)
 const payload = () => ({ ...draft.value, headers: Object.fromEntries(headers.value.filter(h => h.name || h.value).map(h => [h.name.trim(), h.value])) })
@@ -133,13 +143,27 @@ const dirty = computed(() => !!baseline.value && fingerprint() !== baseline.valu
 const filteredConnections = computed(() => props.connections.filter(c => c.name.toLowerCase().includes(search.value.trim().toLowerCase())))
 const templateGroups = computed(() => groupProviderTemplates(props.templates))
 const selectedTemplate = computed(() => props.templates.find(template => template.id === draft.value.templateId))
+// 新建时协议由模板决定：内置模板的协议就是请求体契约，选错只会在后端被拒绝。
+// 编辑已有连接时不锁，允许把历史错配的连接改成模板要求的协议。
+const protocolLocked = computed(() => !draft.value.id && !!selectedTemplate.value && selectedTemplate.value.id !== 'custom')
+const filteredModels = computed(() => filterConnectionModels(draft.value.models, modelSearch.value))
+// 大目录（几千个模型）一次渲染会卡顿：每页 100 条，搜索或增删后回到第一页
+const MODEL_PAGE_SIZE = 100
+const modelPage = ref(1)
+const pagedModels = computed(() => filteredModels.value.slice(
+  (modelPage.value - 1) * MODEL_PAGE_SIZE, modelPage.value * MODEL_PAGE_SIZE))
+watch([modelSearch, () => filteredModels.value.length], () => { modelPage.value = 1 })
+// 内置目录 / 手动添加 / 接口获取三态：内置模型标记 isManual:false 且 isBuiltin:true；
+// 保存后 isBuiltin 不落库，按当前模板的模型目录回推，避免把内置模型显示成“获取”。
+const modelSource = row => row.isManual ? '手动' : (row.isBuiltin || selectedTemplate.value?.models?.includes(row.id)) ? '内置' : '获取'
 watch(() => fingerprint(), () => { testResult.value = '' })
+watch(dirty, value => emit('update:dirty', value), { immediate: true })
 const reset = connection => {
   const copy = connection ? JSON.parse(JSON.stringify(connection)) : blank()
-  headers.value = Object.entries(copy.headers || {}).map(([name, value]) => ({ name, value }))
+  headers.value = Object.entries(copy.headers || {}).map(([name, value]) => ({ name, value, originalName: name }))
   delete copy.headers
   draft.value = copy
-  modelEntry.value = ''; error.value = ''; testResult.value = ''; advanced.value = []
+  modelEntry.value = ''; modelSearch.value = ''; error.value = ''; testResult.value = ''; advanced.value = []
   baseline.value = fingerprint()
 }
 const canLeave = async () => {
@@ -148,18 +172,23 @@ const canLeave = async () => {
   try { await ElMessageBox.confirm('连接有未保存修改，是否放弃？', '未保存的连接', { confirmButtonText: '放弃修改', cancelButtonText: '继续编辑', type: 'warning' }); return true }
   catch { return false }
 }
-const beforeClose = async done => { if (await canLeave()) done() }
+const beforeClose = async done => {
+  if (!(await canLeave())) return
+  // 用户已确认放弃草稿：清掉脏标记，避免页面级的离开保护继续拦截路由/关闭标签页
+  baseline.value = fingerprint()
+  done()
+}
 const createConnection = async () => { if (await canLeave()) reset() }
 const editConnection = async connection => { if (await canLeave()) reset(connection) }
-const open = (connection = null) => { reset(connection || props.connections[0]); visible.value = true }
-const openCreate = () => { reset(); visible.value = true }
-defineExpose({ open, openCreate })
+const open = (connection = null) => { reset(connection || props.connections[0]); search.value = ''; visible.value = true }
+const openCreate = () => { reset(); search.value = ''; visible.value = true }
+defineExpose({ open, openCreate, dirty })
 const applyTemplate = id => {
   const template = props.templates.find(item => item.id === id)
   if (!template) return
   draft.value.name = template.id === 'custom' ? '' : template.name
   draft.value.apiBaseUrl = template.apiBaseUrl || ''
-  draft.value.models = (template.models || []).map(id => ({ id, name: id, isManual: true }))
+  draft.value.models = (template.models || []).map(id => ({ id, name: id, isManual: false, isBuiltin: true }))
   draft.value.defaultModel = template.defaultModel || ''
   draft.value.protocol = template.protocol || 'openai'
   draft.value.apiKey = ''
@@ -167,8 +196,10 @@ const applyTemplate = id => {
 }
 const mergeBuiltinModels = () => {
   const before = draft.value.models.length
-  const incoming = (selectedTemplate.value?.models || []).map(id => ({ id, name: id, isManual: true }))
-  draft.value.models = mergeConnectionModels(draft.value.models, incoming)
+  const incoming = (selectedTemplate.value?.models || []).map(id => ({ id, name: id, isManual: false, isBuiltin: true }))
+  const { models, exceeded } = mergeConnectionModelsWithinLimit(draft.value.models, incoming)
+  if (exceeded) { ElMessage.error('最多保存 2000 个模型'); return }
+  draft.value.models = models
   const added = draft.value.models.length - before
   ElMessage.info(added ? `已补充 ${added} 个模型，保存连接后生效；原有模型与默认选择已保留` : '内置模型已全部包含在当前目录中')
 }
@@ -176,7 +207,9 @@ const addModel = () => {
   const id = modelEntry.value.trim()
   if (!id) return
   if (draft.value.models.some(model => model.id === id)) { ElMessage.info('该模型已在列表中'); return }
-  draft.value.models.push({ id, name: id, isManual: true })
+  const result = appendConnectionModel(draft.value.models, { id, name: id, isManual: true })
+  if (!result.added) { ElMessage.error('最多保存 2000 个模型'); return }
+  draft.value.models = result.models
   if (!draft.value.defaultModel) draft.value.defaultModel = id
   modelEntry.value = ''
 }
@@ -186,22 +219,33 @@ const removeModel = id => {
 }
 const validate = () => {
   error.value = ''
-  const names = headers.value.filter(h => h.name || h.value).map(h => h.name.trim().toLowerCase())
-  if (new Set(names).size !== names.length) error.value = '自定义请求头名称不能重复'
+  const headerError = connectionHeaderError(headers.value)
+  if (headerError) error.value = headerError
   if (!draft.value.name.trim()) error.value = '请填写连接名称'
   if (!draft.value.apiBaseUrl.trim()) error.value = '请填写 API 地址'
+  if (!Number.isInteger(draft.value.timeoutSeconds) || draft.value.timeoutSeconds < 5 || draft.value.timeoutSeconds > 120) {
+    error.value = '请填写 5～120 之间的连接超时（秒）'
+  }
   return !error.value
 }
-const apiError = failure => { error.value = failure.response?.data?.error || failure.message || '请求失败，当前草稿已保留' }
+// 删除/测试/获取模型失败时错误只显示在可滚动编辑区顶部，footer 操作后可能看不到；
+// 这些操作用 ElMessage 额外提示，顶部 alert 仍保留完整信息。
+const apiError = (failure, notify = false) => {
+  const message = failure.response?.data?.error || failure.message || '请求失败，当前草稿已保留'
+  error.value = message
+  if (notify) ElMessage.error(message)
+}
 const discover = async () => {
   if (!validate()) return
   discovering.value = true
   try {
     const { data } = await api.post('/config/ai/connections/discover', payload(), { skipErrorMessage: true, timeout: 35000 })
-    draft.value.models = mergeConnectionModels(draft.value.models, data)
+    const { models, exceeded } = mergeConnectionModelsWithinLimit(draft.value.models, data)
+    if (exceeded) { ElMessage.error('最多保存 2000 个模型'); return }
+    draft.value.models = models
     if (!draft.value.defaultModel) draft.value.defaultModel = draft.value.models[0]?.id || ''
     ElMessage.success(`已获取 ${data.length} 个模型，保存连接后可选用`)
-  } catch (failure) { apiError(failure) }
+  } catch (failure) { apiError(failure, true) }
   finally { discovering.value = false }
 }
 const testConnection = async () => {
@@ -210,7 +254,7 @@ const testConnection = async () => {
   try {
     const { data } = await api.post('/config/ai/connections/test', payload(), { skipErrorMessage: true, timeout: 35000 })
     testResult.value = `${data.message} · ${data.model} · ${data.elapsedMs} ms`
-  } catch (failure) { apiError(failure) }
+  } catch (failure) { apiError(failure, true) }
   finally { testing.value = false }
 }
 const save = async () => {
@@ -221,7 +265,7 @@ const save = async () => {
       ? await api.put(`/config/ai/connections/${draft.value.id}`, payload(), { skipErrorMessage: true })
       : await api.post('/config/ai/connections', payload(), { skipErrorMessage: true })
     reset(data); emit('saved', data); ElMessage.success('连接已保存')
-  } catch (failure) { apiError(failure) }
+  } catch (failure) { apiError(failure, true) }
   finally { saving.value = false }
 }
 const duplicate = async () => {
@@ -230,7 +274,7 @@ const duplicate = async () => {
   try {
     const { data } = await api.post(`/config/ai/connections/${draft.value.id}/duplicate`, {}, { skipErrorMessage: true })
     reset(data); emit('saved', data); ElMessage.success('已复制连接，可独立修改')
-  } catch (failure) { apiError(failure) }
+  } catch (failure) { apiError(failure, true) }
   finally { saving.value = false }
 }
 const removeConnection = async () => {
@@ -241,7 +285,7 @@ const removeConnection = async () => {
     const id = draft.value.id
     await api.delete(`/config/ai/connections/${id}`, { skipErrorMessage: true })
     reset(); emit('removed', id); ElMessage.success('连接已删除')
-  } catch (failure) { apiError(failure) }
+  } catch (failure) { apiError(failure, true) }
   finally { saving.value = false }
 }
 </script>
@@ -261,6 +305,7 @@ const removeConnection = async () => {
 .connection-editor-heading p, .connection-hint { margin: 6px 0; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.6; }
 .connection-model-heading small { color: var(--el-text-color-secondary); font-weight: 400; }
 .connection-model-heading { flex-wrap: wrap; }
+.connection-model-search { width: 220px; max-width: 100%; }
 .connection-model-actions, .connection-template-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .connection-model-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .connection-template-links { margin-top: 5px; font-size: 12px; line-height: 1.6; }
@@ -272,6 +317,7 @@ const removeConnection = async () => {
 .connection-add-model, .connection-header-row { display: flex; gap: 8px; margin: 10px 0; }
 .connection-header-row > .el-input { min-width: 0; }
 .connection-models { margin: 12px 0 18px; }
+.connection-model-pager { display: flex; justify-content: flex-end; margin: -10px 0 14px; }
 .connection-footer, .connection-footer > div { display: flex; flex-wrap: wrap; gap: 8px; }
 .connection-footer { justify-content: space-between; }
 .connection-footer :deep(.el-button + .el-button) { margin-left: 0; }

@@ -6,12 +6,15 @@ public class AiConnectionInputDto
 {
     public string? Id { get; set; }
     public string Name { get; set; } = string.Empty;
-    public string TemplateId { get; set; } = "custom";
-    public string Protocol { get; set; } = "openai";
+    /// <summary>省略时保留连接原模板，避免部分更新把它重置成 custom。</summary>
+    public string? TemplateId { get; set; }
+    /// <summary>省略时保留连接原协议。</summary>
+    public string? Protocol { get; set; }
     public string ApiBaseUrl { get; set; } = string.Empty;
     public string? ApiKey { get; set; }
     public Dictionary<string, string> Headers { get; set; } = new();
-    public int TimeoutSeconds { get; set; } = 60;
+    /// <summary>省略时保留连接原超时。</summary>
+    public int? TimeoutSeconds { get; set; }
     public string DefaultModel { get; set; } = string.Empty;
     public List<AiConnectionModel> Models { get; set; } = [];
 }

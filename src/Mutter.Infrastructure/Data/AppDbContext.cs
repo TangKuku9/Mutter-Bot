@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Mutter.Core.Models;
 using Mutter.Infrastructure.Entities;
 
@@ -6,8 +7,12 @@ namespace Mutter.Infrastructure.Data;
 
 public class AppDbContext : DbContext
 {
+    private readonly ILogger? _logger;
     public AppDbContext() { }
-    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+    public AppDbContext(DbContextOptions<AppDbContext> options, ILogger<AppDbContext>? logger = null) : base(options)
+    {
+        _logger = logger;
+    }
     public DbSet<OutgoingReply> OutgoingReplies => Set<OutgoingReply>();
     public DbSet<AiCallRecord> AiCallRecords => Set<AiCallRecord>();
     public DbSet<AiUsageArchiveEntity> AiUsageArchives => Set<AiUsageArchiveEntity>();
@@ -41,6 +46,13 @@ public class AppDbContext : DbContext
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<AiProviderConnectionEntity>(e =>
+        {
+            e.HasKey(c => c.Id);
+            // UpdatedAt 每次保存都会刷新，用它做乐观并发令牌：两个会话同时编辑连接时，
+            // 后提交者会拿到 DbUpdateConcurrencyException 而不是静默覆盖对方的密钥/模型。
+            e.Property(c => c.UpdatedAt).IsConcurrencyToken();
+        });
         modelBuilder.Entity<AiCallRecord>(e =>
         {
             e.HasKey(r => r.Id);
@@ -707,7 +719,7 @@ public class AppDbContext : DbContext
         }
 
         await BackfillFacePlaceholdersAsync(ct);
-        await Repositories.AiConnectionStore.MigrateLegacyAsync(this, ct);
+        await Repositories.AiConnectionStore.MigrateLegacyAsync(this, _logger, ct);
     }
 
     /// <summary>新增表和预算列，保留所有既有业务表与数据。</summary>

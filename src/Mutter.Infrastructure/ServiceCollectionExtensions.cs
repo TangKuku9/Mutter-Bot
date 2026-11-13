@@ -23,9 +23,20 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IGroupMemoryRepository, GroupMemoryRepository>();
         services.AddSingleton<IStructuredAiService, StructuredAiService>();
         // HttpClient.Timeout 只是兜底；真正的预算在每次尝试内（min(尝试上限, 根期限剩余)）。
+        // 不跟随重定向：上游 302 会把带密钥的 POST 改写成发往任意地址的 GET（SSRF 放大面）。
+        // ConnectCallback 在建连时校验解析结果，防止 DNS rebinding 把请求引向云元数据地址。
         services.AddHttpClient<HttpModelTransport>()
-            .ConfigureHttpClient((sp, c) => c.Timeout = TimeSpan.FromSeconds(
-                sp.GetRequiredService<IOptions<MutterOptions>>().Value.Runtime.AiTimeoutSeconds + 5));
+            .ConfigureHttpClient((sp, c) =>
+            {
+                c.Timeout = TimeSpan.FromSeconds(
+                    sp.GetRequiredService<IOptions<MutterOptions>>().Value.Runtime.AiTimeoutSeconds + 5);
+                c.MaxResponseContentBufferSize = 4 * 1024 * 1024;
+            })
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                ConnectCallback = OutboundAddressPolicy.ConnectAsync
+            });
         services.AddSingleton<IAiModelExecutor, AiModelExecutor>();
         services.AddSingleton<IOutgoingReplyStore, OutgoingReplyStore>();
         services.AddSingleton<IAiCallStore, AiCallStore>();

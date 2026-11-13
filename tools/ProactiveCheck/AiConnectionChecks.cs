@@ -1,6 +1,8 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -13,6 +15,7 @@ using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Ai;
 using Mutter.Infrastructure.Entities;
 using Mutter.Infrastructure.Repositories;
+using Mutter.Web;
 using Mutter.Web.Controllers;
 using Mutter.Web.Models;
 
@@ -22,6 +25,8 @@ internal static class AiConnectionChecks
     {
         try
         {
+            await VerifyWebExtensionAuthAsync();
+            await VerifyLegacySchemaUpgradeAsync();
             await VerifyTemplatesAsync();
             VerifyRequestCompatibility();
             await using var sqlite = new SqliteConnection("Data Source=:memory:");
@@ -32,6 +37,7 @@ internal static class AiConnectionChecks
             db.AiPresets.AddRange(
                 new AiConfigPresetEntity { Name = "account-b", ApiKey = "account-b-secret", ConfigJson = Legacy("https://gateway.example.test/v1", "Model/A") },
                 new AiConfigPresetEntity { Name = "unknown", ConfigJson = Legacy("https://unknown.example.test/v1", "unknown-model") },
+                new AiConfigPresetEntity { Name = "legacy-external", ConfigJson = "{\"version\":1,\"apiBaseUrl\":\"https://gateway.example.test/v1\",\"modelName\":\"Model/A\",\"externalSearch\":{\"provider\":\"tavily\",\"apiKey\":\"tvly-legacy-secret\"}}" },
                 new AiConfigPresetEntity { Name = "malformed", ConfigJson = "{\"modelName\":[]}" });
             await db.SaveChangesAsync();
             await db.EnsureSchemaUpgradedAsync();
@@ -40,9 +46,41 @@ internal static class AiConnectionChecks
             await db.EnsureSchemaUpgradedAsync();
             Require(ids.SequenceEqual(await db.AiProviderConnections.OrderBy(c => c.Id).Select(c => c.Id).ToArrayAsync()), "migration must be idempotent");
             Require(migrated.Count == 2 && migrated.Select(c => c.ApiKey).Distinct().Count() == 2, "same endpoint with different credentials remains separate");
+            var currentConnectionId = (await db.AiConfigs.AsNoTracking().FirstAsync()).ProviderConnectionId;
+            Require(migrated.Single(c => c.Id == currentConnectionId).ApiKey == "account-a-secret",
+                "current config keeps its own credential through migration");
             var migratedPreset = await db.AiPresets.SingleAsync(p => p.Name == "account-b");
             var migratedConfig = JsonSerializer.Deserialize<AiPresetConfigDto>(migratedPreset.ConfigJson, AiConnectionStore.JsonOptions)!;
             Require(migratedConfig.Version == 2 && migratedConfig.ProviderConnectionId.Length > 0 && migratedPreset.ApiKey == "", "presets migrate to references without duplicated secrets");
+            var externalPreset = await db.AiPresets.SingleAsync(p => p.Name == "legacy-external");
+            Require(!externalPreset.ConfigJson.Contains("tvly-legacy-secret", StringComparison.Ordinal),
+                "legacy presets must not retain an external search key in ConfigJson");
+            // 已绑定预设的旧 Key 副本（列与 JSON）也要清掉：否则详情接口会回显“前 4 + 后 4”的打码值。
+            var boundPreset = await db.AiPresets.SingleAsync(p => p.Name == "account-b");
+            boundPreset.ApiKey = "leftover-preset-secret";
+            var boundConfig = JsonSerializer.Deserialize<AiPresetConfigDto>(boundPreset.ConfigJson, AiConnectionStore.JsonOptions)!;
+            boundConfig.ApiKey = "leftover-json-secret";
+            boundPreset.ConfigJson = JsonSerializer.Serialize(boundConfig, AiConnectionStore.JsonOptions);
+            await db.SaveChangesAsync();
+            await db.EnsureSchemaUpgradedAsync();
+            db.ChangeTracker.Clear();
+            var boundAfter = await db.AiPresets.AsNoTracking().SingleAsync(p => p.Name == "account-b");
+            Require(boundAfter.ApiKey.Length == 0 && !boundAfter.ConfigJson.Contains("leftover-json-secret", StringComparison.Ordinal),
+                "bound presets keep no key copy in either the column or ConfigJson");
+            Require(await db.AiPresets.AnyAsync(p => p.Name == "malformed"),
+                "a malformed preset is preserved instead of being deleted by migration");
+            // 跳过分支（地址无效）也必须把清掉的悬空引用落盘，否则每次启动都重复告警与计数。
+            db.AiPresets.Add(new AiConfigPresetEntity
+            {
+                Name = "dangling",
+                ConfigJson = "{\"providerConnectionId\":\"ghost-connection\",\"apiBaseUrl\":\"not-a-url\",\"modelName\":\"m\"}"
+            });
+            await db.SaveChangesAsync();
+            await db.EnsureSchemaUpgradedAsync();
+            db.ChangeTracker.Clear();
+            Require(!(await db.AiPresets.AsNoTracking().SingleAsync(p => p.Name == "dangling"))
+                    .ConfigJson.Contains("ghost-connection", StringComparison.Ordinal),
+                "clearing a dangling preset reference must be persisted even on a skip path");
             Console.WriteLine("PASS  AI 连接迁移幂等、同地址不同账号隔离、异常旧预设保留");
 
             var handler = new CatalogHandler();
@@ -51,6 +89,12 @@ internal static class AiConnectionChecks
             var capabilities = new AiSearchCapabilityStore();
             var connections = new AiConnectionsController(db, new ClientFactory(http), executor, capabilities);
             var configApi = new ConfigController(db, capabilities);
+            // 迁移已经清过列；这里再塞一个残留值，确认详情接口自己也不会按“未绑定”路径回显部分打码。
+            var seededPreset = await db.AiPresets.SingleAsync(p => p.Id == boundAfter.Id);
+            seededPreset.ApiKey = "live-leftover-secret";
+            await db.SaveChangesAsync();
+            var boundDetail = (AiPresetDetailDto)((OkObjectResult)(await configApi.GetAiPreset(boundAfter.Id)).Result!).Value!;
+            Require(boundDetail.ApiKey.Length == 0, "preset detail must not echo key fragments for bound presets");
             var list = (List<AiConnectionDto>)((OkObjectResult)(await connections.List(default)).Result!).Value!;
             Require(!JsonSerializer.Serialize(list).Contains("account-a-secret", StringComparison.Ordinal)
                 && !JsonSerializer.Serialize(list).Contains("account-b-secret", StringComparison.Ordinal), "connection catalog must mask credentials");
@@ -109,7 +153,40 @@ internal static class AiConnectionChecks
             Require(cloned.Id != b.Id && clonedEntity.ApiKey == "rotated-b-secret", "duplicating a connection preserves its independent credentials");
             Require((await connections.Create(new AiConnectionInputDto { Name = "bad", ApiBaseUrl = "file:///tmp/model" }, default)).Result is BadRequestObjectResult,
                 "invalid endpoint is rejected");
+            Require(!AiConnectionStore.IsValidUrl("http://169.254.169.254/latest")
+                && !AiConnectionStore.IsValidUrl("http://[::ffff:169.254.169.254]/")
+                && !AiConnectionStore.IsValidUrl("http://metadata.google.internal/")
+                && AiConnectionStore.IsValidUrl("http://127.0.0.1:1234/v1"),
+                "link-local and metadata endpoints are rejected while local models stay allowed");
+            var redacted = HttpModelTransport.RedactForLog("401 invalid key sk-abcdef123456\r\nINFO forged");
+            Require(redacted.Contains("sk-***", StringComparison.Ordinal)
+                && !redacted.Contains("abcdef123456", StringComparison.Ordinal)
+                && !redacted.Contains('\n') && !redacted.Contains('\r'),
+                "upstream error bodies must be redacted and flattened before logging");
+            // 网关也可能回显 Google Key 或 JSON 入参：异常消息走同一套打码，不能只认 sk- 前缀。
+            var echoed = HttpModelTransport.RedactForLog(
+                "{\"error\":\"bad key AIzaSyDTESTKEY0000000000\",\"api_key\":\"search-live-123456\",\"Authorization\":\"Bearer abcdefgh12345678\"}");
+            Require(!echoed.Contains("AIzaSyDTESTKEY0000000000", StringComparison.Ordinal)
+                && !echoed.Contains("search-live-123456", StringComparison.Ordinal)
+                && !echoed.Contains("abcdefgh12345678", StringComparison.Ordinal),
+                "echoed Google keys and JSON credential fields must be redacted too");
+            var allowedAddresses = OutboundAddressPolicy.FilterAllowed([
+                IPAddress.Parse("169.254.169.254"), IPAddress.Parse("fe80::1"),
+                IPAddress.Parse("fd00:ec2::254"), IPAddress.Parse("fd20:ce::254"),
+                IPAddress.Parse("192.168.1.10")]);
+            Require(allowedAddresses.Length == 1 && allowedAddresses[0].Equals(IPAddress.Parse("192.168.1.10")),
+                "resolved-address filtering must drop link-local/metadata (IPv4 and IPv6 ULAs) and keep private addresses");
+            var mismatched = await connections.Create(new AiConnectionInputDto
+            {
+                Name = "mismatch", TemplateId = "openai", Protocol = "gemini",
+                ApiBaseUrl = "https://api.openai.com/v1", DefaultModel = "gpt-6-luna",
+                Models = [new() { Id = "gpt-6-luna", Name = "gpt-6-luna" }]
+            }, default);
+            Require(mismatched.Result is BadRequestObjectResult,
+                "a built-in template must reject a conflicting connection protocol");
             capabilities.RecordProbe("same", "Model/A", "s", true, "account-a");
+            Require(capabilities.GetProbeImageCapability("same", "Model/A", "s", "account-a") is true,
+                "probe records must be readable under the same key");
             Require(capabilities.GetProbeImageCapability("same", "Model/A", "s", "account-b") is null
                 && capabilities.GetProbeImageCapability("same", "model/a", "s", "account-a") is null,
                 "capability results remain scoped to exact connection and model");
@@ -131,6 +208,198 @@ internal static class AiConnectionChecks
                 [AiMessage.Plain("user", "OK")]), nativeConfig, AiSearchStrategy.CompatNoSearch, default);
             Require(compatibleResult.Content == "OK", "OpenAI-compatible connection passes custom headers to the actual transport");
             Console.WriteLine("PASS  OpenAI 兼容与 Gemini 原生连接的实际 HTTP 协议和请求头正确");
+
+            // ===== 回归：Gemini 原生连接的结构化输出必须以 responseMimeType 表达 =====
+            using var structuredHttp = new HttpClient(new StructuredGeminiHandler());
+            var structuredTransport = new HttpModelTransport(structuredHttp, NullLogger<HttpModelTransport>.Instance);
+            var structuredExecutor = new AiModelExecutor(structuredTransport, NullLogger<AiModelExecutor>.Instance);
+            var structuredConfig = new AiConfig
+            {
+                ApiBaseUrl = "https://gateway.example.test/v1beta", ApiKey = "native-key", Protocol = "gemini",
+                ModelName = "gemini-model", MaxTokens = 64, MaxInputTokens = 512
+            };
+            var structuredResult = await structuredExecutor.ExecuteAsync(
+                new AiChatRequest("Return JSON.", [AiMessage.Plain("user", "OK")], "json_object"),
+                structuredConfig, AiSearchStrategy.CompatNoSearch, default);
+            Require(structuredResult.Content.Contains("\"ok\":true", StringComparison.Ordinal),
+                "Gemini structured output must run through responseMimeType instead of failing locally");
+            Console.WriteLine("PASS  Gemini 原生连接的结构化输出走 responseMimeType，不再本地 415");
+
+            // ===== 回归：打码值往返、大小写改名与 origin 校验 =====
+            var listed = (List<AiConnectionDto>)((OkObjectResult)(await connections.List(default)).Result!).Value!;
+            var maskedConnection = listed.Single(c => c.Id == b.Id);
+            Require(maskedConnection.ApiKey == AiConnectionStore.SecretMask
+                && maskedConnection.Headers["X-Tenant"] == AiConnectionStore.SecretMask,
+                "connection list must return full masks for key and headers");
+            var roundTrip = Copy(maskedConnection);
+            Require((await connections.Update(b.Id!, roundTrip, default)).Result is OkObjectResult, "masked update must be accepted");
+            var afterRoundTrip = (await db.AiProviderConnections.FindAsync(b.Id))!;
+            Require(afterRoundTrip.ApiKey == "rotated-b-secret"
+                && AiConnectionStore.Headers(afterRoundTrip)["X-Tenant"] == "tenant-secret",
+                "unchanged masks must keep the real credentials");
+            var caseOnly = Copy(maskedConnection);
+            caseOnly.Headers = new() { ["x-tenant"] = AiConnectionStore.SecretMask };
+            Require((await connections.Update(b.Id!, caseOnly, default)).Result is OkObjectResult, "case-only header rename is accepted");
+            var afterCase = (await db.AiProviderConnections.FindAsync(b.Id))!;
+            Require(AiConnectionStore.Headers(afterCase)["x-tenant"] == "tenant-secret",
+                "case-only header rename keeps the existing value");
+            var revisionBefore = afterCase.Revision;
+            Require((await connections.Update(b.Id!, Copy(maskedConnection), default)).Result is OkObjectResult,
+                "equivalent header update is accepted");
+            Require((await db.AiProviderConnections.FindAsync(b.Id))!.Revision == revisionBefore,
+                "header case changes must not rotate the connection revision");
+            var newHeaderMask = Copy(maskedConnection);
+            newHeaderMask.Headers = new()
+            {
+                ["X-Tenant"] = AiConnectionStore.SecretMask,
+                ["X-New"] = AiConnectionStore.SecretMask
+            };
+            Require((await connections.Update(b.Id!, newHeaderMask, default)).Result is BadRequestObjectResult,
+                "a mask pasted into a brand-new header must be rejected instead of stored as empty");
+            // 带连接 ID 但字段类型错误的预设不能让连接编辑 500
+            db.AiPresets.Add(new AiConfigPresetEntity
+            {
+                Name = "broken-bound",
+                ConfigJson = $"{{\"providerConnectionId\":\"{b.Id}\",\"modelName\":[]}}"
+            });
+            await db.SaveChangesAsync();
+            Require((await connections.Update(b.Id!, Copy(maskedConnection), default)).Result is OkObjectResult,
+                "a corrupt preset referencing the connection must not break editing");
+            var moved = Copy(maskedConnection);
+            moved.ApiBaseUrl = "https://attacker.example.test/v1";
+            Require((await connections.Update(b.Id!, moved, default)).Result is BadRequestObjectResult,
+                "masked credentials must not follow a new origin on update");
+            Require((await connections.Discover(moved, default)).Result is BadRequestObjectResult,
+                "masked credentials must not be replayed to a new origin by discovery");
+            Console.WriteLine("PASS  打码密钥与请求头可往返、改大小写不丢值、换 origin 拒绝解析");
+
+            // ===== 回归：连接版本失效必须清空旧搜索策略，匹配版本保留 =====
+            var configEntity = await db.AiConfigs.FirstAsync();
+            configEntity.WebSearchEndpoint = "openai";
+            configEntity.WebSearchShape = "enable_search";
+            configEntity.WebSearchVerifiedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+            var staleInput = Config(b.Id!, "Model/A");
+            staleInput.WebSearchEndpoint = "openai";
+            staleInput.WebSearchShape = "enable_search";
+            staleInput.ProviderConnectionVersion = "stale-revision";
+            Require(await configApi.UpdateAiConfig(staleInput) is NoContentResult, "stale version save is accepted (safely degraded)");
+            var degraded = await db.AiConfigs.AsNoTracking().FirstAsync();
+            Require(degraded.WebSearchEndpoint.Length == 0 && degraded.WebSearchShape.Length == 0
+                && degraded.WebSearchVerifiedAt is null,
+                "stale connection version must clear the search strategy and its verified time");
+            var freshInput = Config(b.Id!, "Model/A");
+            freshInput.WebSearchEndpoint = "openai";
+            freshInput.WebSearchShape = "enable_search";
+            freshInput.ProviderConnectionVersion = (await db.AiProviderConnections.FindAsync(b.Id))!.Revision;
+            Require(await configApi.UpdateAiConfig(freshInput) is NoContentResult, "matching version is accepted");
+            Require((await db.AiConfigs.AsNoTracking().FirstAsync()).WebSearchShape == "enable_search",
+                "matching version keeps the selected strategy");
+            Console.WriteLine("PASS  连接版本失效清空搜索策略，版本匹配时保留");
+
+            // ===== 回归：被当前配置/预设引用的模型不能移除 =====
+            var guardResult = await connections.Create(new AiConnectionInputDto
+            {
+                Name = "ref-guard", ApiBaseUrl = "https://ref.example.test/v1", DefaultModel = "X",
+                Models = [new() { Id = "X", Name = "X" }, new() { Id = "Y", Name = "Y" }]
+            }, default);
+            var guard = (AiConnectionDto)((OkObjectResult)guardResult.Result!).Value!;
+            Require(await configApi.UpdateAiConfig(Config(guard.Id!, "X")) is NoContentResult, "bind config to the guard connection");
+            var removeX = Copy(guard);
+            removeX.Models = [new() { Id = "Y", Name = "Y" }];
+            removeX.DefaultModel = "Y";
+            Require((await connections.Update(guard.Id!, removeX, default)).Result is ConflictObjectResult,
+                "model referenced by the current config cannot be removed");
+            Require(await configApi.UpdateAiConfig(Config(guard.Id!, "Y")) is NoContentResult, "switch the current model to Y");
+            var guardPreset = await configApi.CreateAiPreset(new AiPresetSaveDto { Name = "guard-preset", Config = Config(guard.Id!, "X") });
+            Require(guardPreset.Result is CreatedAtActionResult, "preset can reference X");
+            Require((await connections.Update(guard.Id!, removeX, default)).Result is ConflictObjectResult,
+                "model referenced by a preset cannot be removed");
+            Console.WriteLine("PASS  当前配置与预设引用的模型都不能被移除");
+
+            // ===== 回归：刚探测并选用的策略，即使目标同时变化也必须保留 =====
+            var keepEntity = await db.AiConfigs.FirstAsync();
+            keepEntity.WebSearchEndpoint = "openai";
+            keepEntity.WebSearchShape = "enable_search";
+            keepEntity.WebSearchVerifiedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+            capabilities.RecordProbe(guard.ApiBaseUrl, "X", "enable_search", true, guard.Id!);
+            var keepInput = Config(guard.Id!, "X");
+            keepInput.WebSearchEndpoint = "openai";
+            keepInput.WebSearchShape = "enable_search";
+            keepInput.ProviderConnectionVersion = (await db.AiProviderConnections.FindAsync(guard.Id))!.Revision;
+            Require(await configApi.UpdateAiConfig(keepInput) is NoContentResult, "probe-selected strategy save is accepted");
+            var keptEntity = await db.AiConfigs.AsNoTracking().FirstAsync();
+            Require(keptEntity.WebSearchShape == "enable_search" && keptEntity.WebSearchImageCapable is true,
+                "a freshly probed strategy must survive a simultaneous target change");
+            Console.WriteLine("PASS  刚探测选用的搜索策略不会因切换目标被静默清空");
+
+            // ===== 回归：解绑连接时清空主配置里的密钥副本 =====
+            Require(await configApi.UpdateAiConfig(Config(b.Id!, "Model/A")) is NoContentResult,
+                "bind the config back to the keyed connection");
+            var boundEntity = await db.AiConfigs.AsNoTracking().FirstAsync();
+            Require(boundEntity.ApiKey == "rotated-b-secret", "bound config stores a compatibility copy for old APIs");
+            var unbindInput = Config(string.Empty, "Model/A");
+            unbindInput.ApiBaseUrl = boundEntity.ApiBaseUrl;
+            unbindInput.ApiKey = AiConnectionStore.SecretMask;
+            Require(await configApi.UpdateAiConfig(unbindInput) is NoContentResult, "unbind save is accepted");
+            var unboundEntity = await db.AiConfigs.AsNoTracking().FirstAsync();
+            Require(unboundEntity.ProviderConnectionId.Length == 0 && unboundEntity.ApiKey.Length == 0,
+                "unbinding must clear the compatibility key copy");
+            Console.WriteLine("PASS  解绑连接会清空主配置的密钥副本");
+
+            // ===== 回归：并发编辑连接必须冲突而不是静默覆盖 =====
+            // 两个会话都在写之前读到旧行（控制器 Update 也是先读后写），后提交者必须被并发令牌拒绝。
+            var options = new DbContextOptionsBuilder<AppDbContext>().UseSqlite(sqlite).Options;
+            await using var firstDb = new AppDbContext(options);
+            await using var secondDb = new AppDbContext(options);
+            var firstCopy = await firstDb.AiProviderConnections.FindAsync(guard.Id);
+            var secondCopy = await secondDb.AiProviderConnections.FindAsync(guard.Id);
+            firstCopy!.Name = "first-writer";
+            firstCopy.UpdatedAt = new DateTime(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            await firstDb.SaveChangesAsync();
+            secondCopy!.Name = "second-writer";
+            var conflicted = false;
+            try { await secondDb.SaveChangesAsync(); }
+            catch (DbUpdateConcurrencyException) { conflicted = true; }
+            Require(conflicted, "concurrent connection edits must be rejected instead of overwriting each other");
+            Require((await db.AiProviderConnections.AsNoTracking().FirstAsync(c => c.Id == guard.Id)).Name == "first-writer",
+                "the rejected writer must not overwrite the committed row");
+            Console.WriteLine("PASS  并发编辑连接会得到冲突而不是互相覆盖");
+
+            // ===== 回归：Gemini 原生目录发现（字段名、前缀剥离、认证头） =====
+            var geminiHandler = new GeminiCatalogHandler();
+            using var geminiHttp = new HttpClient(geminiHandler);
+            var geminiApi = new AiConnectionsController(db, new ClientFactory(geminiHttp), executor);
+            var geminiDiscover = await geminiApi.Discover(new AiConnectionInputDto
+            {
+                Name = "gemini-discover", Protocol = "gemini", ApiBaseUrl = "https://g.example.test/v1beta",
+                ApiKey = "gemini-key", DefaultModel = "gemini-x",
+                Models = [new() { Id = "gemini-x", Name = "gemini-x" }]
+            }, default);
+            var geminiModels = (List<AiConnectionModel>)((OkObjectResult)geminiDiscover.Result!).Value!;
+            Require(geminiModels.Select(m => m.Id).SequenceEqual(["gemini-x", "gemini-y"]),
+                "gemini discovery must read the models array and strip the models/ prefix");
+            Require(geminiHandler.LastPath == "/v1beta/models?pageSize=1000",
+                "gemini discovery must call the native models endpoint");
+            Console.WriteLine("PASS  Gemini 原生目录发现正确解析 models 数组与前缀");
+
+            // ===== 回归：连接数量上限 =====
+            var existingCount = await db.AiProviderConnections.CountAsync();
+            for (var i = existingCount; i < 100; i++)
+                db.AiProviderConnections.Add(new AiProviderConnectionEntity
+                {
+                    Name = $"bulk-{i}", ApiBaseUrl = $"https://bulk{i}.example.test/v1",
+                    ModelsJson = "[{\"id\":\"m\",\"name\":\"m\"}]", DefaultModel = "m"
+                });
+            await db.SaveChangesAsync();
+            var overflow = await connections.Create(new AiConnectionInputDto
+            {
+                Name = "overflow", ApiBaseUrl = "https://overflow.example.test/v1",
+                DefaultModel = "m", Models = [new() { Id = "m", Name = "m" }]
+            }, default);
+            Require(overflow.Result is BadRequestObjectResult, "connection cap must reject the 101st row");
+            Console.WriteLine("PASS  连接数量上限生效");
             return true;
         }
         catch (Exception ex)
@@ -141,6 +410,71 @@ internal static class AiConnectionChecks
     }
 
     private static void Require(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
+
+    /// <summary>
+    /// 公开入口 ConfigureMutterWeb 必须自带鉴权：漏挂时所有 API/Hub 在无会话时也能访问。
+    /// 起一个随机端口的宿主，断言未登录请求得到 401。
+    /// </summary>
+    private static async Task VerifyWebExtensionAuthAsync()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        var app = builder.ConfigureMutterWeb();
+        await app.StartAsync();
+        try
+        {
+            var address = app.Urls.First();
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            using var response = await client.GetAsync($"{address}/api/config/ai");
+            Require(response.StatusCode == HttpStatusCode.Unauthorized,
+                "the public web extension must protect API routes with the panel auth middleware");
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+        Console.WriteLine("PASS  ConfigureMutterWeb 公开入口自带面板鉴权");
+    }
+
+    /// <summary>
+    /// 用“删掉新表/新列”的库模拟升级前结构，验证补表/补列与数据迁移是真实执行过的，
+    /// 而不是只在 EnsureCreated 建好的新结构上走 duplicate 分支。
+    /// </summary>
+    private static async Task VerifyLegacySchemaUpgradeAsync()
+    {
+        await using var sqlite = new SqliteConnection("Data Source=:memory:");
+        await sqlite.OpenAsync();
+        await using var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseSqlite(sqlite).Options);
+        await db.Database.EnsureCreatedAsync();
+        db.AiConfigs.Add(new AiConfigEntity
+        {
+            ApiBaseUrl = "https://legacy.example.test/v1", ApiKey = "legacy-secret", ModelName = "legacy-model"
+        });
+        await db.SaveChangesAsync();
+        // 还原升级前结构：没有连接表，AiConfigs 也没有 ProviderConnectionId。
+        await db.Database.ExecuteSqlRawAsync("DROP TABLE \"AiProviderConnections\"");
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"AiConfigs\" DROP COLUMN \"ProviderConnectionId\"");
+        await db.EnsureSchemaUpgradedAsync();
+        await db.EnsureSchemaUpgradedAsync();
+        var columnCount = await db.Database.SqlQueryRaw<int>(
+            "SELECT COUNT(*) AS \"Value\" FROM pragma_table_info('AiConfigs') WHERE name = 'ProviderConnectionId'").SingleAsync();
+        Require(columnCount == 1, "legacy database must gain the ProviderConnectionId column");
+        var connections = await db.AiProviderConnections.ToListAsync();
+        Require(connections.Count == 1 && connections[0].ApiKey == "legacy-secret",
+            "legacy credentials must migrate into a connection");
+        var runtime = (await new ConfigRepository(db).GetAiConfigAsync())!;
+        Require(runtime.ProviderConnectionId == connections[0].Id && runtime.ApiKey == "legacy-secret"
+            && runtime.ModelName == "legacy-model", "legacy config must resolve through the migrated connection");
+        // 悬空引用：连接被删掉后读取必须降级而不是抛异常，重启迁移自愈。
+        await db.Database.ExecuteSqlRawAsync("DELETE FROM \"AiProviderConnections\"");
+        var degraded = (await new ConfigRepository(db).GetAiConfigAsync())!;
+        Require(degraded.ApiKey == "legacy-secret" && degraded.ApiBaseUrl == "https://legacy.example.test/v1",
+            "dangling connection must degrade to legacy fields instead of throwing");
+        await db.EnsureSchemaUpgradedAsync();
+        Require(await db.AiProviderConnections.CountAsync() == 1,
+            "startup migration must rebuild a dangling connection");
+        Console.WriteLine("PASS  旧库结构升级（补表/补列）幂等且保留凭据");
+    }
 
     private static async Task VerifyTemplatesAsync()
     {
@@ -194,6 +528,35 @@ internal static class AiConnectionChecks
             "generic compatible services retain their original request contract");
         var claude = OpenAiRequestBuilder.Build(request, new AiConfig { ProviderTemplateId = "anthropic" }, null);
         Require(!claude.ContainsKey("response_format") && claude.ContainsKey("messages"), "Claude compatible layer must not receive unsupported json_object requests");
+        // 聚合平台：模型自带厂商前缀时按家族套用同一套参数约束，未知厂商保持原样
+        foreach (var (template, model) in new[]
+        {
+            ("openrouter", "openai/gpt-6-luna"),
+            ("siliconflow", "moonshotai/Kimi-K2.7-Code"),
+            ("siliconflow", "Pro/moonshotai/Kimi-K2.7-Code"),
+            ("together", "MiniMaxAI/MiniMax-M3.1-Flash"),
+            ("groq", "gpt-6-luna"),
+            ("openrouter", "kimi-k3.1-pro")
+        })
+        {
+            var body = OpenAiRequestBuilder.Build(request,
+                new AiConfig { ProviderTemplateId = template, ModelName = model, MaxTokens = 1024, Temperature = 0.3 }, null);
+            Require(body.GetValueOrDefault("max_completion_tokens") is 1024 && !body.ContainsKey("max_tokens")
+                && !body.ContainsKey("temperature"),
+                $"aggregator model {model} must use the same parameter contract as its official endpoint");
+            if (model.Contains("MiniMax", StringComparison.Ordinal))
+                Require(body.GetValueOrDefault("reasoning_split") is true,
+                    "MiniMax behind an aggregator must keep its thinking separate");
+        }
+        // Claude 的 json_object 规避只针对 Anthropic 官方兼容层；聚合平台自己翻译，删掉反而丢掉 JSON 保障。
+        var claudeViaAggregator = OpenAiRequestBuilder.Build(request,
+            new AiConfig { ProviderTemplateId = "openrouter", ModelName = "anthropic/claude-sonnet-5.5" }, null);
+        Require(claudeViaAggregator.ContainsKey("response_format"),
+            "Claude behind an aggregator must keep json_object: the compat-layer quirk does not apply there");
+        var unknownAggregator = OpenAiRequestBuilder.Build(request,
+            new AiConfig { ProviderTemplateId = "together", ModelName = "Qwen/Qwen3.8-Flash", MaxTokens = 512, Temperature = 0.3 }, null);
+        Require(unknownAggregator.GetValueOrDefault("max_tokens") is 512 && unknownAggregator.ContainsKey("temperature"),
+            "unrecognized aggregator models must keep their original request contract");
         Console.WriteLine("PASS  新 GPT、Kimi、MiniMax 参数约束与 Claude 兼容层处理正确，旧兼容接口行为保留");
     }
     private static string Legacy(string url, string model) => JsonSerializer.Serialize(new { version = 1, apiBaseUrl = url, modelName = model });
@@ -224,6 +587,40 @@ internal static class AiConnectionChecks
             {
                 Content = new StringContent("{\"data\":[{\"id\":\"Model/A\"},{\"id\":\"model/a\"}]}", Encoding.UTF8, "application/json")
             });
+        }
+    }
+    private sealed class GeminiCatalogHandler : HttpMessageHandler
+    {
+        public string? LastPath { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            LastPath = request.RequestUri!.PathAndQuery;
+            Require(request.Headers.TryGetValues("x-goog-api-key", out var keys) && keys.Single() == "gemini-key",
+                "gemini discovery must use the native API-key header");
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"models\":[{\"name\":\"models/gemini-x\"},{\"name\":\"gemini-y\"},{\"name\":\"models/bad\\u0001id\"}]}",
+                    Encoding.UTF8, "application/json")
+            });
+        }
+    }
+    private sealed class StructuredGeminiHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Require(request.RequestUri!.AbsolutePath.EndsWith(":generateContent", StringComparison.Ordinal),
+                "structured output must use the native Gemini endpoint");
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            Require(body.Contains("\"responseMimeType\":\"application/json\"", StringComparison.Ordinal),
+                "structured output must set generationConfig.responseMimeType");
+            Require(!body.Contains("\"tools\"", StringComparison.Ordinal),
+                "structured request must not combine search tools with JSON mode");
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"{\\\"ok\\\":true}\"}]}}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}",
+                    Encoding.UTF8, "application/json")
+            };
         }
     }
     private sealed class RecordingExecutor : IAiModelExecutor

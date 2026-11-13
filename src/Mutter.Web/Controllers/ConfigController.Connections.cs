@@ -21,8 +21,9 @@ public partial class ConfigController
         if (model.ContextWindowTokens is int context && dto.ContextWindowTokens > context)
             return $"该模型的上下文容量为 {context}，请调整后保存";
         var version = connection.Revision;
-        if (dto.ProviderConnectionVersion.Length > 0 && dto.ProviderConnectionVersion != version)
+        if (dto.ProviderConnectionVersion != version)
         {
+            // 版本为空也视为过期：旧客户端/旧预设不能把未经本连接验证的搜索策略带进来。
             dto.WebSearchEndpoint = "";
             dto.WebSearchShape = "";
         }

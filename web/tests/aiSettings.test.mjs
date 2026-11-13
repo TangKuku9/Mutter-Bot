@@ -270,3 +270,40 @@ test('表单产生未保存修改后清掉预设选中标记（P2-2）', async t
   await flush()
   assert.equal(component.selectedPresetId.value, null)
 })
+
+test('切换连接按连接记忆预算：切回时恢复上次值，不被另一连接上限永久压小', async t => {
+  const { component } = await createPage(t)
+  const connectionA = { id: 'connection-a', apiBaseUrl: 'https://a.example.test', apiKey: '********', revision: 'rev-a' }
+  const connectionB = { id: 'connection-b', apiBaseUrl: 'https://b.example.test', apiKey: '********', revision: 'rev-b' }
+  const modelA = { id: 'base-model', contextWindowTokens: 200000, maxOutputTokens: 32000 }
+  const modelB = { id: 'cheap-model', contextWindowTokens: 32768, maxOutputTokens: 4096 }
+  // A 上用户手动调整过的预算
+  component.form.value.contextWindowTokens = 128000
+  component.form.value.maxTokens = 16000
+  component.form.value.maxInputTokens = 80000
+
+  // A→B：B 没有快照，按 B 的模型上限收敛
+  component.connectionChanged({ connection: connectionB, model: modelB })
+  assert.equal(component.form.value.contextWindowTokens, 32768)
+  assert.equal(component.form.value.maxTokens, 4096)
+  assert.equal(component.form.value.maxInputTokens, 32768 - 4096 - 1024)
+
+  // B→A：恢复 A 离开时的预算，而不是被 B 的上限压小
+  component.connectionChanged({ connection: connectionA, model: modelA })
+  assert.equal(component.form.value.contextWindowTokens, 128000)
+  assert.equal(component.form.value.maxTokens, 16000)
+  assert.equal(component.form.value.maxInputTokens, 80000)
+
+  // 在 A 上继续手动编辑后离开：快照保存的是最新编辑值，而不是首次进入时的值
+  component.form.value.contextWindowTokens = 160000
+  component.form.value.maxTokens = 20000
+  component.form.value.maxInputTokens = 100000
+  component.connectionChanged({ connection: connectionB, model: modelB })
+  // B 也有快照：恢复 B 离开时的预算
+  assert.equal(component.form.value.contextWindowTokens, 32768)
+  assert.equal(component.form.value.maxTokens, 4096)
+  component.connectionChanged({ connection: connectionA, model: modelA })
+  assert.equal(component.form.value.contextWindowTokens, 160000)
+  assert.equal(component.form.value.maxTokens, 20000)
+  assert.equal(component.form.value.maxInputTokens, 100000)
+})

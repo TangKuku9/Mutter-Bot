@@ -221,7 +221,8 @@ public class AiChatService : IAiChatService
             config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId);
         var knownUnsupported = capability == false || runtimeUnsupported;
 
-        // 原生通道没法无损承载结构化输出：两段式可以把 JSON 约束留给第二步，否则退回不检索。
+        // 原生通道的 JSON 约束走 responseMimeType；检索工具与 JSON 模式无法同请求保证，
+        // 两段式把 JSON 留给第二步，否则本次退回不检索的结构化调用。
         if (strategy.Endpoint == "gemini" && request.ResponseFormat is not null)
         {
             if (config.WebSearchImageMode == AiConfig.WebSearchImageModeTwoStage)
