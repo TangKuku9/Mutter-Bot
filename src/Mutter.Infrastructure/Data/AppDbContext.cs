@@ -16,6 +16,7 @@ public class AppDbContext : DbContext
     public DbSet<GroupInfo> GroupInfos => Set<GroupInfo>();
     public DbSet<GroupConfigEntity> GroupConfigs => Set<GroupConfigEntity>();
     public DbSet<AiConfigEntity> AiConfigs => Set<AiConfigEntity>();
+    public DbSet<AiProviderConnectionEntity> AiProviderConnections => Set<AiProviderConnectionEntity>();
     public DbSet<PrivateChatConfigEntity> PrivateChatConfigs => Set<PrivateChatConfigEntity>();
     public DbSet<KnownGroupEntity> KnownGroups => Set<KnownGroupEntity>();
     public DbSet<KnownUserEntity> KnownUsers => Set<KnownUserEntity>();
@@ -145,6 +146,27 @@ public class AppDbContext : DbContext
     public async Task EnsureSchemaUpgradedAsync(CancellationToken ct = default)
     {
         await EnsureRuntimeSchemaAsync(ct);
+        await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "AiProviderConnections" (
+                "Id" TEXT NOT NULL PRIMARY KEY, "Revision" TEXT NOT NULL, "Name" TEXT NOT NULL, "TemplateId" TEXT NOT NULL,
+                "Protocol" TEXT NOT NULL, "ApiBaseUrl" TEXT NOT NULL, "ApiKey" TEXT NOT NULL,
+                "HeadersJson" TEXT NOT NULL, "TimeoutSeconds" INTEGER NOT NULL,
+                "DefaultModel" TEXT NOT NULL, "ModelsJson" TEXT NOT NULL,
+                "CreatedAt" TEXT NOT NULL, "UpdatedAt" TEXT NOT NULL
+            );
+            """, ct);
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"AiConfigs\" ADD COLUMN \"ProviderConnectionId\" TEXT NOT NULL DEFAULT ''", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name")) { }
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"AiProviderConnections\" ADD COLUMN \"Revision\" TEXT NOT NULL DEFAULT ''", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name")) { }
         // 历史遗留修复：GroupConfigs / PrivateChatConfigs 是从 Windows 版带过来的，主键建成了
         // INTEGER AUTOINCREMENT（那时的群号是纯数字）。QQ 官方现在下发的是十六进制 openid，
         // 而 EF 按 string 映射这两个键 → 任何新群/新好友的配置写入都会 "datatype mismatch" 500。
@@ -685,6 +707,7 @@ public class AppDbContext : DbContext
         }
 
         await BackfillFacePlaceholdersAsync(ct);
+        await Repositories.AiConnectionStore.MigrateLegacyAsync(this, ct);
     }
 
     /// <summary>新增表和预算列，保留所有既有业务表与数据。</summary>

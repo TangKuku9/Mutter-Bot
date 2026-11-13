@@ -502,8 +502,20 @@ public sealed record ProbeSendResult(int? Status, JsonElement? Root, string? Err
 /// 探测端点的运行时壳：真实发 HTTP。逻辑部分全部委托给 <see cref="WebSearchProbe"/>。
 /// </summary>
 public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeRunner> logger,
-    IAiCallStore? callStore = null, TimeProvider? clock = null)
+    IAiCallStore? callStore = null, TimeProvider? clock = null,
+    IReadOnlyDictionary<string, string>? requestHeaders = null)
 {
+    public WebSearchProbeRunner WithHeaders(IReadOnlyDictionary<string, string> headers) =>
+        new(httpClient, logger, callStore, clock, headers);
+
+    private void ApplyHeaders(HttpRequestMessage request)
+    {
+        foreach (var (name, value) in requestHeaders ?? new Dictionary<string, string>())
+        {
+            request.Headers.Remove(name);
+            request.Headers.TryAddWithoutValidation(name, value);
+        }
+    }
     /// <summary>单形状请求超时；探测不该让用户等太久。</summary>
     private static readonly TimeSpan PerRequestTimeout = TimeSpan.FromSeconds(20);
 
@@ -537,6 +549,7 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
             using var request = new HttpRequestMessage(HttpMethod.Post, url);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
             request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+            ApplyHeaders(request);
             using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "openai", cts.Token, callStore, logger, clock, "probe", "probe");
             var raw = await response.Content.ReadAsStringAsync(cts.Token);
             JsonElement? root = null;
@@ -571,6 +584,7 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
                 if (!apiKey.StartsWith("AIza"))
                     request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
                 request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                ApplyHeaders(request);
                 using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "gemini", cts.Token, callStore, logger, clock, "probe", "probe");
                 var raw = await response.Content.ReadAsStringAsync(cts.Token);
                 JsonElement? root = null;
@@ -608,6 +622,7 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
             using var request = new HttpRequestMessage(HttpMethod.Post, url);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
             request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+            ApplyHeaders(request);
             using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "openai", cts.Token, callStore, logger, clock, "probe", "probe");
             var raw = await response.Content.ReadAsStringAsync(cts.Token);
             JsonElement? root = null;
@@ -643,6 +658,7 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
                 if (!apiKey.StartsWith("AIza"))
                     request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
                 request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                ApplyHeaders(request);
                 using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "gemini", cts.Token, callStore, logger, clock, "probe", "probe");
                 var raw = await response.Content.ReadAsStringAsync(cts.Token);
                 JsonElement? root = null;

@@ -16,7 +16,7 @@ namespace Mutter.Web.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class ConfigController : ControllerBase
+public partial class ConfigController : ControllerBase
 {
     private readonly AppDbContext _dbContext;
     private readonly Mutter.Core.Services.AiSearchCapabilityStore _capabilities;
@@ -39,6 +39,9 @@ public class ConfigController : ControllerBase
     {
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
         var characters = await BuildCharacterListAsync();
+        var connections = await AiConnectionsController.BuildListAsync(_dbContext);
+        var connection = entity == null ? null : await _dbContext.AiProviderConnections
+            .AsNoTracking().FirstOrDefaultAsync(c => c.Id == entity.ProviderConnectionId);
 
         var providers = AiProviderPreset.GetDefaults().Select(p => new ProviderPresetDto
         {
@@ -66,6 +69,7 @@ public class ConfigController : ControllerBase
                 ExternalSearch = new ExternalSearchInputDto(),
                 ExternalSearchStatus = new ExternalSearchStatusDto(),
                 AvailableCharacters = characters,
+                Connections = connections,
                 AvailableProviders = providers
             };
         }
@@ -73,8 +77,11 @@ public class ConfigController : ControllerBase
         var external = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson);
         return new AiConfigDto
         {
-            ApiBaseUrl = entity.ApiBaseUrl,
-            ApiKey = MaskApiKey(entity.ApiKey),
+            ProviderConnectionId = entity.ProviderConnectionId,
+            ProviderConnectionVersion = connection?.Revision ?? "",
+            Connections = connections,
+            ApiBaseUrl = connection?.ApiBaseUrl ?? entity.ApiBaseUrl,
+            ApiKey = MaskApiKey(connection?.ApiKey ?? entity.ApiKey),
             ModelName = entity.ModelName,
             SystemPrompt = entity.SystemPrompt,
             Personality = entity.Personality,
@@ -126,11 +133,13 @@ public class ConfigController : ControllerBase
             _dbContext.AiConfigs.Add(entity);
         }
 
-        var error = NormalizeAndValidateAiConfigInput(dto, ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson));
+        var error = await ResolveConnectionAsync(dto)
+            ?? NormalizeAndValidateAiConfigInput(dto, ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson));
         if (error != null)
             return BadRequest(new { error });
 
-        ApplyNormalizedAiConfigInput(entity, dto, ResolveSubmittedApiKey(entity.ApiKey, dto.ApiKey));
+        ApplyNormalizedAiConfigInput(entity, dto, dto.ProviderConnectionId.Length > 0 ? dto.ApiKey
+            : ResolveSubmittedApiKey(entity.ApiKey, dto.ApiKey));
         await _dbContext.SaveChangesAsync();
         return NoContent();
     }
@@ -180,10 +189,12 @@ public class ConfigController : ControllerBase
         if (dto.Config == null)
         {
             config = SnapshotAiConfig(current);
+            var connectionError = await ResolveConnectionAsync(config);
+            if (connectionError != null) return BadRequest(new { error = connectionError });
         }
         else
         {
-            var inputError = NormalizeAndValidateAiConfigInput(dto.Config);
+            var inputError = await ResolveConnectionAsync(dto.Config) ?? NormalizeAndValidateAiConfigInput(dto.Config);
             if (inputError != null) return BadRequest(new { error = inputError });
             config = ToPresetConfig(dto.Config);
         }
@@ -198,7 +209,7 @@ public class ConfigController : ControllerBase
             Description = description,
             ConfigJson = configJson,
             // 表单里的 Key 为空或仍是打码值时，取当前已保存的真 Key；取消勾选则明确不存。
-            ApiKey = dto.IncludeApiKey
+            ApiKey = config.ProviderConnectionId.Length == 0 && dto.IncludeApiKey
                 ? ResolveSubmittedApiKey(current?.ApiKey, dto.Config?.ApiKey)
                 : string.Empty,
             CreatedAt = DateTime.UtcNow,
@@ -229,11 +240,11 @@ public class ConfigController : ControllerBase
         // 不传 Config = 只改名称/备注，快照和 Key 都保持原样。
         if (dto.Config != null)
         {
-            var inputError = NormalizeAndValidateAiConfigInput(dto.Config);
+            var inputError = await ResolveConnectionAsync(dto.Config) ?? NormalizeAndValidateAiConfigInput(dto.Config);
             if (inputError != null) return BadRequest(new { error = inputError });
 
             var current = await _dbContext.AiConfigs.FirstOrDefaultAsync();
-            entity.ApiKey = dto.IncludeApiKey switch
+            entity.ApiKey = dto.Config.ProviderConnectionId.Length > 0 ? string.Empty : dto.IncludeApiKey switch
             {
                 false => string.Empty,
                 true => ResolveSubmittedApiKey(current?.ApiKey, dto.Config.ApiKey),
@@ -293,7 +304,10 @@ public class ConfigController : ControllerBase
 
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
 
-        var error = NormalizeAndValidateAiConfigInput(config, allowMissingExternalSearchKey: true);
+        if (config.ProviderConnectionId.Length == 0 && await _dbContext.AiProviderConnections.AnyAsync())
+            return BadRequest(new { error = "该旧预设尚未绑定连接，请编辑预设并选择服务商与模型" });
+        var error = await ResolveConnectionAsync(config)
+            ?? NormalizeAndValidateAiConfigInput(config, allowMissingExternalSearchKey: true);
         if (error != null)
             return BadRequest(new { error = $"预设内容无效：{error}" });
 
@@ -314,7 +328,8 @@ public class ConfigController : ControllerBase
         }
 
         // 预设没存 Key 就沿用当前 Key；存了则整份恢复，换服务商时不用重填。
-        var apiKey = string.IsNullOrEmpty(preset.ApiKey) ? entity.ApiKey : preset.ApiKey;
+        var apiKey = config.ProviderConnectionId.Length > 0 ? config.ApiKey
+            : string.IsNullOrEmpty(preset.ApiKey) ? entity.ApiKey : preset.ApiKey;
         ApplyNormalizedAiConfigInput(entity, config, apiKey, applyingPreset: true);
         await _dbContext.SaveChangesAsync();
 
@@ -435,7 +450,9 @@ public class ConfigController : ControllerBase
         // 先记住旧目标：下面会立刻把 dto 值写进 entity，再比较就永远相等了。
         var previousBaseUrl = entity.ApiBaseUrl;
         var previousModelName = entity.ModelName;
+        var previousConnection = entity.ProviderConnectionId;
 
+        entity.ProviderConnectionId = dto.ProviderConnectionId;
         entity.ApiBaseUrl = dto.ApiBaseUrl;
         entity.ApiKey = apiKey;
         entity.ModelName = dto.ModelName;
@@ -456,6 +473,7 @@ public class ConfigController : ControllerBase
 
         // 换了地址或模型，旧策略的验证结论不再可信：除了本次同时选用的新策略，一律清空回退自动推断。
         var targetChanged = !string.Equals(previousBaseUrl, dto.ApiBaseUrl, StringComparison.Ordinal)
+                         || previousConnection != dto.ProviderConnectionId
                          || !string.Equals(previousModelName, dto.ModelName, StringComparison.Ordinal);
         if (targetChanged &&
             string.Equals(shape, entity.WebSearchShape, StringComparison.Ordinal) &&
@@ -473,10 +491,10 @@ public class ConfigController : ControllerBase
         // 先取本次探测对“新策略”的结论，再清运行时负缓存——Clear 会连探测账本一起清掉，
         // 顺序反了就会出现“刚测出带图可用、一保存又变成未测”。
         var probed = shape.Length > 0
-            ? _capabilities.GetProbeImageCapability(targetBaseUrl, targetModel, shape)
+            ? _capabilities.GetProbeImageCapability(targetBaseUrl, targetModel, shape, dto.ProviderConnectionId)
             : null;
         if (targetChanged || strategyChanged)
-            _capabilities.Clear(targetBaseUrl, targetModel, shape);
+            _capabilities.Clear(targetBaseUrl, targetModel, shape, dto.ProviderConnectionId);
 
         entity.WebSearchEndpoint = endpoint;
         entity.WebSearchShape = shape;
@@ -617,7 +635,8 @@ public class ConfigController : ControllerBase
 
         return new AiPresetConfigDto
         {
-            Version = 1,
+            Version = entity.ProviderConnectionId.Length > 0 ? 2 : 1,
+            ProviderConnectionId = entity.ProviderConnectionId,
             ApiBaseUrl = entity.ApiBaseUrl,
             ModelName = entity.ModelName,
             SystemPrompt = entity.SystemPrompt,
@@ -641,7 +660,9 @@ public class ConfigController : ControllerBase
 
     private static AiPresetConfigDto ToPresetConfig(AiConfigInputDto input) => new()
     {
-        Version = 1,
+        Version = input.ProviderConnectionId.Length > 0 ? 2 : 1,
+        ProviderConnectionId = input.ProviderConnectionId,
+        ProviderConnectionVersion = input.ProviderConnectionVersion,
         ApiBaseUrl = input.ApiBaseUrl,
         ModelName = input.ModelName,
         SystemPrompt = input.SystemPrompt,
@@ -663,7 +684,7 @@ public class ConfigController : ControllerBase
     private static string SerializePresetConfig(AiPresetConfigDto config)
     {
         // 双保险：主 Key 只走单独一列；外搜 Key 不进入预设快照，仅在应用到相同目标时继承。
-        config.Version = 1;
+        config.Version = config.ProviderConnectionId.Length > 0 ? 2 : 1;
         config.ApiKey = string.Empty;
         if (config.ExternalSearch is not null)
             config.ExternalSearch.ApiKey = string.Empty;
@@ -720,6 +741,7 @@ public class ConfigController : ControllerBase
 
         return new AiPresetSummaryDto
         {
+            ProviderConnectionId = config.ProviderConnectionId,
             Id = entity.Id,
             Name = entity.Name,
             Description = entity.Description,
@@ -751,6 +773,7 @@ public class ConfigController : ControllerBase
 
         return new AiPresetDetailDto
         {
+            ProviderConnectionId = summary.ProviderConnectionId,
             Id = summary.Id,
             Name = summary.Name,
             Description = summary.Description,
@@ -937,7 +960,7 @@ public class ConfigController : ControllerBase
 
         WebSearchProbeReportDto? report = null;
         WebSearchProbeEventDto? failure = null;
-        await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct))
+        await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct, dto.ProviderConnectionId))
         {
             if (ev.Type == "done") report = ev.Report;
             else if (ev.Type == "error") failure = ev;
@@ -988,7 +1011,7 @@ public class ConfigController : ControllerBase
         var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         try
         {
-            await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct))
+            await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct, dto.ProviderConnectionId))
             {
                 await Response.WriteAsync(JsonSerializer.Serialize(ev, jsonOptions) + "\n", ct);
                 await Response.Body.FlushAsync(ct);
@@ -1015,6 +1038,14 @@ public class ConfigController : ControllerBase
     /// <summary>Key 传打码值说明表单没改：探测必须用真 Key，从库里取。</summary>
     private async Task<string?> ResolveProbeApiKeyAsync(WebSearchProbeDto dto)
     {
+        if (dto.ProviderConnectionId.Length > 0)
+        {
+            var connection = await _dbContext.AiProviderConnections.AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == dto.ProviderConnectionId);
+            if (connection == null || AiConnectionStore.NormalizeUrl(connection.ApiBaseUrl) != AiConnectionStore.NormalizeUrl(dto.ApiBaseUrl)
+                || AiConnectionStore.Models(connection).All(m => m.Id != dto.ModelName)) return null;
+            return connection.ApiKey;
+        }
         var apiKey = dto.ApiKey;
         var saved = (await _dbContext.AiConfigs.FirstOrDefaultAsync())?.ApiKey;
         if (string.IsNullOrWhiteSpace(apiKey) || apiKey == MaskApiKey(saved ?? string.Empty))
@@ -1028,8 +1059,14 @@ public class ConfigController : ControllerBase
     private async IAsyncEnumerable<WebSearchProbeEventDto> RunProbeEventsAsync(
         string apiBaseUrl, string apiKey, string model,
         Mutter.Core.Services.WebSearchProbeRunner runner,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct, string providerConnectionId = "")
     {
+        if (providerConnectionId.Length > 0)
+        {
+            var connection = await _dbContext.AiProviderConnections.AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == providerConnectionId, ct);
+            if (connection != null) runner = runner.WithHeaders(AiConnectionStore.Headers(connection));
+        }
         using var overallCts = new CancellationTokenSource(TimeSpan.FromSeconds(180));
         using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct, overallCts.Token);
         var probeCt = probeCts.Token;
@@ -1171,7 +1208,7 @@ public class ConfigController : ControllerBase
                 {
                     _capabilities.RecordProbe(
                         apiBaseUrl, model, probeCase.Shape,
-                        imageCapable: imageVerdict.Status == "verified");
+                        imageCapable: imageVerdict.Status == "verified", connectionId: providerConnectionId);
                 }
             }
 
@@ -1392,6 +1429,7 @@ public class ExternalSearchHitDto
 
 public class WebSearchProbeDto
 {
+    public string ProviderConnectionId { get; set; } = string.Empty;
     public string ApiBaseUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;
     public string ModelName { get; set; } = string.Empty;

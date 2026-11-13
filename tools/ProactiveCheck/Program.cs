@@ -33,6 +33,7 @@ using Mutter.Web.Services;
 //   dotnet run --project tools/ProactiveCheck -- --logic-only
 // --logic-only 跑第 1~3 段及合成临时库运行时回归，供 CI 使用（第 4~6 段需要源库副本）。
 var logicOnly = args.Contains("--logic-only");
+if (args.Contains("--connections-only")) return await AiConnectionChecks.RunAsync() ? 0 : 1;
 if (args.Contains("--runtime-only")) return await RuntimeChecks.RunAsync() ? 0 : 1;
 var sourceDb = args.FirstOrDefault(a => !a.StartsWith("--")) ?? "mutter-bot.db";
 if (!logicOnly && !File.Exists(sourceDb))
@@ -1546,6 +1547,7 @@ else
     }
 }
 
+ok &= await AiConnectionChecks.RunAsync();
 ok &= await RuntimeChecks.RunAsync();
 
 if (logicOnly)

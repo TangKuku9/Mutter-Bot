@@ -128,7 +128,9 @@ const flush = () => new Promise(resolve => setImmediate(resolve))
 
 async function createPage(t, { initialModel = 'base-model' } = {}) {
   const state = {
-    config: normalizeAiSettings({ modelName: initialModel, availableProviders: [], availableCharacters: [] }),
+    config: normalizeAiSettings({ modelName: initialModel, providerConnectionId: 'connection-a',
+      connections: [{ id: 'connection-a', name: 'Test connection', models: [initialModel, 'changed-model', 'dirty-model'].map(id => ({ id, name: id })) }],
+      availableProviders: [], availableCharacters: [] }),
     presets: []
   }
   const messages = []

@@ -22,8 +22,9 @@ public class ConfigRepository : IConfigRepository
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync(ct);
         if (entity == null) return null;
 
-        return new AiConfig
+        var config = new AiConfig
         {
+            ProviderConnectionId = entity.ProviderConnectionId,
             ApiBaseUrl = entity.ApiBaseUrl,
             ApiKey = entity.ApiKey,
             ModelName = entity.ModelName,
@@ -45,6 +46,14 @@ public class ConfigRepository : IConfigRepository
             WebSearchImageVerifiedAt = entity.WebSearchImageVerifiedAt,
             ExternalSearch = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson)
         };
+        if (entity.ProviderConnectionId.Length > 0)
+        {
+            var connection = await _dbContext.AiProviderConnections.AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == entity.ProviderConnectionId, ct)
+                ?? throw new InvalidOperationException("当前 AI 服务商连接已不存在，请重新选择连接");
+            AiConnectionStore.Apply(config, connection);
+        }
+        return config;
     }
 
     public async Task<GroupConfig?> GetGroupConfigAsync(string groupId, CancellationToken ct = default)
@@ -75,6 +84,7 @@ public class ConfigRepository : IConfigRepository
         {
             entity = new AiConfigEntity
             {
+                ProviderConnectionId = config.ProviderConnectionId,
                 ApiBaseUrl = config.ApiBaseUrl,
                 ApiKey = config.ApiKey,
                 ModelName = config.ModelName,
@@ -100,6 +110,7 @@ public class ConfigRepository : IConfigRepository
         }
         else
         {
+            entity.ProviderConnectionId = config.ProviderConnectionId;
             entity.ApiBaseUrl = config.ApiBaseUrl;
             entity.ApiKey = config.ApiKey;
             entity.ModelName = config.ModelName;

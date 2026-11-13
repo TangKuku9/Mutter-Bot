@@ -216,9 +216,9 @@ public class AiChatService : IAiChatService
 
         var shape = strategy.Shape ?? string.Empty;
         var capability = config.WebSearchImageCapable
-            ?? _capabilities.GetProbeImageCapability(config.ApiBaseUrl, config.ModelName, shape);
+            ?? _capabilities.GetProbeImageCapability(config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId);
         var runtimeUnsupported = _capabilities.IsRuntimeUnsupported(
-            config.ApiBaseUrl, config.ModelName, shape);
+            config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId);
         var knownUnsupported = capability == false || runtimeUnsupported;
 
         // 原生通道没法无损承载结构化输出：两段式可以把 JSON 约束留给第二步，否则退回不检索。
@@ -250,9 +250,9 @@ public class AiChatService : IAiChatService
         catch (AiRequestException ex) when (ex.IsDeterministicRejection)
         {
             _logger.LogWarning(ex,
-                "图文联网单次请求被拒，标记该形状带图不可用 url={Url} model={Model} shape={Shape}",
-                config.ApiBaseUrl, config.ModelName, shape);
-            _capabilities.MarkRuntimeUnsupported(config.ApiBaseUrl, config.ModelName, shape);
+                "图文联网单次请求被拒，标记该形状带图不可用 url={Url} model={Model} shape={Shape} connection={Connection}",
+                config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId);
+            _capabilities.MarkRuntimeUnsupported(config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId);
 
             if (config.WebSearchImageMode == AiConfig.WebSearchImageModeTwoStage)
                 return await SendTwoStageAsync(request, config, strategy, ct);

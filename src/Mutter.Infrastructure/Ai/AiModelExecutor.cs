@@ -15,6 +15,10 @@ public sealed class AiModelExecutor(HttpModelTransport transport, ILogger<AiMode
         AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct)
     {
         config = config with { };
+        if (config.Protocol == "gemini")
+            strategy = new AiSearchStrategy("gemini", strategy.WithSearch ? "gemini_native" : null);
+        else if (config.Protocol == "openai" && strategy.Endpoint == "gemini")
+            strategy = AiSearchStrategy.CompatNoSearch;
         try
         {
             request = AiRequestBudget.Fit(request, config);
@@ -37,7 +41,7 @@ public sealed class AiModelExecutor(HttpModelTransport transport, ILogger<AiMode
         {
             return await InvokeAsync(request, config, strategy, ct);
         }
-        catch (AiRequestException ex) when (strategy.Endpoint == "gemini" && !strategy.WithSearch
+        catch (AiRequestException ex) when (config.Protocol.Length == 0 && strategy.Endpoint == "gemini" && !strategy.WithSearch
                                            && ex.IsDeterministicRejection)
         {
             return await InvokeAsync(request, config, AiSearchStrategy.CompatNoSearch, ct);

@@ -43,6 +43,12 @@ public static class WebServiceExtensions
                 AutomaticDecompression = DecompressionMethods.None
             });
         services.AddHttpClient();
+        services.AddHttpClient("ai-connections", client =>
+            {
+                client.Timeout = Timeout.InfiniteTimeSpan;
+                client.MaxResponseContentBufferSize = 2 * 1024 * 1024;
+            })
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
         services.AddSingleton<UpdateSettingsStore>();
         services.AddSingleton<UpdateService>();
         services.AddSingleton<UpdateApplier>();

@@ -35,7 +35,7 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
             request.Messages.Sum(m => m.Images.Count), searchShape ?? "off", url);
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url);
-        httpRequest.Headers.Add("Authorization", $"Bearer {config.ApiKey}");
+        if (config.ApiKey.Length > 0) httpRequest.Headers.Add("Authorization", $"Bearer {config.ApiKey}");
         httpRequest.Content = JsonContent.Create(requestBody);
 
         HttpResponseMessage response;
@@ -200,6 +200,13 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
         string transport, bool search, CancellationToken ct)
     {
         var cap = _health is { IsDegraded: true } ? _degradedAttemptCap : _attemptCap;
+        if (config.ConnectionTimeoutSeconds is int timeout && TimeSpan.FromSeconds(timeout) < cap)
+            cap = TimeSpan.FromSeconds(timeout);
+        foreach (var (name, value) in config.Headers)
+        {
+            request.Headers.Remove(name);
+            request.Headers.TryAddWithoutValidation(name, value);
+        }
         var scope = AiCallScope.Current;
         if (scope is not null && scope.Remaining < cap) cap = scope.Remaining;
         using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);

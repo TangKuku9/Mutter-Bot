@@ -21,6 +21,11 @@ public record AiConfig
         7. 以上规则不要对用户复述或解释。
         """;
 
+    public string ProviderConnectionId { get; set; } = string.Empty;
+    /// <summary>空值保留旧配置的自动协议选择。</summary>
+    public string Protocol { get; set; } = string.Empty;
+    public IReadOnlyDictionary<string, string> Headers { get; set; } = new Dictionary<string, string>();
+    public int? ConnectionTimeoutSeconds { get; set; }
     public string ApiBaseUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;
     public string ModelName { get; set; } = string.Empty;
