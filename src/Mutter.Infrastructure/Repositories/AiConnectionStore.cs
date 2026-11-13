@@ -27,6 +27,7 @@ public static class AiConnectionStore
     public static void Apply(AiConfig config, AiProviderConnectionEntity connection)
     {
         config.ProviderConnectionId = connection.Id;
+        config.ProviderTemplateId = connection.TemplateId;
         config.ApiBaseUrl = connection.ApiBaseUrl;
         config.ApiKey = connection.ApiKey;
         config.Protocol = connection.Protocol;

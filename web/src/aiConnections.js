@@ -1,8 +1,18 @@
 const STORAGE_KEY = 'mutter.ai-model-preferences.v1'
 
+export function groupProviderTemplates(templates = []) {
+  return [
+    { id: 'china', label: '中国服务商' },
+    { id: 'international', label: '国际服务商' },
+    { id: 'custom', label: '自定义' }
+  ].map(group => ({ ...group, templates: templates.filter(template =>
+    (template.category || (template.id === 'custom' ? 'custom' : 'china')) === group.id)
+  })).filter(group => group.templates.length)
+}
+
 export function mergeConnectionModels(existing = [], discovered = []) {
   const models = new Map(existing.map(model => [model.id, { ...model }]))
-  for (const model of discovered) if (!models.has(model.id)) models.set(model.id, { ...model, isManual: false })
+  for (const model of discovered) if (!models.has(model.id)) models.set(model.id, { isManual: false, ...model })
   return [...models.values()]
 }
 

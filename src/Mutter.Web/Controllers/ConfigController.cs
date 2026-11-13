@@ -45,6 +45,10 @@ public partial class ConfigController : ControllerBase
 
         var providers = AiProviderPreset.GetDefaults().Select(p => new ProviderPresetDto
         {
+            Category = p.Category,
+            Protocol = p.Protocol,
+            ModelsUpdatedAt = p.ModelsUpdatedAt,
+            DocumentationUrl = p.DocumentationUrl,
             Id = p.Id,
             Name = p.Name,
             ApiBaseUrl = p.ApiBaseUrl,

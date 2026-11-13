@@ -22,6 +22,8 @@ internal static class AiConnectionChecks
     {
         try
         {
+            await VerifyTemplatesAsync();
+            VerifyRequestCompatibility();
             await using var sqlite = new SqliteConnection("Data Source=:memory:");
             await sqlite.OpenAsync();
             await using var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseSqlite(sqlite).Options);
@@ -139,6 +141,61 @@ internal static class AiConnectionChecks
     }
 
     private static void Require(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
+
+    private static async Task VerifyTemplatesAsync()
+    {
+        await using var sqlite = new SqliteConnection("Data Source=:memory:");
+        await sqlite.OpenAsync();
+        await using var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseSqlite(sqlite).Options);
+        await db.Database.EnsureCreatedAsync();
+        using var client = new HttpClient(new CatalogHandler());
+        var api = new AiConnectionsController(db, new ClientFactory(client), new RecordingExecutor());
+        var templates = AiProviderPreset.GetDefaults().Where(p => p.Id != "custom").ToList();
+        foreach (var template in templates)
+        {
+            var result = await api.Create(new AiConnectionInputDto
+            {
+                Name = template.Name, TemplateId = template.Id, Protocol = template.Protocol,
+                ApiBaseUrl = template.ApiBaseUrl, DefaultModel = template.DefaultModel,
+                Models = template.Models.Select(id => new AiConnectionModel { Id = id, Name = id }).ToList()
+            }, default);
+            Require(result.Result is OkObjectResult, $"template {template.Id} must create a usable connection definition");
+            var created = (AiConnectionDto)((OkObjectResult)result.Result!).Value!;
+            Require(created.Protocol == template.Protocol && created.Models.Any(m => m.Id == created.DefaultModel),
+                $"template {template.Id} must retain its protocol and valid default model");
+        }
+        var response = await new ConfigController(db, new AiSearchCapabilityStore()).GetAiConfig();
+        var config = (AiConfigDto)((OkObjectResult)response.Result!).Value!;
+        Require(config.AvailableProviders.Any(p => p.Category == "china")
+            && config.AvailableProviders.Any(p => p.Category == "international"), "config API must expose both provider groups");
+        Require(config.AvailableProviders.Where(p => p.Id != "custom").All(p => p.DocumentationUrl.StartsWith("https://", StringComparison.Ordinal)
+            && p.ModelsUpdatedAt.Length > 0), "catalog provenance must reach the UI");
+        Console.WriteLine($"PASS  {templates.Count} 家中国与国际服务商模板可直接创建连接，协议与目录来源正确");
+    }
+
+    private static void VerifyRequestCompatibility()
+    {
+        var request = new AiChatRequest("Return JSON.", [AiMessage.Plain("user", "OK")], "json_object");
+        foreach (var (provider, model) in new[]
+        {
+            ("openai", "gpt-6-luna"), ("kimi", "kimi-k3.1-pro"), ("minimax", "MiniMax-M3.1-Flash")
+        })
+        {
+            var config = new AiConfig { ProviderTemplateId = provider, ModelName = model, MaxTokens = 1024, Temperature = 0.3 };
+            var body = OpenAiRequestBuilder.Build(request, config, null);
+            Require(body.GetValueOrDefault("max_completion_tokens") is 1024
+                && !body.ContainsKey("max_tokens") && !body.ContainsKey("temperature"), "current reasoning models must use accepted request parameters");
+            Require(config.Temperature == 0.3, "provider constraints must not rewrite saved preferences");
+            if (provider == "minimax")
+                Require(body.GetValueOrDefault("reasoning_split") is true, "MiniMax thinking must remain separate from reply content");
+        }
+        var legacy = OpenAiRequestBuilder.Build(request, new AiConfig { ModelName = "custom-model", MaxTokens = 512, Temperature = 0 }, null);
+        Require(legacy.GetValueOrDefault("max_tokens") is 512 && legacy.GetValueOrDefault("temperature") is 0d,
+            "generic compatible services retain their original request contract");
+        var claude = OpenAiRequestBuilder.Build(request, new AiConfig { ProviderTemplateId = "anthropic" }, null);
+        Require(!claude.ContainsKey("response_format") && claude.ContainsKey("messages"), "Claude compatible layer must not receive unsupported json_object requests");
+        Console.WriteLine("PASS  新 GPT、Kimi、MiniMax 参数约束与 Claude 兼容层处理正确，旧兼容接口行为保留");
+    }
     private static string Legacy(string url, string model) => JsonSerializer.Serialize(new { version = 1, apiBaseUrl = url, modelName = model });
     private static AiConfigInputDto Config(string id, string model) => new()
     {

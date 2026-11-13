@@ -66,6 +66,7 @@ public static class OpenAiRequestBuilder
         if (!string.IsNullOrEmpty(searchShape))
             WebSearchProbe.ApplyShapeToBody(body, searchShape);
 
+        AiModelRequestCompatibility.Apply(body, config);
         return body;
     }
 }

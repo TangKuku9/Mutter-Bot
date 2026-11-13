@@ -22,6 +22,7 @@ public record AiConfig
         """;
 
     public string ProviderConnectionId { get; set; } = string.Empty;
+    public string ProviderTemplateId { get; set; } = string.Empty;
     /// <summary>空值保留旧配置的自动协议选择。</summary>
     public string Protocol { get; set; } = string.Empty;
     public IReadOnlyDictionary<string, string> Headers { get; set; } = new Dictionary<string, string>();

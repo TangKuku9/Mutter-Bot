@@ -13,7 +13,12 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
       ],
       apiBaseUrl: 'https://model.example.test/v1', apiKey: 'sk-****', modelName: 'daily-model', personality: 'helper',
       defaultSystemPrompt: '内置提示词示例', webSearchEnabled: true, temperature: initialTemperature,
-      availableProviders: [{ id: 'example', name: '示例服务商', apiBaseUrl: 'https://other.example.test/v1', defaultModel: 'other-model', keyHelpText: '服务商提供的密钥' }],
+      availableProviders: [
+        { id: 'example', name: '示例服务商', category: 'china', apiBaseUrl: 'https://other.example.test/v1', defaultModel: 'other-model', keyHelpText: '服务商提供的密钥' },
+        { id: 'deepseek', name: 'DeepSeek', category: 'china', protocol: 'openai', apiBaseUrl: 'https://api.deepseek.com/v1', defaultModel: 'deepseek-flash', models: ['deepseek-flash', 'deepseek-v4-pro'], modelsUpdatedAt: '2026-11-13', documentationUrl: 'https://api-docs.deepseek.com/quick_start/pricing/' },
+        { id: 'gemini', name: 'Google Gemini', category: 'international', protocol: 'gemini', apiBaseUrl: 'https://generativelanguage.googleapis.com/v1beta', defaultModel: 'gemini-4-hydrogen', models: ['gemini-4-hydrogen', 'gemini-4-argon'], modelsUpdatedAt: '2026-11-13' },
+        { id: 'custom', name: '自定义服务商', category: 'custom', models: [] }
+      ],
       availableCharacters: [{ name: 'helper', displayName: '默认助手', isCustom: false, description: '内置人设', systemPrompt: '友好回答' }],
       externalSearch: { baseUrl: 'https://search.example.test', apiKey: 'search-****' }
     }),
@@ -35,6 +40,12 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
     if (path === '/api/config/ai/connections/discover') {
       if (state.failDiscover) return route.fulfill({ status: 502, json: { error: '测试：模型列表获取失败，已有模型已保留' } })
       return route.fulfill({ json: [{ id: 'discovered-model', name: 'discovered-model', isManual: false }] })
+    }
+    if (path.startsWith('/api/config/ai/connections/') && method === 'PUT') {
+      state.writes.push({ path, body: body() })
+      const existing = state.config.connections.find(c => c.id === path.split('/').at(-1))
+      Object.assign(existing, body(), { apiKey: body().apiKey ? '********' : '', hasApiKey: !!body().apiKey })
+      return route.fulfill({ json: existing })
     }
     if (path === '/api/config/ai/connections/test') return route.fulfill({ json: { message: '模型调用成功', model: body().defaultModel, elapsedMs: 12 } })
     if (path === '/api/config/ai') {
@@ -143,6 +154,49 @@ test('首次添加无密钥本地连接会填入主配置，仍需明确保存�
   expect(state.writes.filter(w => w.path === '/api/config/ai')).toHaveLength(0)
   await page.getByRole('button', { name: '保存配置', exact: true }).click()
   expect(state.writes.at(-1).body).toMatchObject({ providerConnectionId: 'connection-0', modelName: 'local-model', apiKey: '' })
+})
+
+test('中国与国际模板可搜索选用，Gemini 自动填入原生协议且不沿用上一模板密钥', async ({ page }) => {
+  const state = await setup(page)
+  await page.getByRole('button', { name: '添加服务商', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '管理服务商', exact: true })
+  const template = dialog.getByRole('combobox', { name: '服务商模板', exact: true })
+  await template.click()
+  await expect(page.getByText('中国服务商', { exact: true })).toBeVisible()
+  await expect(page.getByText('国际服务商', { exact: true })).toBeVisible()
+  await page.getByRole('option', { name: 'DeepSeek', exact: true }).click()
+  await expect(dialog.getByLabel('API 地址', { exact: true })).toHaveValue('https://api.deepseek.com/v1')
+  await expect(dialog.locator('.connection-models')).toContainText('deepseek-flash')
+  await expect(dialog.getByRole('link', { name: '官方模型文档' })).toHaveAttribute('href', 'https://api-docs.deepseek.com/quick_start/pricing/')
+  await dialog.getByLabel('API Key', { exact: true }).fill('previous-template-key')
+  await template.click()
+  await page.getByRole('option', { name: 'Google Gemini', exact: true }).click()
+  await expect(dialog.getByLabel('API Key', { exact: true })).toHaveValue('')
+  await expect(dialog.getByLabel('API 地址', { exact: true })).toHaveValue('https://generativelanguage.googleapis.com/v1beta')
+  await expect(dialog.locator('.connection-form')).toContainText('Gemini 原生')
+  await dialog.getByLabel('API Key', { exact: true }).fill('gemini-test-key')
+  await dialog.getByRole('button', { name: '保存连接', exact: true }).click()
+  await expect(dialog.locator('.connection-list')).toContainText('Google Gemini')
+  expect(state.writes.at(-1).body).toMatchObject({ templateId: 'gemini', protocol: 'gemini', defaultModel: 'gemini-4-hydrogen' })
+})
+
+test('旧连接可补充新内置模型，保留旧模型、显示名、默认模型与密钥', async ({ page }) => {
+  const state = await setup(page)
+  state.config.connections[0].templateId = 'deepseek'
+  state.config.connections[0].models[0].name = '我的日常模型'
+  await page.reload()
+  await page.getByRole('button', { name: '管理服务商', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '管理服务商', exact: true })
+  await dialog.getByRole('button', { name: '补充最新内置模型', exact: true }).click()
+  await expect(dialog.locator('.connection-models')).toContainText('deepseek-flash')
+  await expect(dialog.getByLabel('模型 daily-model 的显示名称', { exact: true })).toHaveValue('我的日常模型')
+  await expect(dialog.getByLabel('API Key', { exact: true })).toHaveValue('********')
+  await dialog.getByRole('button', { name: '保存连接', exact: true }).click()
+  await expect(dialog.locator('.connection-editor-heading')).not.toContainText('有未保存修改')
+  expect(state.writes.at(-1).body.defaultModel).toBe('daily-model')
+  expect(state.writes.at(-1).body.models.map(model => model.id)).toContain('deepseek-v4-pro')
+  expect(state.writes.at(-1).body.models.map(model => model.id)).toContain('daily-model')
+  expect(state.writes.filter(w => w.path === '/api/config/ai')).toHaveLength(0)
 })
 
 test('切回连接恢复上次模型，收藏按连接保存', async ({ page }) => {

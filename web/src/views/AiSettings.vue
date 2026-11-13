@@ -123,7 +123,7 @@
               label="回复随机度"
               control-id="ai-temperature"
               help-key="temperature"
-              hint="Temperature 越低越稳定，越高越灵活。"
+              hint="Temperature 越低越稳定，越高越灵活；部分推理模型使用服务商固定值。"
               @help="openHelp"
             >
               <div class="ai-temperature">

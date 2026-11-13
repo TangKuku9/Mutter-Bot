@@ -22,9 +22,17 @@
         <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
         <el-form label-position="top" :disabled="busy" class="connection-form">
           <el-form-item label="服务商模板" for="connection-template">
-            <el-select id="connection-template" v-model="draft.templateId" :disabled="!!draft.id" @change="applyTemplate">
-              <el-option v-for="template in templates" :key="template.id" :value="template.id" :label="template.name" />
+            <el-select id="connection-template" v-model="draft.templateId" :disabled="!!draft.id" filterable @change="applyTemplate">
+              <el-option-group v-for="group in templateGroups" :key="group.id" :label="group.label">
+                <el-option v-for="template in group.templates" :key="template.id" :value="template.id" :label="template.name" />
+              </el-option-group>
             </el-select>
+            <p v-if="selectedTemplate?.description" class="connection-hint">{{ selectedTemplate.description }}</p>
+            <div v-if="selectedTemplate && selectedTemplate.id !== 'custom'" class="connection-template-links">
+              <a v-if="safeHttpUrl(selectedTemplate.documentationUrl)" :href="safeHttpUrl(selectedTemplate.documentationUrl)" target="_blank" rel="noopener noreferrer">官方模型文档</a>
+              <a v-if="safeHttpUrl(selectedTemplate.keyHelpUrl)" :href="safeHttpUrl(selectedTemplate.keyHelpUrl)" target="_blank" rel="noopener noreferrer">获取 API Key</a>
+              <small v-if="selectedTemplate.modelsUpdatedAt">内置目录更新于 {{ selectedTemplate.modelsUpdatedAt }}</small>
+            </div>
           </el-form-item>
           <div class="connection-two-columns">
             <el-form-item label="连接名称" for="connection-name" required>
@@ -48,7 +56,10 @@
           </el-form-item>
           <div class="connection-model-heading">
             <h4>模型目录 <small>{{ draft.models.length }}</small></h4>
-            <el-button :loading="discovering" @click="discover">获取模型列表</el-button>
+            <div class="connection-model-actions">
+              <el-button v-if="draft.id && selectedTemplate?.models?.length" @click="mergeBuiltinModels">补充最新内置模型</el-button>
+              <el-button :loading="discovering" @click="discover">获取模型列表</el-button>
+            </div>
           </div>
           <p class="connection-hint">获取列表后与已有模型合并；接口不提供列表时，可手动添加准确的模型 ID。</p>
           <div class="connection-add-model">
@@ -106,7 +117,8 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
-import { mergeConnectionModels } from '../aiConnections'
+import { mergeConnectionModels, groupProviderTemplates } from '../aiConnections'
+import { safeHttpUrl } from '../aiSettings'
 
 const props = defineProps({ modelValue: Boolean, connections: { type: Array, default: () => [] }, templates: { type: Array, default: () => [] } })
 const emit = defineEmits(['update:modelValue', 'saved', 'removed'])
@@ -119,6 +131,8 @@ const payload = () => ({ ...draft.value, headers: Object.fromEntries(headers.val
 const fingerprint = () => JSON.stringify({ connection: payload(), modelEntry: modelEntry.value })
 const dirty = computed(() => !!baseline.value && fingerprint() !== baseline.value)
 const filteredConnections = computed(() => props.connections.filter(c => c.name.toLowerCase().includes(search.value.trim().toLowerCase())))
+const templateGroups = computed(() => groupProviderTemplates(props.templates))
+const selectedTemplate = computed(() => props.templates.find(template => template.id === draft.value.templateId))
 watch(() => fingerprint(), () => { testResult.value = '' })
 const reset = connection => {
   const copy = connection ? JSON.parse(JSON.stringify(connection)) : blank()
@@ -147,7 +161,16 @@ const applyTemplate = id => {
   draft.value.apiBaseUrl = template.apiBaseUrl || ''
   draft.value.models = (template.models || []).map(id => ({ id, name: id, isManual: true }))
   draft.value.defaultModel = template.defaultModel || ''
-  draft.value.protocol = 'openai'
+  draft.value.protocol = template.protocol || 'openai'
+  draft.value.apiKey = ''
+  headers.value = []
+}
+const mergeBuiltinModels = () => {
+  const before = draft.value.models.length
+  const incoming = (selectedTemplate.value?.models || []).map(id => ({ id, name: id, isManual: true }))
+  draft.value.models = mergeConnectionModels(draft.value.models, incoming)
+  const added = draft.value.models.length - before
+  ElMessage.info(added ? `已补充 ${added} 个模型，保存连接后生效；原有模型与默认选择已保留` : '内置模型已全部包含在当前目录中')
 }
 const addModel = () => {
   const id = modelEntry.value.trim()
@@ -237,6 +260,12 @@ const removeConnection = async () => {
 .connection-editor h3, .connection-editor h4 { margin: 0; }
 .connection-editor-heading p, .connection-hint { margin: 6px 0; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.6; }
 .connection-model-heading small { color: var(--el-text-color-secondary); font-weight: 400; }
+.connection-model-heading { flex-wrap: wrap; }
+.connection-model-actions, .connection-template-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.connection-model-actions :deep(.el-button + .el-button) { margin-left: 0; }
+.connection-template-links { margin-top: 5px; font-size: 12px; line-height: 1.6; }
+.connection-template-links a { color: var(--el-color-primary); text-decoration: none; }
+.connection-template-links small { color: var(--el-text-color-secondary); }
 .connection-form { margin-top: 14px; }
 .connection-form :deep(.el-select) { width: 100%; }
 .connection-two-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }

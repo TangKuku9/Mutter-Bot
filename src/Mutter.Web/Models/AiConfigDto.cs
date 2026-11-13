@@ -99,6 +99,10 @@ public class CharacterDto
 
 public class ProviderPresetDto
 {
+    public string Category { get; set; } = "china";
+    public string Protocol { get; set; } = "openai";
+    public string ModelsUpdatedAt { get; set; } = string.Empty;
+    public string DocumentationUrl { get; set; } = string.Empty;
     public string Id { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string ApiBaseUrl { get; set; } = string.Empty;

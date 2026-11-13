@@ -182,7 +182,7 @@ public sealed class AiConnectionsController(AppDbContext db, IHttpClientFactory 
     {
         var (connection, error) = await PrepareAsync(dto, true, ct);
         if (error != null) return BadRequest(new { error });
-        var config = new AiConfig { ModelName = connection!.DefaultModel, MaxTokens = 64, MaxInputTokens = 512 };
+        var config = new AiConfig { ModelName = connection!.DefaultModel, MaxTokens = 1024, MaxInputTokens = 512 };
         AiConnectionStore.Apply(config, connection);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(Math.Min(connection.TimeoutSeconds, 30)));

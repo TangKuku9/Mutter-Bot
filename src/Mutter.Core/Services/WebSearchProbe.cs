@@ -541,6 +541,7 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
         string apiBaseUrl, string apiKey, string shape, string model, CancellationToken ct)
     {
         var body = WebSearchProbe.BuildOpenAiImageBody(shape, model);
+        AiModelRequestCompatibility.Apply(body, new() { ApiBaseUrl = apiBaseUrl, ModelName = model });
         var url = $"{apiBaseUrl.TrimEnd('/')}/chat/completions";
         try
         {
@@ -614,6 +615,7 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
         string apiBaseUrl, string apiKey, string shape, string model, CancellationToken ct)
     {
         var body = WebSearchProbe.BuildRequestBody(shape, model, WebSearchProbe.ProbeQuestion);
+        AiModelRequestCompatibility.Apply(body, new() { ApiBaseUrl = apiBaseUrl, ModelName = model });
         var url = $"{apiBaseUrl.TrimEnd('/')}/chat/completions";
         try
         {
