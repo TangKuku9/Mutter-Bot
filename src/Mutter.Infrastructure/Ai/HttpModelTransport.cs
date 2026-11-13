@@ -68,7 +68,8 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
                 _logger.LogError("AI error: {StatusCode}, Body: {Body}",
                     (int)response.StatusCode, RedactForLog(raw));
                 // 异常消息会被上层原样写进日志：上游回显的 Key 不能绕过 RedactForLog。
-                throw new AiRequestException((int)response.StatusCode, RedactForLog(raw));
+                throw new AiRequestException((int)response.StatusCode, RedactForLog(raw),
+                    responseFormatRejected: AiRequestException.RejectsResponseFormat(raw));
             }
 
             JsonElement json;
@@ -150,7 +151,8 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
                 {
                     _logger.LogError("Gemini native error: {StatusCode}, Body: {Body}",
                         (int)response.StatusCode, RedactForLog(raw));
-                    throw new AiRequestException((int)response.StatusCode, RedactForLog(raw));
+                    throw new AiRequestException((int)response.StatusCode, RedactForLog(raw),
+                        responseFormatRejected: AiRequestException.RejectsResponseFormat(raw));
                 }
 
                 JsonElement json;

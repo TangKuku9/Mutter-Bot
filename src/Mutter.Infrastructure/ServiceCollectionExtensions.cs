@@ -32,11 +32,7 @@ public static class ServiceCollectionExtensions
                     sp.GetRequiredService<IOptions<MutterOptions>>().Value.Runtime.AiTimeoutSeconds + 5);
                 c.MaxResponseContentBufferSize = 4 * 1024 * 1024;
             })
-            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-            {
-                AllowAutoRedirect = false,
-                ConnectCallback = OutboundAddressPolicy.ConnectAsync
-            });
+            .ConfigurePrimaryHttpMessageHandler(() => OutboundAddressPolicy.CreateHandler(allowRedirect: false));
         services.AddSingleton<IAiModelExecutor, AiModelExecutor>();
         services.AddSingleton<IOutgoingReplyStore, OutgoingReplyStore>();
         services.AddSingleton<IAiCallStore, AiCallStore>();

@@ -605,10 +605,26 @@ public sealed class AiRequestException : Exception
     public int StatusCode { get; }
 
     public bool IsDeterministicRejection => StatusCode is 400 or 404 or 405 or 409 or 413 or 415 or 422;
+    public bool IsResponseFormatRejected { get; }
 
-    public AiRequestException(int statusCode, string message, Exception? inner = null)
+    public AiRequestException(int statusCode, string message, Exception? inner = null, bool responseFormatRejected = false)
         : base($"AI error {statusCode}: {message}", inner)
     {
         StatusCode = statusCode;
+        IsResponseFormatRejected = IsDeterministicRejection && (responseFormatRejected || RejectsResponseFormat(message));
     }
+
+    /// <summary>在错误体脱敏、截短前提取分类；异常只携带分类与安全的展示文本。</summary>
+    public static bool RejectsResponseFormat(string message) =>
+        message.Contains("response_format", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("responseMimeType", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("json_object", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("json mode", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("json schema", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("structured output", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("结构化输出", StringComparison.OrdinalIgnoreCase)
+        || (message.Contains("json", StringComparison.OrdinalIgnoreCase)
+            && (message.Contains("not support", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("unsupported", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("不支持", StringComparison.OrdinalIgnoreCase)));
 }

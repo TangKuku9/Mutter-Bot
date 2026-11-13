@@ -362,7 +362,7 @@ internal static partial class RuntimeChecks
         foreach (var status in new[] { HttpStatusCode.Unauthorized, HttpStatusCode.InternalServerError })
         {
             var before = env.Http.Requests.Count;
-            env.Http.Handler = (_, _, _) => Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent("synthetic error") });
+            env.Http.Handler = (_, _, _) => Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent("response_format unsupported") });
             var failed = await structured.GetStructuredOutcomeAsync<ProactiveVerdict>("system", "user", config);
             Require(failed.FailureKind == StructuredAiFailureKind.ApiError && env.Http.Requests.Count == before + 1,
                 $"{status} must not trigger a format fallback");
@@ -379,13 +379,19 @@ internal static partial class RuntimeChecks
         Require(repaired.Result?.Data.Line == "hi" && repaired.PromptTokens == 30 && repaired.CompletionTokens == 12,
             "structured fallback must sum both attempts exactly once");
         sequence = 0;
-        // 关掉联网搜索：400 在启用搜索时会先走“退回不检索”的重试，测不出格式分类本身的差异。
         var formatOnly = config with { WebSearchEnabled = false };
         env.Http.Handler = (_, _, _) => Task.FromResult(++sequence == 1
-            ? new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("response_format json_object unsupported") }
+            ? new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new
+                {
+                    request_id = new string('r', 230),
+                    error = new { message = "response_format json_object unsupported" }
+                }))
+            }
             : JsonReply("{\"reason\":\"没有接话必要\"}"));
         var unsupported = await structured.GetStructuredOutcomeAsync<ProactiveVerdict>("s", "u", formatOnly);
-        Require(unsupported.Result is not null && sequence == 2, "explicit JSON mode rejection may fall back");
+        Require(unsupported.Result is not null && sequence == 2, "format rejection beyond the log excerpt must still fall back");
         // “请求体不是合法 JSON”之类的 4xx 与 response_format 无关：不能当成格式不支持再打一次。
         var beforeMalformed = env.Http.Requests.Count;
         env.Http.Handler = (_, _, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)

@@ -1,4 +1,3 @@
-using System.Reflection;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -75,27 +74,15 @@ internal static partial class RuntimeChecks
         Require(fresh.ApiKey == "brave-new-key" && fresh.BaseUrl == "https://api.brave.com",
             "new credentials and a new gateway survive the provider switch");
 
-        // 应用预设：预设不含外搜 Key，目标服务商与当前不同时允许先落库，面板再提示补填；
-        // 普通保存仍必须拒绝空 Key。
-        var validate = typeof(ConfigController).GetMethod("NormalizeAndValidateAiConfigInput",
-            BindingFlags.NonPublic | BindingFlags.Static);
-        Require(validate is not null, "the shared AI config validator remains reachable for contract checks");
-        var presetConfig = new AiConfigInputDto
-        {
-            ExternalSearch = new ExternalSearchInputDto { Enabled = true, Provider = "brave", ApiKey = "" }
-        };
-        var strict = (string?)validate!.Invoke(null, [presetConfig, null, false]);
-        var relaxed = (string?)validate.Invoke(null, [presetConfig, null, true]);
-        Require(strict is not null && strict.Contains("API Key"),
-            "a normal save still rejects an enabled provider without a key");
-        Require(relaxed is null,
-            "applying a preset may land an enabled provider without a key so the panel can ask for one");
-
         // 经过真实的创建、序列化、应用、落库和回读路径，避免单测只验证 Key 解析函数。
         await using var env = await TestEnvironment.CreateAsync();
         using var scope = env.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var api = new ConfigController(db, scope.ServiceProvider.GetRequiredService<AiSearchCapabilityStore>());
+        Require(await api.UpdateAiConfig(new AiConfigInputDto
+        {
+            ExternalSearch = new() { Enabled = true, Provider = "brave" }
+        }) is BadRequestObjectResult, "normal saves must reject an enabled search provider without a key");
         var entity = await db.AiConfigs.SingleAsync();
         var previous = new ExternalSearchConfig
         {

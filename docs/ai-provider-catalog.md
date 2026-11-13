@@ -30,7 +30,7 @@
 - Claude 使用 [Anthropic 官方 OpenAI SDK 兼容层](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk)，不冒充完整的原生 Messages 支持。该兼容层拒绝 json_object 格式，请求保留原有 JSON 提示词并继续执行结果解析、校验与失败处理。
 - 当前 GPT 推理模型使用 max_completion_tokens，并省略不支持的 Temperature；依据 [OpenAI 请求参数](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) 与 [GPT-6 兼容规则](https://developers.openai.com/api/docs/guides/latest-model)。
 - 当前 Kimi 和 MiniMax 模型使用官方要求的输出长度参数，固定采样参数由服务商处理，不改写用户保存的 Temperature；MiniMax 的思考内容独立返回，避免混入正文。见 [Kimi 参数参考](https://platform.kimi.com/docs/api/models-overview) 与 [MiniMax OpenAI 兼容接口](https://platform.minimax.cn/docs/api-reference/text-openai-api)。
-- 请求参数兼容规则先按连接模板判定；OpenRouter、Together、SiliconFlow、Groq 等聚合平台再按模型 ID 的厂商前缀推断家族（`openai/gpt-6-*`、`moonshotai/Kimi-*`、`MiniMaxAI/MiniMax-*`，无前缀时按模型名识别），套用与对应官方端点相同的参数约束。前缀无法识别的模型保持聚合平台模板的原有行为，不做猜测；Claude 的 `json_object` 规避属于 Anthropic 官方兼容层的限制，聚合平台会自行翻译该字段，因此不在聚合连接上套用。若上游明确拒绝某个参数，请在测试中确认后再改用对应官方模板的连接。
+- 参数按接收请求的平台处理。OpenRouter、Together、SiliconFlow、Groq 保留平台定义的输出预算与 JSON 约束，不根据模型厂商前缀套用直连原厂的参数；例如 [Together](https://docs.together.ai/reference/chat-completions) 与[硅基流动](https://docs.siliconflow.cn/docs/api/chat-completions-post) 均定义 `max_tokens`。Claude 的 `json_object` 规避只针对 Anthropic 官方兼容层。
 - 国际站、国内站、Coding Plan 与按量计费通常有各自的地址和密钥；模板备注会标明接入站点。切换新连接的服务商模板会清空草稿中的密钥和请求头，避免跨站沿用。
 
 OpenRouter 的起始 ID 同时按其[公开模型接口](https://openrouter.ai/api/v1/models)核对；Together 的地址按[官方 Quickstart](https://docs.together.ai/docs/quickstart)核对。火山方舟同时支持控制台提供的推理接入点 ID，可手动添加。

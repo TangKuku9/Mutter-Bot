@@ -5,6 +5,8 @@ namespace Mutter.Web.Models;
 public class AiConnectionInputDto
 {
     public string? Id { get; set; }
+    /// <summary>编辑时回传读取到的时间戳，用于拒绝过期草稿；创建/探测不需要。</summary>
+    public DateTime? UpdatedAt { get; set; }
     public string Name { get; set; } = string.Empty;
     /// <summary>省略时保留连接原模板，避免部分更新把它重置成 custom。</summary>
     public string? TemplateId { get; set; }
@@ -25,5 +27,4 @@ public sealed class AiConnectionDto : AiConnectionInputDto
     public bool HasApiKey { get; set; }
     public bool IsCurrent { get; set; }
     public int PresetCount { get; set; }
-    public DateTime UpdatedAt { get; set; }
 }

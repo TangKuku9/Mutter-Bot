@@ -17,11 +17,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(TimeProvider.System);
         // 出站建连统一做地址校验：目标域名解析到链路本地/云元数据时直接拒绝（防 DNS rebinding）。
         static IHttpClientBuilder Guarded(IHttpClientBuilder builder, bool allowRedirect = true) =>
-            builder.ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-            {
-                AllowAutoRedirect = allowRedirect,
-                ConnectCallback = OutboundAddressPolicy.ConnectAsync
-            });
+            builder.ConfigurePrimaryHttpMessageHandler(() => OutboundAddressPolicy.CreateHandler(allowRedirect));
         // 图片下载独立客户端：单张 10s 硬超时在解析器内部，这里只兜底；不占 AI 调用槽
         Guarded(services.AddHttpClient("image-resolver"))
             .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(20));

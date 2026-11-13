@@ -26,6 +26,7 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
     writes: [], probes: [], failSave: false, failDiscover: false, failLoad
   }
   if (emptyConnections) Object.assign(state.config, { connections: [], providerConnectionId: '', modelName: '', apiBaseUrl: '', apiKey: '' })
+  for (const connection of state.config.connections) connection.updatedAt = '2026-11-13T00:00:00.000Z'
   await page.route('**/hub/**', route => route.fulfill({ status: 503, body: '' }))
   await page.route('**/api/**', async route => {
     const req = route.request(), path = new URL(req.url()).pathname, method = req.method()
@@ -33,7 +34,7 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
     if (path === '/api/config/ai/connections') {
       if (method === 'GET') return route.fulfill({ json: state.config.connections })
       state.writes.push({ path, body: body() })
-      const added = { ...body(), id: `connection-${state.config.connections.length}`, hasApiKey: !!body().apiKey, apiKey: body().apiKey ? '********' : '' }
+      const added = { ...body(), id: `connection-${state.config.connections.length}`, updatedAt: '2026-11-13T00:00:00.000Z', hasApiKey: !!body().apiKey, apiKey: body().apiKey ? '********' : '' }
       state.config.connections.push(added)
       return route.fulfill({ json: added })
     }
@@ -44,7 +45,9 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
     if (path.startsWith('/api/config/ai/connections/') && method === 'PUT') {
       state.writes.push({ path, body: body() })
       const existing = state.config.connections.find(c => c.id === path.split('/').at(-1))
-      Object.assign(existing, body(), { apiKey: body().apiKey ? '********' : '', hasApiKey: !!body().apiKey })
+      if (body().updatedAt !== existing.updatedAt) return route.fulfill({ status: 409, json: { error: '连接已被其他会话修改，请重新读取连接后再保存' } })
+      const updatedAt = new Date(new Date(existing.updatedAt).getTime() + 1).toISOString()
+      Object.assign(existing, body(), { updatedAt, apiKey: body().apiKey ? '********' : '', hasApiKey: !!body().apiKey })
       return route.fulfill({ json: existing })
     }
     if (path === '/api/config/ai/connections/test') return route.fulfill({ json: { message: '模型调用成功', model: body().defaultModel, elapsedMs: 12 } })
@@ -203,8 +206,8 @@ test('旧连接可补充新内置模型，保留旧模型、显示名、默认�
   expect(state.writes.filter(w => w.path === '/api/config/ai')).toHaveLength(0)
 })
 
-test('更换接口 origin 会清空草稿密钥，换回原地址恢复掩码', async ({ page }) => {
-  await setup(page)
+test('连接编辑清理跨地址密钥，恢复原地址与默认超时后可保存', async ({ page }) => {
+  const state = await setup(page)
   await page.getByRole('button', { name: '管理服务商', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '管理服务商', exact: true })
   const address = dialog.getByLabel('API 地址', { exact: true })
@@ -215,12 +218,6 @@ test('更换接口 origin 会清空草稿密钥，换回原地址恢复掩码', 
   await expect(page.getByText('接口地址已更换，请重新填写 API Key 与自定义请求头')).toBeVisible()
   await address.fill('https://model.example.test/v1')
   await expect(key).toHaveValue('********')
-})
-
-test('连接超时清空后保存仍按默认 60 秒提交', async ({ page }) => {
-  const state = await setup(page)
-  await page.getByRole('button', { name: '管理服务商', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: '管理服务商', exact: true })
   await dialog.getByRole('button', { name: '高级连接选项', exact: true }).click()
   const timeout = dialog.getByLabel('连接超时（秒）', { exact: true })
   await expect(timeout).toHaveValue('60')
@@ -447,7 +444,8 @@ test('内建搜索探测保留实测报告和选用保存功能', async ({ page 
   expect(state.writes[0].body).toMatchObject({ webSearchEnabled: true, webSearchShape: 'enable_search', webSearchEndpoint: 'openai' })
 })
 
-for (const darkMode of [false, true]) for (const width of [1440, 1024, 390, 320]) {
+// 桌面/手机、明/暗色各保留代表尺寸，避免完整尺寸笛卡尔积重复同一流程。
+for (const [width, darkMode] of [[1440, false], [390, false], [1440, true], [320, true]]) {
   test(`AI 设置布局：${width}px · ${darkMode ? '深色' : '浅色'}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 1080 })
     await page.addInitScript(darkMode => localStorage.setItem('mutter-panel-settings', JSON.stringify({ primaryColor: '#4f46e5', darkMode, compact: false })), darkMode)

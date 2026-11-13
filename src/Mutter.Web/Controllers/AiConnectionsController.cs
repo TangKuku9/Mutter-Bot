@@ -104,11 +104,11 @@ public sealed class AiConnectionsController(AppDbContext db, IHttpClientFactory 
     public async Task<ActionResult<AiConnectionDto>> Update(string id, AiConnectionInputDto dto, CancellationToken ct)
     {
         dto.Id = id;
-        // 先按跟踪方式读出来：UpdatedAt 是并发令牌，EF 会用这次读到的值做 UPDATE 条件。
-        // Prepare 再读一次是为了拿到最新快照做打码/模板校验；两个会话同时编辑时，
-        // 后提交者会在这里被判为冲突，而不是用旧快照静默覆盖对方（包括把轮换过的 Key 写回去）。
+        // 页面版本防止旧草稿覆盖新修改；EF 并发令牌继续防止读到实体后发生的写竞争。
         var stored = await db.AiProviderConnections.FirstOrDefaultAsync(c => c.Id == id, ct);
         if (stored == null) return NotFound(new { error = "连接已不存在，请刷新后重试" });
+        if (dto.UpdatedAt != stored.UpdatedAt)
+            return Conflict(new { error = "连接已被其他会话修改，请重新读取连接后再保存" });
         var (connection, error) = await PrepareAsync(dto, true, ct);
         if (error != null) return BadRequest(new { error });
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
@@ -138,6 +138,7 @@ public sealed class AiConnectionsController(AppDbContext db, IHttpClientFactory 
             || stored.Protocol != connection.Protocol || stored.TemplateId != connection.TemplateId
             || stored.TimeoutSeconds != connection.TimeoutSeconds
             || !AiConnectionStore.HeadersEqual(stored.HeadersJson, connection.HeadersJson);
+        if (connection.UpdatedAt <= stored.UpdatedAt) connection.UpdatedAt = stored.UpdatedAt.AddTicks(1);
         connection.Revision = changed ? Guid.NewGuid().ToString("N") : stored.Revision;
         db.Entry(stored).CurrentValues.SetValues(connection);
         if (changed) capabilities?.ClearConnection(id);

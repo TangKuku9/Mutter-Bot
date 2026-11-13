@@ -16,9 +16,18 @@ public static class OutboundAddressPolicy
     private static readonly IPAddress[] Ipv6MetadataAddresses =
         [IPAddress.Parse("fd00:ec2::254"), IPAddress.Parse("fd20:ce::254")];
 
+    /// <summary>直连并固定已校验的 DNS 结果；转发代理自行解析目标，无法提供同样的地址保证。</summary>
+    public static SocketsHttpHandler CreateHandler(bool allowRedirect = true) => new()
+    {
+        UseProxy = false,
+        AllowAutoRedirect = allowRedirect,
+        ConnectCallback = ConnectAsync
+    };
+
     public static bool IsBlockedHost(string host)
     {
         if (string.IsNullOrWhiteSpace(host)) return false;
+        host = host.TrimEnd('.');
         if (host.Equals("metadata.google.internal", StringComparison.OrdinalIgnoreCase)
             || host.Equals("metadata", StringComparison.OrdinalIgnoreCase))
             return true;
@@ -52,6 +61,8 @@ public static class OutboundAddressPolicy
     /// </summary>
     public static async ValueTask<Stream> ConnectAsync(SocketsHttpConnectionContext context, CancellationToken ct)
     {
+        if (IsBlockedHost(context.DnsEndPoint.Host))
+            throw new HttpRequestException("目标为链路本地或云元数据地址，已被安全策略拒绝");
         var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, ct);
         var allowed = FilterAllowed(addresses);
         if (allowed.Length == 0)

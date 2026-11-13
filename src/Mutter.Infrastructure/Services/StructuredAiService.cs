@@ -139,22 +139,7 @@ public class StructuredAiService : IStructuredAiService
         {
             _logger.LogWarning(ex, "AI 结构化调用失败 responseFormat={Fmt} images={Images}",
                 responseFormat ?? "null", imageUrls.Count);
-            // 只把“JSON 输出约束被拒绝”归为可降级的格式问题：
-            // 泛泛匹配 json 会把“请求体不是合法 JSON”这类无关 4xx 也当成格式不支持，白打一次重试。
-            var message = ex.Message;
-            var formatRejected = ex is AiRequestException { IsDeterministicRejection: true }
-                && (message.Contains("response_format", StringComparison.OrdinalIgnoreCase)
-                    || message.Contains("json_object", StringComparison.OrdinalIgnoreCase)
-                    || message.Contains("json mode", StringComparison.OrdinalIgnoreCase)
-                    || message.Contains("json schema", StringComparison.OrdinalIgnoreCase)
-                    || message.Contains("structured output", StringComparison.OrdinalIgnoreCase)
-                    // 本地适配器拒绝 JSON 约束时也属于“格式不支持”，应允许降级为提示词约束。
-                    || message.Contains("结构化输出", StringComparison.OrdinalIgnoreCase)
-                    // “不支持 JSON 输出”类措辞：必须同时出现 json 与否定词。
-                    || (message.Contains("json", StringComparison.OrdinalIgnoreCase)
-                        && (message.Contains("not support", StringComparison.OrdinalIgnoreCase)
-                            || message.Contains("unsupported", StringComparison.OrdinalIgnoreCase)
-                            || message.Contains("不支持", StringComparison.OrdinalIgnoreCase))));
+            var formatRejected = ex is AiRequestException { IsResponseFormatRejected: true };
             return (null, ex.Message, formatRejected);
         }
     }

@@ -39,31 +39,23 @@ public static class WebServiceExtensions
                 client.Timeout = Timeout.InfiniteTimeSpan;
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("Mutter-Bot-Update");
             })
-            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            .ConfigurePrimaryHttpMessageHandler(() =>
             {
-                ConnectTimeout = TimeSpan.FromSeconds(30),
-                AutomaticDecompression = DecompressionMethods.None,
-                // 资产地址来自签名清单，仍然走建连校验；重定向保留（GitHub 会跳到对象存储域名）。
-                ConnectCallback = OutboundAddressPolicy.ConnectAsync
+                var handler = OutboundAddressPolicy.CreateHandler();
+                handler.ConnectTimeout = TimeSpan.FromSeconds(30);
+                handler.AutomaticDecompression = DecompressionMethods.None;
+                return handler;
             });
         // 清单地址可由面板改成镜像源；默认客户端也要做建连校验，避免它成为内网探测通道。
         // 空名字就是 CreateClient() 用的默认客户端，这里显式取回它的 builder 以便挂校验。
         services.AddHttpClient(string.Empty)
-            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-            {
-                ConnectCallback = OutboundAddressPolicy.ConnectAsync
-            });
+            .ConfigurePrimaryHttpMessageHandler(() => OutboundAddressPolicy.CreateHandler());
         services.AddHttpClient("ai-connections", client =>
             {
                 client.Timeout = Timeout.InfiniteTimeSpan;
                 client.MaxResponseContentBufferSize = 2 * 1024 * 1024;
             })
-            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-            {
-                AllowAutoRedirect = false,
-                // 建连时校验解析结果：端口探测与模型获取都走这里，防 DNS rebinding。
-                ConnectCallback = OutboundAddressPolicy.ConnectAsync
-            });
+            .ConfigurePrimaryHttpMessageHandler(() => OutboundAddressPolicy.CreateHandler(allowRedirect: false));
         services.AddSingleton<UpdateSettingsStore>();
         services.AddSingleton<UpdateService>();
         services.AddSingleton<UpdateApplier>();

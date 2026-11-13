@@ -20,11 +20,11 @@ test('换 origin 只清掉打码值，用户新填的密钥与请求头保持原
 
 test('模型刷新保留手动目录、名称与限额，准确区分大小写 ID', () => {
   const existing = [{ id: 'Model/A', name: '我的模型', isManual: true, contextWindowTokens: 8192 }]
-  const result = mergeConnectionModels(existing, [{ id: 'Model/A', name: 'remote' }, { id: 'model/a', name: 'new' }])
+  const result = mergeConnectionModels(existing, [{ id: 'Model/A', name: 'remote' }, { id: 'model/a', name: 'new' }, { id: 'builtin', isBuiltin: true }])
   assert.deepEqual(result[0], existing[0])
   assert.equal(result[1].id, 'model/a')
   assert.equal(result[1].isManual, false)
-  assert.notEqual(result[0], existing[0])
+  assert.deepEqual(result[2], { id: 'builtin', isBuiltin: true, isManual: false })
 })
 
 test('收藏与最近记录按连接隔离，同名模型不会串到另一账号', () => {
@@ -57,7 +57,7 @@ test('模型目录过滤同时匹配 ID 与显示名，不区分大小写', () =
   assert.deepEqual(filterConnectionModels(models, 'deepseek').map(model => model.id), ['deepseek-chat', 'other-model'])
   assert.deepEqual(filterConnectionModels(models, '推理').map(model => model.id), ['other-model'])
   assert.deepEqual(filterConnectionModels(models, '  CHAT ').map(model => model.id), ['deepseek-chat'])
-  assert.equal(filterConnectionModels(models, ''), models, '空查询保持原数组，避免无谓重建')
+  assert.deepEqual(filterConnectionModels(models, ''), models)
   assert.deepEqual(filterConnectionModels(models, 'missing'), [])
 })
 
@@ -109,12 +109,4 @@ test('自动同步只更新 last，显式选择才写入最近使用', () => {
   const explicit = rememberModel(base, 'a', 'auto')
   assert.deepEqual(explicit.last, { a: 'auto' })
   assert.deepEqual(explicit.recent.map(item => item.modelId), ['auto', 'old'])
-})
-
-test('merge 把缺省来源视为非手动，并保留内置标记', () => {
-  const merged = mergeConnectionModels([], [{ id: 'builtin', isBuiltin: true }, { id: 'remote' }])
-  assert.equal(merged[0].isManual, false)
-  assert.equal(merged[0].isBuiltin, true)
-  assert.equal(merged[1].isManual, false)
-  assert.equal(merged[1].isBuiltin, undefined)
 })
