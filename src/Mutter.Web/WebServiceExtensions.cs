@@ -39,9 +39,10 @@ public static class WebServiceExtensions
                 client.Timeout = Timeout.InfiniteTimeSpan;
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("Mutter-Bot-Update");
             })
-            .ConfigurePrimaryHttpMessageHandler(() =>
+            .ConfigurePrimaryHttpMessageHandler(sp =>
             {
-                var handler = OutboundAddressPolicy.CreateHandler();
+                var handler = OutboundAddressPolicy.CreateHandler(
+                    allowSystemProxy: () => sp.GetService<OutboundSettingsStore>()?.AllowSystemProxy == true);
                 handler.ConnectTimeout = TimeSpan.FromSeconds(30);
                 handler.AutomaticDecompression = DecompressionMethods.None;
                 return handler;
@@ -49,13 +50,15 @@ public static class WebServiceExtensions
         // 清单地址可由面板改成镜像源；默认客户端也要做建连校验，避免它成为内网探测通道。
         // 空名字就是 CreateClient() 用的默认客户端，这里显式取回它的 builder 以便挂校验。
         services.AddHttpClient(string.Empty)
-            .ConfigurePrimaryHttpMessageHandler(() => OutboundAddressPolicy.CreateHandler());
+            .ConfigurePrimaryHttpMessageHandler(sp => OutboundAddressPolicy.CreateHandler(
+                allowSystemProxy: () => sp.GetService<OutboundSettingsStore>()?.AllowSystemProxy == true));
         services.AddHttpClient("ai-connections", client =>
             {
                 client.Timeout = Timeout.InfiniteTimeSpan;
                 client.MaxResponseContentBufferSize = 2 * 1024 * 1024;
             })
-            .ConfigurePrimaryHttpMessageHandler(() => OutboundAddressPolicy.CreateHandler(allowRedirect: false));
+            .ConfigurePrimaryHttpMessageHandler(sp => OutboundAddressPolicy.CreateHandler(
+                allowRedirect: false, allowSystemProxy: () => sp.GetService<OutboundSettingsStore>()?.AllowSystemProxy == true));
         services.AddSingleton<UpdateSettingsStore>();
         services.AddSingleton<UpdateService>();
         services.AddSingleton<UpdateApplier>();

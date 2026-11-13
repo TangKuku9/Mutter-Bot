@@ -15,9 +15,16 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IMessageParser, MessageParser>();
         services.AddSingleton<IAiChatService, AiChatService>();
         services.AddSingleton(TimeProvider.System);
+        // 出站网络设置（是否允许系统代理），面板可切换；默认关闭。
+        services.AddSingleton<OutboundSettingsStore>();
         // 出站建连统一做地址校验：目标域名解析到链路本地/云元数据时直接拒绝（防 DNS rebinding）。
+        // 代理开关每次请求读取一次，切换后立即生效。
         static IHttpClientBuilder Guarded(IHttpClientBuilder builder, bool allowRedirect = true) =>
-            builder.ConfigurePrimaryHttpMessageHandler(() => OutboundAddressPolicy.CreateHandler(allowRedirect));
+            builder.ConfigurePrimaryHttpMessageHandler(sp =>
+            {
+                var settings = sp.GetService<OutboundSettingsStore>();
+                return OutboundAddressPolicy.CreateHandler(allowRedirect, () => settings?.AllowSystemProxy == true);
+            });
         // 图片下载独立客户端：单张 10s 硬超时在解析器内部，这里只兜底；不占 AI 调用槽
         Guarded(services.AddHttpClient("image-resolver"))
             .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(20));

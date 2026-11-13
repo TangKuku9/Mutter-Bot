@@ -32,7 +32,12 @@ public static class ServiceCollectionExtensions
                     sp.GetRequiredService<IOptions<MutterOptions>>().Value.Runtime.AiTimeoutSeconds + 5);
                 c.MaxResponseContentBufferSize = 4 * 1024 * 1024;
             })
-            .ConfigurePrimaryHttpMessageHandler(() => OutboundAddressPolicy.CreateHandler(allowRedirect: false));
+            .ConfigurePrimaryHttpMessageHandler(sp =>
+            {
+                var settings = sp.GetService<OutboundSettingsStore>();
+                return OutboundAddressPolicy.CreateHandler(
+                    allowRedirect: false, allowSystemProxy: () => settings?.AllowSystemProxy == true);
+            });
         services.AddSingleton<IAiModelExecutor, AiModelExecutor>();
         services.AddSingleton<IOutgoingReplyStore, OutgoingReplyStore>();
         services.AddSingleton<IAiCallStore, AiCallStore>();

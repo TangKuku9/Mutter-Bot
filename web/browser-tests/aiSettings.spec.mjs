@@ -23,7 +23,7 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
       externalSearch: { baseUrl: 'https://search.example.test', apiKey: 'search-****' }
     }),
     presets: [{ id: 'daily', providerConnectionId: 'primary', name: '日常配置', description: '日常对话', modelName: 'preset-model', apiBaseUrl: 'https://model.example.test/v1', isValid: true, hasApiKey: false, updatedAt: '2026-11-11T00:00:00Z' }],
-    writes: [], probes: [], failSave: false, failDiscover: false, failLoad
+    writes: [], probes: [], failSave: false, failDiscover: false, failLoad, allowSystemProxy: false
   }
   if (emptyConnections) Object.assign(state.config, { connections: [], providerConnectionId: '', modelName: '', apiBaseUrl: '', apiKey: '' })
   for (const connection of state.config.connections) connection.updatedAt = '2026-11-13T00:00:00.000Z'
@@ -51,6 +51,12 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
       return route.fulfill({ json: existing })
     }
     if (path === '/api/config/ai/connections/test') return route.fulfill({ json: { message: '模型调用成功', model: body().defaultModel, elapsedMs: 12 } })
+    if (path === '/api/config/network') {
+      if (method === 'GET') return route.fulfill({ json: { allowSystemProxy: state.allowSystemProxy } })
+      state.writes.push({ path, body: body() })
+      state.allowSystemProxy = !!body().allowSystemProxy
+      return route.fulfill({ status: 204, body: '' })
+    }
     if (path === '/api/config/ai') {
       if (method === 'GET') {
         if (state.failLoad) return route.fulfill({ status: 503, json: { error: '测试：读取失败' } })
@@ -227,6 +233,19 @@ test('连接编辑清理跨地址密钥，恢复原地址与默认超时后可�
   await dialog.getByRole('button', { name: '保存连接', exact: true }).click()
   const saved = state.writes.filter(write => write.path === '/api/config/ai/connections/primary').at(-1)
   expect(saved.body.timeoutSeconds).toBe(60)
+})
+
+test('网络出口默认直连，开启系统代理后保存并回读', async ({ page }) => {
+  const state = await setup(page)
+  const toggle = page.getByRole('switch', { name: '允许使用系统代理', exact: true })
+  const clickable = page.locator('.ai-network-outlet .el-switch')
+  await expect(toggle).toHaveAttribute('aria-checked', 'false')
+  await clickable.click()
+  await expect(toggle).toHaveAttribute('aria-checked', 'true')
+  await page.getByRole('button', { name: '保存网络设置', exact: true }).click()
+  await expect(page.getByText('网络出口设置已保存')).toBeVisible()
+  expect(state.writes.find(write => write.path === '/api/config/network').body).toEqual({ allowSystemProxy: true })
+  expect(state.allowSystemProxy).toBe(true)
 })
 
 test('切回连接恢复上次模型，收藏按连接保存', async ({ page }) => {

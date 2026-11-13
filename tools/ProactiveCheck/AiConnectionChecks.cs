@@ -427,8 +427,9 @@ internal static class AiConnectionChecks
         proxy.Start();
         try
         {
-            using var handler = OutboundAddressPolicy.CreateHandler();
-            handler.Proxy = new WebProxy($"http://127.0.0.1:{((IPEndPoint)proxy.LocalEndpoint).Port}");
+            using var handler = OutboundAddressPolicy.CreateHandler(
+                allowSystemProxy: () => false,
+                systemProxy: new WebProxy($"http://127.0.0.1:{((IPEndPoint)proxy.LocalEndpoint).Port}"));
             using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(3) };
             try
             {
@@ -442,7 +443,18 @@ internal static class AiConnectionChecks
             Require(!proxy.Pending(), "a configured forward proxy must not receive protected requests");
         }
         finally { proxy.Stop(); }
-        Console.WriteLine("PASS  元数据域名与解析地址受限，系统转发代理无法绕过连接校验");
+
+        // 开关只改变“是否交给代理”，默认关闭时仍然是直连。
+        var target = new Uri("https://example.test/");
+        using var switchedOn = OutboundAddressPolicy.CreateHandler(
+            allowSystemProxy: () => true, systemProxy: new WebProxy("http://127.0.0.1:9"));
+        using var switchedOff = OutboundAddressPolicy.CreateHandler(
+            allowSystemProxy: () => false, systemProxy: new WebProxy("http://127.0.0.1:9"));
+        Require(switchedOn.Proxy!.GetProxy(target)?.Port == 9 && !switchedOn.Proxy.IsBypassed(target),
+            "enabling the system proxy must route requests through the configured proxy");
+        Require(switchedOff.Proxy!.GetProxy(target) is null && switchedOff.Proxy.IsBypassed(target),
+            "the default (disabled) mode must keep connecting directly");
+        Console.WriteLine("PASS  元数据域名与解析地址受限，系统代理只由面板开关显式启用");
     }
 
     /// <summary>

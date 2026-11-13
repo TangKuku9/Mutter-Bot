@@ -16,13 +16,33 @@ public static class OutboundAddressPolicy
     private static readonly IPAddress[] Ipv6MetadataAddresses =
         [IPAddress.Parse("fd00:ec2::254"), IPAddress.Parse("fd20:ce::254")];
 
-    /// <summary>直连并固定已校验的 DNS 结果；转发代理自行解析目标，无法提供同样的地址保证。</summary>
-    public static SocketsHttpHandler CreateHandler(bool allowRedirect = true) => new()
+    /// <summary>
+    /// 默认直连并固定已校验的 DNS 结果；开启系统代理后由代理解析目标，地址策略只能覆盖代理本身，
+    /// 因此这个开关默认关闭，且只应在信任代理时打开。
+    /// </summary>
+    public static SocketsHttpHandler CreateHandler(
+        bool allowRedirect = true, Func<bool>? allowSystemProxy = null, IWebProxy? systemProxy = null) => new()
     {
-        UseProxy = false,
         AllowAutoRedirect = allowRedirect,
-        ConnectCallback = ConnectAsync
+        ConnectCallback = ConnectAsync,
+        Proxy = new SwitchableProxy(allowSystemProxy ?? (() => false), systemProxy ?? HttpClient.DefaultProxy)
     };
+
+    /// <summary>按当前设置决定是否走系统代理；设置改变后下一次请求立即生效，无需重启。</summary>
+    private sealed class SwitchableProxy(Func<bool> allowSystemProxy, IWebProxy systemProxy) : IWebProxy
+    {
+        public ICredentials? Credentials
+        {
+            get => systemProxy.Credentials;
+            set { }
+        }
+
+        public Uri? GetProxy(Uri destination) =>
+            allowSystemProxy() ? systemProxy.GetProxy(destination) : null;
+
+        public bool IsBypassed(Uri host) =>
+            !allowSystemProxy() || systemProxy.IsBypassed(host);
+    }
 
     public static bool IsBlockedHost(string host)
     {

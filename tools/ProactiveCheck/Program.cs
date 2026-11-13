@@ -1464,8 +1464,9 @@ Check(!AppLayerManifest.IsSafeRelativePath("../evil.dll", out _), "应用层清�
 Check(!AppLayerManifest.IsSafeRelativePath("/etc/passwd", out _), "应用层清单拒绝绝对路径");
 Check(!AppLayerManifest.IsSafeRelativePath("appsettings.json", out _), "应用层清单拒绝配置文件");
 Check(!AppLayerManifest.IsSafeRelativePath("mutter-bot.db", out _), "应用层清单拒绝数据库");
-Check(AppLayerManifest.IsProtectedPath("update-settings.json"),
-    "update-settings.json 在所有更新路径中受保护");
+Check(AppLayerManifest.IsProtectedPath("update-settings.json")
+    && AppLayerManifest.IsProtectedPath("outbound-settings.json"),
+    "update-settings.json / outbound-settings.json 在所有更新路径中受保护");
 
 var manifestJson = """
     {"schema":1,"version":"2.0.5","assets":[

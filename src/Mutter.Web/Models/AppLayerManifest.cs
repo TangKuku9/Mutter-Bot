@@ -159,6 +159,7 @@ public sealed class AppLayerManifest
             return true;
 
         if (name.Equals("update-settings.json", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("outbound-settings.json", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("app-layer.json", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("secrets.json", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("cookies.txt", StringComparison.OrdinalIgnoreCase) ||

@@ -355,6 +355,16 @@
               用当前表单的地址与模型实测「模型内建搜索」；独立搜索服务优先，内建策略仅在关闭独立搜索或开启失败兜底时生效。
             </small>
           </div>
+          <div class="ai-network-outlet">
+            <div class="ai-search-master">
+              <span>允许使用系统代理</span>
+              <el-switch v-model="network.allowSystemProxy" aria-label="允许使用系统代理" :loading="network.loading" />
+            </div>
+            <small>
+              默认直连并在建连时校验目标地址；开启后 AI、搜索、图片与更新请求会走系统或环境代理，目标由代理解析，仅在你信任代理时开启。
+            </small>
+            <el-button size="small" :loading="network.saving" @click="saveNetwork">保存网络设置</el-button>
+          </div>
           <template v-if="form.externalSearch.enabled">
             <div class="ai-search-fields ai-fields">
               <AiSettingField
@@ -914,6 +924,23 @@ const loading = ref(false)
 const saving = ref(false)
 const loadError = ref(false), presetsError = ref(false), presetsLoading = ref(false)
 const advancedOpen = ref([]), searchAdvancedOpen = ref([])
+// 出站网络设置独立于 AI 配置保存：它是全局开关，切换后立即对后续请求生效。
+const network = ref({ allowSystemProxy: false, loading: true, saving: false })
+const loadNetwork = async () => {
+  try {
+    const { data } = await api.get('/config/network', { skipErrorMessage: true })
+    network.value.allowSystemProxy = !!data?.allowSystemProxy
+  } catch { /* 读取失败时保持默认直连，不阻塞 AI 配置 */ }
+  finally { network.value.loading = false }
+}
+const saveNetwork = async () => {
+  network.value.saving = true
+  try {
+    await api.put('/config/network', { allowSystemProxy: network.value.allowSystemProxy })
+    ElMessage.success('网络出口设置已保存')
+  } catch { /* API 层提示错误 */ }
+  finally { network.value.saving = false }
+}
 
 // 配置预设：当前选中项、已保存列表与管理弹窗状态
 // selectedPresetId 只表示「选择待应用」；appliedPresetId 仅在应用成功后设置，
@@ -1972,7 +1999,7 @@ const save = async (successMessage = 'AI 配置已保存') => {
 }
 
 onMounted(async () => {
-  await Promise.all([load(), loadPresets()])
+  await Promise.all([load(), loadPresets(), loadNetwork()])
 })
 </script>
 
@@ -2035,6 +2062,8 @@ onMounted(async () => {
 .ai-search-test small { font-size: 12px; line-height: 1.7; }
 .ai-search-content > .ai-budget-collapse { margin-top: 0; }
 .ai-search-probe { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; padding: 12px 16px; border: 1px dashed var(--panel-border-soft); border-radius: 10px; }
+.ai-network-outlet { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; padding: 12px 16px; border: 1px dashed var(--panel-border-soft); border-radius: 10px; }
+.ai-network-outlet small { flex: 1; min-width: 240px; color: var(--panel-text-muted); font-size: 12px; line-height: 1.7; }
 .ai-search-probe small { flex: 1; min-width: 240px; color: var(--panel-text-muted); font-size: 12px; line-height: 1.7; }
 .ai-builtin-search { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding: 16px 18px; border: 1px solid var(--panel-border-soft); border-radius: 10px; background: var(--panel-raised); }
 .ai-builtin-search h4 { margin: 0; font-size: 14px; font-weight: 500; color: var(--panel-text); }

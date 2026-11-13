@@ -1289,8 +1289,9 @@ public sealed class UpdateApplier
             name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
             return true;
 
-        // 更新偏好与应用层清单不参与替换；前者是用户设置，后者只在暂存目录里用。
+        // 更新偏好、网络设置与应用层清单不参与替换；前两者是用户设置，后者只在暂存目录里用。
         if (name.Equals("update-settings.json", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("outbound-settings.json", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("app-layer.json", StringComparison.OrdinalIgnoreCase))
             return true;
 
@@ -1479,7 +1480,7 @@ public sealed class UpdateApplier
             (Join-Path $cfg.AppDir '.update')
         )
         $excludeFiles = @('appsettings*.json', 'mutter-bot.db', 'mutter-bot.db-wal', 'mutter-bot.db-shm', '*.bak.*',
-            'update-settings.json', 'app-layer.json')
+            'update-settings.json', 'outbound-settings.json', 'app-layer.json')
 
         try {
             while (Get-Process -Id $cfg.ParentPid -ErrorAction SilentlyContinue) {
