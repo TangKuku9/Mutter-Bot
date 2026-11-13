@@ -66,6 +66,7 @@ public static class OpenAiRequestBuilder
         if (!string.IsNullOrEmpty(searchShape))
             WebSearchProbe.ApplyShapeToBody(body, searchShape);
 
+        AiModelRequestCompatibility.Apply(body, config);
         return body;
     }
 }
@@ -83,9 +84,11 @@ public static class GeminiNativeRequestBuilder
         body = new Dictionary<string, object>();
         reason = null;
 
-        if (request.ResponseFormat is not null)
+        // 结构化输出走原生 responseMimeType；检索工具与 JSON 约束的组合无法保证上游支持，
+        // 该组合仍退回兼容接口（调用方据此选择两段式或本次不检索）。
+        if (request.ResponseFormat is not null && withSearch)
         {
-            reason = "结构化输出无法无损映射到原生通道";
+            reason = "结构化输出与检索工具无法同时映射到原生通道";
             return false;
         }
 
@@ -150,11 +153,14 @@ public static class GeminiNativeRequestBuilder
         }
 
         body["contents"] = contents;
-        body["generationConfig"] = new Dictionary<string, object>
+        var generationConfig = new Dictionary<string, object>
         {
             ["temperature"] = config.Temperature,
             ["maxOutputTokens"] = config.MaxTokens
         };
+        if (request.ResponseFormat is not null)
+            generationConfig["responseMimeType"] = "application/json";
+        body["generationConfig"] = generationConfig;
 
         if (!string.IsNullOrWhiteSpace(request.SystemPrompt) || systemParts.Count > 0)
         {

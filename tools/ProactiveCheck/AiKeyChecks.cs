@@ -1,4 +1,3 @@
-using System.Reflection;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -19,25 +18,38 @@ internal static partial class RuntimeChecks
     {
         const string currentKey = "test-key-1234567890"; // 15 位：新版与旧版打码相同
         const string masked = "test****7890";
+        const string searchUrl = "https://api.tavily.com";
+        const string otherUrl = "https://attacker.example.test";
 
-        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, "tavily", "") == currentKey,
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "tavily", "", searchUrl) == currentKey,
             "same provider keeps the saved key when the form is left empty");
-        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, "tavily", masked) == currentKey,
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "tavily", masked, searchUrl) == currentKey,
             "same provider treats the masked value as unchanged");
-        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, "brave", "") == "",
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, "", "tavily", masked, "") == currentKey,
+            "the default endpoint keeps the saved key");
+        // 一次保存就能把真 Key 绑到新网关，之后的探测会以“已保存地址”为基准通过 origin 校验。
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "tavily", masked, otherUrl) == "",
+            "changing the search origin invalidates the saved key instead of following it");
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "tavily", "", otherUrl) == "",
+            "an empty form after an origin change does not replay the saved key");
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "tavily", "fresh-key", otherUrl) == "fresh-key",
+            "a genuinely new key is accepted together with a new gateway");
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "tavily", masked, searchUrl + "/v1")
+            == currentKey, "same origin with a different path still reuses the key");
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "brave", "", searchUrl) == "",
             "a provider switch never reuses the old key");
-        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, "brave", masked) == "",
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "brave", masked, searchUrl) == "",
             "a provider switch never treats the old mask as a new key");
-        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, "brave", "brave-new-key") == "brave-new-key",
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "brave", "brave-new-key", searchUrl) == "brave-new-key",
             "a genuinely new key is accepted after a provider switch");
-        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, "searxng", "anything") == "",
+        Require(ConfigController.ResolveProviderAwareApiKey("tavily", currentKey, searchUrl, "searxng", "anything", searchUrl) == "",
             "SearXNG never stores a key");
 
         // 9–12 位 Key 在旧版本显示为前 4 + **** + 后 4；升级后旧页面仍可能提交这种值。
         const string shortKey = "abcdefghi";
-        Require(ConfigController.ResolveProviderAwareApiKey("custom", shortKey, "custom", "abcd****fghi") == shortKey,
+        Require(ConfigController.ResolveProviderAwareApiKey("custom", shortKey, "https://custom.test", "custom", "abcd****fghi", "https://custom.test") == shortKey,
             "the legacy 4+****+4 mask is still recognized as unchanged after the masking threshold change");
-        Require(ConfigController.ResolveProviderAwareApiKey("custom", shortKey, "brave", "abcd****fghi") == "",
+        Require(ConfigController.ResolveProviderAwareApiKey("custom", shortKey, "https://custom.test", "brave", "abcd****fghi", "https://custom.test") == "",
             "the legacy mask is not forwarded to another provider");
 
         var changed = new ExternalSearchInputDto
@@ -62,27 +74,15 @@ internal static partial class RuntimeChecks
         Require(fresh.ApiKey == "brave-new-key" && fresh.BaseUrl == "https://api.brave.com",
             "new credentials and a new gateway survive the provider switch");
 
-        // 应用预设：预设不含外搜 Key，目标服务商与当前不同时允许先落库，面板再提示补填；
-        // 普通保存仍必须拒绝空 Key。
-        var validate = typeof(ConfigController).GetMethod("NormalizeAndValidateAiConfigInput",
-            BindingFlags.NonPublic | BindingFlags.Static);
-        Require(validate is not null, "the shared AI config validator remains reachable for contract checks");
-        var presetConfig = new AiConfigInputDto
-        {
-            ExternalSearch = new ExternalSearchInputDto { Enabled = true, Provider = "brave", ApiKey = "" }
-        };
-        var strict = (string?)validate!.Invoke(null, [presetConfig, null, false]);
-        var relaxed = (string?)validate.Invoke(null, [presetConfig, null, true]);
-        Require(strict is not null && strict.Contains("API Key"),
-            "a normal save still rejects an enabled provider without a key");
-        Require(relaxed is null,
-            "applying a preset may land an enabled provider without a key so the panel can ask for one");
-
         // 经过真实的创建、序列化、应用、落库和回读路径，避免单测只验证 Key 解析函数。
         await using var env = await TestEnvironment.CreateAsync();
         using var scope = env.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var api = new ConfigController(db, scope.ServiceProvider.GetRequiredService<AiSearchCapabilityStore>());
+        Require(await api.UpdateAiConfig(new AiConfigInputDto
+        {
+            ExternalSearch = new() { Enabled = true, Provider = "brave" }
+        }) is BadRequestObjectResult, "normal saves must reject an enabled search provider without a key");
         var entity = await db.AiConfigs.SingleAsync();
         var previous = new ExternalSearchConfig
         {
@@ -127,7 +127,8 @@ internal static partial class RuntimeChecks
                 "a search preset inherits credentials only for the same provider and address");
             Require(retainKey || stored.VerifiedAt is null, "changing a search target clears its verification");
             var response = (AiConfigDto)((OkObjectResult)applied.Result!).Value!;
-            Require(retainKey ? response.ExternalSearch!.ApiKey == masked : response.ExternalSearch!.ApiKey.Length == 0,
+            // 回显只暴露“已配置”状态：完整掩码，不再给出首尾 4 位。
+            Require(retainKey ? response.ExternalSearch!.ApiKey == AiConnectionStore.SecretMask : response.ExternalSearch!.ApiKey.Length == 0,
                 "the returned form accurately shows whether a search key was retained");
         }
 
@@ -143,5 +144,28 @@ internal static partial class RuntimeChecks
         }) is NoContentResult, "a normal save still accepts an unchanged masked search key");
         Require(ExternalSearchJsonCodec.Decode((await db.AiConfigs.AsNoTracking().SingleAsync()).ExternalSearchJson).ApiKey == currentKey,
             "a normal save preserves the original search secret");
+
+        // 普通保存也不能把已存 Key 带去新网关：必须明确重填。
+        var moved = await api.UpdateAiConfig(new AiConfigInputDto
+        {
+            ExternalSearch = new ExternalSearchInputDto
+            {
+                Enabled = true, Provider = previous.Provider,
+                BaseUrl = "https://new-search.example.test", ApiKey = masked
+            }
+        });
+        Require(moved is BadRequestObjectResult,
+            "a normal save cannot move the stored search key to a new origin");
+        var afterMove = ExternalSearchJsonCodec.Decode((await db.AiConfigs.AsNoTracking().SingleAsync()).ExternalSearchJson);
+        Require(afterMove.BaseUrl == previous.BaseUrl && afterMove.ApiKey == currentKey,
+            "a rejected origin change leaves the stored search target untouched");
+        Require(await api.UpdateAiConfig(new AiConfigInputDto
+        {
+            ExternalSearch = new ExternalSearchInputDto
+            {
+                Enabled = true, Provider = previous.Provider,
+                BaseUrl = "https://new-search.example.test", ApiKey = "replacement-key"
+            }
+        }) is NoContentResult, "a new key may be saved together with a new search origin");
     }
 }

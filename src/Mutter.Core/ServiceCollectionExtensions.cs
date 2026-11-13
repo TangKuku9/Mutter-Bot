@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using System.Net.Http;
 using Mutter.Core.EventHandlers;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Proactive;
@@ -14,23 +15,33 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IMessageParser, MessageParser>();
         services.AddSingleton<IAiChatService, AiChatService>();
         services.AddSingleton(TimeProvider.System);
+        // 出站网络设置（是否允许系统代理），面板可切换；默认关闭。
+        services.AddSingleton<OutboundSettingsStore>();
+        // 出站建连统一做地址校验：目标域名解析到链路本地/云元数据时直接拒绝（防 DNS rebinding）。
+        // 代理开关每次请求读取一次，切换后立即生效。
+        static IHttpClientBuilder Guarded(IHttpClientBuilder builder, bool allowRedirect = true) =>
+            builder.ConfigurePrimaryHttpMessageHandler(sp =>
+            {
+                var settings = sp.GetService<OutboundSettingsStore>();
+                return OutboundAddressPolicy.CreateHandler(allowRedirect, () => settings?.AllowSystemProxy == true);
+            });
         // 图片下载独立客户端：单张 10s 硬超时在解析器内部，这里只兜底；不占 AI 调用槽
-        services.AddHttpClient("image-resolver")
+        Guarded(services.AddHttpClient("image-resolver"))
             .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(20));
         services.AddSingleton<IAiImageResolver, AiImageResolver>();
         services.AddSingleton<AiSearchCapabilityStore>();
-        // 联网搜索探测：独立短超时客户端，与正式 AI 调用互不干扰
-        services.AddHttpClient<WebSearchProbeRunner>()
+        // 联网搜索探测：独立短超时客户端，与正式 AI 调用互不干扰；探测带密钥，不跟随重定向
+        Guarded(services.AddHttpClient<WebSearchProbeRunner>(), allowRedirect: false)
             .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(25));
         // 独立搜索服务（预检索注入）：typed client 独立成池，超时钳制在 Provider 基座内按配置生效。
         // AddHttpClient<T> 只注册具体类型，这里再补 IWebSearchProvider 转发，
         // ExternalSearchService 才能通过 IEnumerable<IWebSearchProvider> 收齐全部 Provider。
-        services.AddHttpClient<SearxngProvider>();
-        services.AddHttpClient<TavilyProvider>();
-        services.AddHttpClient<BochaProvider>();
-        services.AddHttpClient<BraveProvider>();
-        services.AddHttpClient<DeepseekProvider>();
-        services.AddHttpClient<CustomProvider>();
+        Guarded(services.AddHttpClient<SearxngProvider>());
+        Guarded(services.AddHttpClient<TavilyProvider>());
+        Guarded(services.AddHttpClient<BochaProvider>());
+        Guarded(services.AddHttpClient<BraveProvider>());
+        Guarded(services.AddHttpClient<DeepseekProvider>());
+        Guarded(services.AddHttpClient<CustomProvider>());
         services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<SearxngProvider>());
         services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<TavilyProvider>());
         services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<BochaProvider>());

@@ -15,6 +15,15 @@ public sealed class AiModelExecutor(HttpModelTransport transport, ILogger<AiMode
         AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct)
     {
         config = config with { };
+        if (config.Protocol == "gemini")
+            strategy = new AiSearchStrategy("gemini", strategy.WithSearch ? "gemini_native" : null);
+        else if (config.Protocol == "openai" && strategy.Endpoint == "gemini")
+        {
+            // 连接已固定为 OpenAI 兼容协议：内置检索请求无法送达，静默丢弃会让人以为“搜了但没搜到”。
+            if (strategy.WithSearch)
+                logger.LogWarning("协议为 openai 但检索策略指向 gemini，本次不检索 model={Model}", config.ModelName);
+            strategy = AiSearchStrategy.CompatNoSearch;
+        }
         try
         {
             request = AiRequestBudget.Fit(request, config);
@@ -37,7 +46,7 @@ public sealed class AiModelExecutor(HttpModelTransport transport, ILogger<AiMode
         {
             return await InvokeAsync(request, config, strategy, ct);
         }
-        catch (AiRequestException ex) when (strategy.Endpoint == "gemini" && !strategy.WithSearch
+        catch (AiRequestException ex) when (config.Protocol.Length == 0 && strategy.Endpoint == "gemini" && !strategy.WithSearch
                                            && ex.IsDeterministicRejection)
         {
             return await InvokeAsync(request, config, AiSearchStrategy.CompatNoSearch, ct);

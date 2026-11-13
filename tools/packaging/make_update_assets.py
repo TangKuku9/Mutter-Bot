@@ -128,7 +128,7 @@ def protected(relative):
         return True
     if lowered.startswith("appsettings") and lowered.endswith(".json"):
         return True
-    if lowered in ("update-settings.json", "app-layer.json", "secrets.json", "cookies.txt"):
+    if lowered in ("update-settings.json", "outbound-settings.json", "app-layer.json", "secrets.json", "cookies.txt"):
         return True
     if lowered.endswith(".log"):
         return True

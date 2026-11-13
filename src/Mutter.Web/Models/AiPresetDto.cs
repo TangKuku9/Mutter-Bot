@@ -7,10 +7,17 @@ namespace Mutter.Web.Models;
 public class AiPresetConfigDto : AiConfigInputDto
 {
     public int Version { get; set; } = 1;
+
+    /// <summary>
+    /// 迁移生成的“必须重新绑定连接”标记。放进 DTO 是为了让预设详情→编辑器→保存的往返不丢标记，
+    /// 否则每次重存都会让启动迁移再判一次“待绑定”。
+    /// </summary>
+    public bool ConnectionBindingRequired { get; set; }
 }
 
 public class AiPresetSummaryDto
 {
+    public string ProviderConnectionId { get; set; } = string.Empty;
     public int Id { get; set; }
     public string Name { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
