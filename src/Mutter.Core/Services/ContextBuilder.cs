@@ -119,6 +119,16 @@ public class ContextBuilder : IContextBuilder
             ? await scope.ServiceProvider.GetRequiredService<IGroupMemoryRepository>().GetAsync(groupId, ct)
             : null;
 
+        var automatic = AutomaticMemoryRecall.Empty;
+        if (overrideConfig is null && effectiveConfig.GroupMemoryInjectionEnabled && groupConfig?.MemoryInjectionEnabled != false
+            && scope.ServiceProvider.GetService<IAutomaticMemoryRecall>() is { } recall)
+        {
+            var turn = ConversationTurnScope.Current;
+            automatic = await recall.RecallAsync(groupId, currentMessage, turn?.CreatedAt, turn?.MessageRowId, ct);
+            // 自动资料放最前面；最终输入预算先丢它，不侵占当前消息，也不进入 system。
+            if (automatic.Count > 0) truncatedConversation.Insert(0, ("user", automatic.Text));
+        }
+
         return new BuildContextResult
         {
             Messages = truncatedConversation,
@@ -127,6 +137,7 @@ public class ContextBuilder : IContextBuilder
             MessageCount = truncatedConversation.Count,
             WasTruncated = wasTruncated,
             GroupMemory = memory?.Summary,
+            AutomaticMemory = automatic,
             CharacterPrompt = characterPrompt
         };
     }

@@ -11,6 +11,7 @@ export const panelSections = [
     title: '机器人配置',
     pages: [
       { path: '/groups', title: '群管理', icon: 'User', description: '管理每个群的响应方式、人设与群记忆。' },
+      { path: '/group-memory', title: '群记忆', icon: 'Collection', description: '配置自动学习条件、独立总结模型与记忆条目。' },
       { path: '/private-chats', title: '私聊管理', icon: 'ChatLineSquare', description: '管理可使用私聊的用户与管理员权限。' },
       { path: '/proactive', title: '择机发言', icon: 'ChatDotSquare', description: '设置参与讨论的时机，并回看接话结果。' },
       { path: '/ai-settings', title: 'AI 设置', icon: 'Setting', description: '配置模型连接、角色人设、上下文与搜索能力。' }

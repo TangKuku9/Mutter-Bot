@@ -66,6 +66,10 @@ internal static partial class RuntimeChecks
             ("统计 SQL 聚合、缓存与大记录集", StatisticsPerformanceAsync),
             ("图片缓存容量、下载并发与取消隔离", ImageLimitsAsync),
             ("普通回复群记忆与各层开关", SharedMemoryAsync),
+            ("5 万条旧群聊升级与首次启用零回灌", AutomaticMemoryUpgradeAsync),
+            ("独立总结模型、来源验证与自动记忆注入", AutomaticMemoryFlowAsync),
+            ("记忆触发合并、清空竞态与重启预算", AutomaticMemoryTriggersAsync),
+            ("记忆单次 HTTP、失败退避与容量过期", AutomaticMemoryFailureAsync),
             ("群设置与记忆保存事务", AtomicGroupSettingsAsync),
             ("运行队列快照与调用过程关联", RuntimeSnapshotAsync),
             ("运行账本保留策略与累计统计事务", RetentionAsync),
@@ -865,9 +869,9 @@ internal static partial class RuntimeChecks
                 {
                     var script = db.Database.GenerateCreateScript();
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|AiUsageArchives)\" \\([\\s\\S]*?\\);", "");
+                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|AiUsageArchives|GroupMemoryItems|GroupMemoryLearningStates)\" \\([\\s\\S]*?\\);", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords)\"[^;]*;", "");
+                        "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|GroupMemoryItems|GroupMemoryLearningStates)\"[^;]*;", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
                         "^.*\"(?:ContextWindowTokens|MaxInputTokens|GroupMemoryInjectionEnabled|AiOperationId)\" [^\\r\\n]*\\r?\\n", "", System.Text.RegularExpressions.RegexOptions.Multiline);
                     await db.Database.ExecuteSqlRawAsync(script);
