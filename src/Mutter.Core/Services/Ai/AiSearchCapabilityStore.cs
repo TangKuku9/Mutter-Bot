@@ -10,46 +10,57 @@ namespace Mutter.Core.Services;
 public sealed class AiSearchCapabilityStore
 {
     private static readonly TimeSpan RuntimeNegativeTtl = TimeSpan.FromMinutes(30);
+    /// <summary>探测结论也有保鲜期：模型/网关行为会变，超过一天就当没测过，重新探测一次。</summary>
+    private static readonly TimeSpan ProbeTtl = TimeSpan.FromHours(24);
 
     private sealed record ProbeEntry(bool ImageCapable, DateTimeOffset RecordedAt);
 
     private readonly ConcurrentDictionary<string, ProbeEntry> _probe = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _runtimeUnsupported = new(StringComparer.Ordinal);
 
-    public static string Key(string apiBaseUrl, string modelName, string shape) =>
-        $"{apiBaseUrl.Trim().ToLowerInvariant()}|{modelName.Trim().ToLowerInvariant()}|{shape}";
+    public static string Key(string apiBaseUrl, string modelName, string shape, string connectionId = "") =>
+        $"{connectionId}\n{apiBaseUrl.Trim().TrimEnd('/')}|{modelName.Trim()}|{shape}";
 
-    public void RecordProbe(string apiBaseUrl, string modelName, string shape, bool imageCapable)
+    public void RecordProbe(string apiBaseUrl, string modelName, string shape, bool imageCapable, string connectionId = "")
     {
-        _probe[Key(apiBaseUrl, modelName, shape)] = new ProbeEntry(imageCapable, DateTimeOffset.UtcNow);
-        _runtimeUnsupported.TryRemove(Key(apiBaseUrl, modelName, shape), out _);
+        _probe[Key(apiBaseUrl, modelName, shape, connectionId)] = new ProbeEntry(imageCapable, DateTimeOffset.UtcNow);
+        _runtimeUnsupported.TryRemove(Key(apiBaseUrl, modelName, shape, connectionId), out _);
     }
 
-    /// <summary>null = 没探测过 / 该形状没有结论；true/false = 实测结论。</summary>
-    public bool? GetProbeImageCapability(string apiBaseUrl, string modelName, string shape)
+    /// <summary>null = 没探测过 / 结论已过期 / 该形状没有结论；true/false = 实测结论。</summary>
+    public bool? GetProbeImageCapability(string apiBaseUrl, string modelName, string shape, string connectionId = "")
     {
-        return _probe.TryGetValue(Key(apiBaseUrl, modelName, shape), out var entry)
-            ? entry.ImageCapable
-            : null;
+        var key = Key(apiBaseUrl, modelName, shape, connectionId);
+        if (!_probe.TryGetValue(key, out var entry)) return null;
+        if (entry.RecordedAt + ProbeTtl > DateTimeOffset.UtcNow) return entry.ImageCapable;
+        // 过期条目留给下一次 RecordProbe 覆盖：这里删会与并发探测记录竞争，可能把刚写入的新结论删掉。
+        return null;
     }
 
-    public void MarkRuntimeUnsupported(string apiBaseUrl, string modelName, string shape)
+    public void MarkRuntimeUnsupported(string apiBaseUrl, string modelName, string shape, string connectionId = "")
     {
-        _runtimeUnsupported[Key(apiBaseUrl, modelName, shape)] = DateTimeOffset.UtcNow + RuntimeNegativeTtl;
+        _runtimeUnsupported[Key(apiBaseUrl, modelName, shape, connectionId)] = DateTimeOffset.UtcNow + RuntimeNegativeTtl;
     }
 
-    public bool IsRuntimeUnsupported(string apiBaseUrl, string modelName, string shape)
+    public bool IsRuntimeUnsupported(string apiBaseUrl, string modelName, string shape, string connectionId = "")
     {
-        var key = Key(apiBaseUrl, modelName, shape);
+        var key = Key(apiBaseUrl, modelName, shape, connectionId);
         if (!_runtimeUnsupported.TryGetValue(key, out var until)) return false;
         if (until > DateTimeOffset.UtcNow) return true;
         _runtimeUnsupported.TryRemove(key, out _);
         return false;
     }
 
-    public void Clear(string apiBaseUrl, string modelName, string shape)
+    public void ClearConnection(string connectionId)
     {
-        var key = Key(apiBaseUrl, modelName, shape);
+        var prefix = connectionId + "\n";
+        foreach (var key in _probe.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal))) _probe.TryRemove(key, out _);
+        foreach (var key in _runtimeUnsupported.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal))) _runtimeUnsupported.TryRemove(key, out _);
+    }
+
+    public void Clear(string apiBaseUrl, string modelName, string shape, string connectionId = "")
+    {
+        var key = Key(apiBaseUrl, modelName, shape, connectionId);
         _probe.TryRemove(key, out _);
         _runtimeUnsupported.TryRemove(key, out _);
     }

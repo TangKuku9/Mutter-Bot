@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
+using Mutter.Core.Models.Config;
 
 namespace Mutter.Core.Services;
 
@@ -502,9 +503,52 @@ public sealed record ProbeSendResult(int? Status, JsonElement? Root, string? Err
 /// 探测端点的运行时壳：真实发 HTTP。逻辑部分全部委托给 <see cref="WebSearchProbe"/>。
 /// </summary>
 public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeRunner> logger,
-    IAiCallStore? callStore = null, TimeProvider? clock = null)
+    IAiCallStore? callStore = null, TimeProvider? clock = null,
+    IReadOnlyDictionary<string, string>? requestHeaders = null,
+    string driverTemplateId = "", int? requestTimeoutSeconds = null)
 {
-    /// <summary>单形状请求超时；探测不该让用户等太久。</summary>
+    public WebSearchProbeRunner WithHeaders(IReadOnlyDictionary<string, string> headers) =>
+        new(httpClient, logger, callStore, clock, headers, driverTemplateId, requestTimeoutSeconds);
+
+    /// <summary>探测必须和正式请求使用同一套模板参数与请求头，否则“探测通过、线上失败”；超时另有 45 秒上限。</summary>
+    public WebSearchProbeRunner WithConnection(
+        IReadOnlyDictionary<string, string> headers, string templateId, int? timeoutSeconds) =>
+        new(httpClient, logger, callStore, clock, headers, templateId, timeoutSeconds);
+
+    private AiConfig ProbeConfig(string apiBaseUrl, string model) => new()
+    {
+        ApiBaseUrl = apiBaseUrl, ModelName = model,
+        ProviderTemplateId = driverTemplateId, ConnectionTimeoutSeconds = requestTimeoutSeconds
+    };
+
+    /// <summary>空 Key 不发任何认证头（本地无认证代理）；Gemini 非官方 Key 同时带 Bearer 兼容中转。</summary>
+    private static void ApplyApiKey(HttpRequestMessage request, string apiKey, bool gemini)
+    {
+        if (apiKey.Length == 0) return;
+        if (!gemini)
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            return;
+        }
+        request.Headers.Add("x-goog-api-key", apiKey);
+        if (!apiKey.StartsWith("AIza", StringComparison.Ordinal))
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+    }
+
+    private void ApplyHeaders(HttpRequestMessage request)
+    {
+        foreach (var (name, value) in requestHeaders ?? new Dictionary<string, string>())
+        {
+            request.Headers.Remove(name);
+            request.Headers.TryAddWithoutValidation(name, value);
+        }
+    }
+    /// <summary>单形状请求超时：探测矩阵要连打多次，连接上的更长超时也截到 45 秒。
+    /// 慢模型可能在探测里超时、线上却可用；这里优先保证面板能及时给出结论。</summary>
+    private TimeSpan RequestTimeout => requestTimeoutSeconds is int seconds
+        ? TimeSpan.FromSeconds(Math.Clamp(seconds, 5, 45))
+        : PerRequestTimeout;
+
     private static readonly TimeSpan PerRequestTimeout = TimeSpan.FromSeconds(20);
 
     /// <summary>shape 为 null 表示该端点的基线请求（不带任何搜索参数）。</summary>
@@ -529,14 +573,16 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
         string apiBaseUrl, string apiKey, string shape, string model, CancellationToken ct)
     {
         var body = WebSearchProbe.BuildOpenAiImageBody(shape, model);
+        AiModelRequestCompatibility.Apply(body, ProbeConfig(apiBaseUrl, model));
         var url = $"{apiBaseUrl.TrimEnd('/')}/chat/completions";
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(PerRequestTimeout);
+            cts.CancelAfter(RequestTimeout);
             using var request = new HttpRequestMessage(HttpMethod.Post, url);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            ApplyApiKey(request, apiKey, gemini: false);
             request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+            ApplyHeaders(request);
             using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "openai", cts.Token, callStore, logger, clock, "probe", "probe");
             var raw = await response.Content.ReadAsStringAsync(cts.Token);
             JsonElement? root = null;
@@ -546,7 +592,7 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning("Image web search probe timed out for {Url} shape={Shape}", url, shape);
-            return new ProbeSendResult(null, null, $"请求超时（>{PerRequestTimeout.TotalSeconds:F0}s）");
+            return new ProbeSendResult(null, null, $"请求超时（>{RequestTimeout.TotalSeconds:F0}s）");
         }
         catch (HttpRequestException ex)
         {
@@ -565,12 +611,11 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
             try
             {
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cts.CancelAfter(PerRequestTimeout);
+                cts.CancelAfter(RequestTimeout);
                 using var request = new HttpRequestMessage(HttpMethod.Post, url);
-                request.Headers.Add("x-goog-api-key", apiKey);
-                if (!apiKey.StartsWith("AIza"))
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                ApplyApiKey(request, apiKey, gemini: true);
                 request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                ApplyHeaders(request);
                 using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "gemini", cts.Token, callStore, logger, clock, "probe", "probe");
                 var raw = await response.Content.ReadAsStringAsync(cts.Token);
                 JsonElement? root = null;
@@ -584,8 +629,8 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                logger.LogWarning("Image web search probe timed out for {Url}", url);
-                return new ProbeSendResult(null, null, $"请求超时（>{PerRequestTimeout.TotalSeconds:F0}s）");
+                logger.LogWarning("Web search probe timed out for {Url}", url);
+                return new ProbeSendResult(null, null, $"请求超时（>{RequestTimeout.TotalSeconds:F0}s）");
             }
             catch (HttpRequestException ex)
             {
@@ -600,14 +645,16 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
         string apiBaseUrl, string apiKey, string shape, string model, CancellationToken ct)
     {
         var body = WebSearchProbe.BuildRequestBody(shape, model, WebSearchProbe.ProbeQuestion);
+        AiModelRequestCompatibility.Apply(body, ProbeConfig(apiBaseUrl, model));
         var url = $"{apiBaseUrl.TrimEnd('/')}/chat/completions";
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(PerRequestTimeout);
+            cts.CancelAfter(RequestTimeout);
             using var request = new HttpRequestMessage(HttpMethod.Post, url);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            ApplyApiKey(request, apiKey, gemini: false);
             request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+            ApplyHeaders(request);
             using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "openai", cts.Token, callStore, logger, clock, "probe", "probe");
             var raw = await response.Content.ReadAsStringAsync(cts.Token);
             JsonElement? root = null;
@@ -617,7 +664,7 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning("Web search probe timed out for {Url} shape={Shape}", url, shape);
-            return new ProbeSendResult(null, null, $"请求超时（>{PerRequestTimeout.TotalSeconds:F0}s）");
+            return new ProbeSendResult(null, null, $"请求超时（>{RequestTimeout.TotalSeconds:F0}s）");
         }
         catch (HttpRequestException ex)
         {
@@ -636,13 +683,11 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
             try
             {
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cts.CancelAfter(PerRequestTimeout);
+                cts.CancelAfter(RequestTimeout);
                 using var request = new HttpRequestMessage(HttpMethod.Post, url);
-                request.Headers.Add("x-goog-api-key", apiKey);
-                // Google 官方 Key 认 x-goog-api-key；中转通常认 Bearer。Key 不是 AIza 开头时两个都带，无害。
-                if (!apiKey.StartsWith("AIza"))
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                ApplyApiKey(request, apiKey, gemini: true);
                 request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                ApplyHeaders(request);
                 using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "gemini", cts.Token, callStore, logger, clock, "probe", "probe");
                 var raw = await response.Content.ReadAsStringAsync(cts.Token);
                 JsonElement? root = null;
@@ -657,7 +702,7 @@ public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeR
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 logger.LogWarning("Web search probe timed out for {Url}", url);
-                return new ProbeSendResult(null, null, $"请求超时（>{PerRequestTimeout.TotalSeconds:F0}s）");
+                return new ProbeSendResult(null, null, $"请求超时（>{RequestTimeout.TotalSeconds:F0}s）");
             }
             catch (HttpRequestException ex)
             {

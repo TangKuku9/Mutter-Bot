@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
@@ -11,10 +12,12 @@ namespace Mutter.Infrastructure.Repositories;
 public class ConfigRepository : IConfigRepository
 {
     private readonly AppDbContext _dbContext;
+    private readonly ILogger<ConfigRepository>? _logger;
 
-    public ConfigRepository(AppDbContext dbContext)
+    public ConfigRepository(AppDbContext dbContext, ILogger<ConfigRepository>? logger = null)
     {
         _dbContext = dbContext;
+        _logger = logger;
     }
 
     public async Task<AiConfig?> GetAiConfigAsync(CancellationToken ct = default)
@@ -22,8 +25,16 @@ public class ConfigRepository : IConfigRepository
         var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync(ct);
         if (entity == null) return null;
 
-        return new AiConfig
+        // 旧字段没有协议列：按地址与搜索通道推断。否则连接丢失走回退分支时，
+        // Gemini 原生连接会被当成 OpenAI 兼容发送，等于回退后必然失败。
+        var legacyProtocol = entity.WebSearchEndpoint == "gemini"
+            || Uri.TryCreate(entity.ApiBaseUrl, UriKind.Absolute, out var legacyUri)
+                && legacyUri.Host == "generativelanguage.googleapis.com"
+                    ? "gemini" : "openai";
+        var config = new AiConfig
         {
+            ProviderConnectionId = entity.ProviderConnectionId,
+            Protocol = legacyProtocol,
             ApiBaseUrl = entity.ApiBaseUrl,
             ApiKey = entity.ApiKey,
             ModelName = entity.ModelName,
@@ -45,6 +56,24 @@ public class ConfigRepository : IConfigRepository
             WebSearchImageVerifiedAt = entity.WebSearchImageVerifiedAt,
             ExternalSearch = ExternalSearchJsonCodec.Decode(entity.ExternalSearchJson)
         };
+        if (entity.ProviderConnectionId.Length > 0)
+        {
+            var connection = await _dbContext.AiProviderConnections.AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == entity.ProviderConnectionId, ct);
+            if (connection != null)
+            {
+                AiConnectionStore.Apply(config, connection);
+            }
+            else
+            {
+                // 连接被备份恢复/手工改库/并发删除弄丢时不要让每条消息都抛异常：
+                // 回退到旧字段继续服务，并明确留痕，重启时由迁移自愈。
+                _logger?.LogWarning(
+                    "AI 配置引用的服务商连接已不存在，本次回退旧字段运行 connection={Connection}",
+                    entity.ProviderConnectionId);
+            }
+        }
+        return config;
     }
 
     public async Task<GroupConfig?> GetGroupConfigAsync(string groupId, CancellationToken ct = default)
@@ -75,6 +104,7 @@ public class ConfigRepository : IConfigRepository
         {
             entity = new AiConfigEntity
             {
+                ProviderConnectionId = config.ProviderConnectionId,
                 ApiBaseUrl = config.ApiBaseUrl,
                 ApiKey = config.ApiKey,
                 ModelName = config.ModelName,
@@ -100,6 +130,7 @@ public class ConfigRepository : IConfigRepository
         }
         else
         {
+            entity.ProviderConnectionId = config.ProviderConnectionId;
             entity.ApiBaseUrl = config.ApiBaseUrl;
             entity.ApiKey = config.ApiKey;
             entity.ModelName = config.ModelName;

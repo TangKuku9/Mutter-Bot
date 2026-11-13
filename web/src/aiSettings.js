@@ -20,10 +20,13 @@ function normalizeExternalSearch(value) {
 export function normalizeAiSettings(data) {
   const source = data && typeof data === 'object' ? data : {}
   return {
-    apiBaseUrl: '', apiKey: '', modelName: '', personality: '', systemPrompt: '', temperature: 0.7,
+    providerConnectionId: '', connections: [], apiBaseUrl: '', apiKey: '', modelName: '', personality: '', systemPrompt: '', temperature: 0.7,
     maxTokens: 2048, maxContextMessages: 20, contextWindowTokens: 32768, maxInputTokens: DEFAULT_INPUT_BUDGET,
     maxAttachedImages: 3, groupMemoryInjectionEnabled: true, webSearchEnabled: false, webSearchImageMode: 'auto',
     availableProviders: [], availableCharacters: [], ...source,
+    providerConnectionId: orEmpty(source.providerConnectionId),
+    providerConnectionVersion: orEmpty(source.providerConnectionVersion),
+    connections: Array.isArray(source.connections) ? source.connections : [],
     // 已选用策略的字符串字段 null/undefined → ''（与后端 string.Empty 默认一致）
     webSearchEndpoint: orEmpty(source.webSearchEndpoint),
     webSearchShape: orEmpty(source.webSearchShape),

@@ -2,6 +2,7 @@ namespace Mutter.Infrastructure.Entities;
 
 public class AiConfigEntity
 {
+    public string ProviderConnectionId { get; set; } = string.Empty;
     public int Id { get; set; }
     public string ApiBaseUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;

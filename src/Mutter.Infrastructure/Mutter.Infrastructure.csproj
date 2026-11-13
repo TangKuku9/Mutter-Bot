@@ -5,6 +5,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- 自检工具直接验证传输层的脱敏/预算等内部规则 -->
+    <InternalsVisibleTo Include="ProactiveCheck" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.*" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.*">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

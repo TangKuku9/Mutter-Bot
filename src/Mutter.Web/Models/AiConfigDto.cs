@@ -6,6 +6,8 @@ namespace Mutter.Web.Models;
 /// </summary>
 public class AiConfigInputDto
 {
+    public string ProviderConnectionId { get; set; } = string.Empty;
+    public string ProviderConnectionVersion { get; set; } = string.Empty;
     public string ApiBaseUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;
     public string ModelName { get; set; } = string.Empty;
@@ -83,6 +85,7 @@ public class AiConfigDto : AiConfigInputDto
 
     public List<CharacterDto> AvailableCharacters { get; set; } = new();
     public List<ProviderPresetDto> AvailableProviders { get; set; } = new();
+    public List<AiConnectionDto> Connections { get; set; } = [];
 }
 
 public class CharacterDto
@@ -96,6 +99,10 @@ public class CharacterDto
 
 public class ProviderPresetDto
 {
+    public string Category { get; set; } = "china";
+    public string Protocol { get; set; } = "openai";
+    public string ModelsUpdatedAt { get; set; } = string.Empty;
+    public string DocumentationUrl { get; set; } = string.Empty;
     public string Id { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string ApiBaseUrl { get; set; } = string.Empty;

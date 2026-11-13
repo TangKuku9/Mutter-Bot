@@ -139,10 +139,7 @@ public class StructuredAiService : IStructuredAiService
         {
             _logger.LogWarning(ex, "AI 结构化调用失败 responseFormat={Fmt} images={Images}",
                 responseFormat ?? "null", imageUrls.Count);
-            var formatRejected = ex is AiRequestException { IsDeterministicRejection: true }
-                && (ex.Message.Contains("response_format", StringComparison.OrdinalIgnoreCase)
-                    || ex.Message.Contains("json_object", StringComparison.OrdinalIgnoreCase)
-                    || ex.Message.Contains("json mode", StringComparison.OrdinalIgnoreCase));
+            var formatRejected = ex is AiRequestException { IsResponseFormatRejected: true };
             return (null, ex.Message, formatRejected);
         }
     }

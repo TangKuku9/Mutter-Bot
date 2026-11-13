@@ -81,6 +81,7 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 
 ### 4. 现代化 Web 管理面板
 - **Vue 3 + Element Plus** 构建的单页管理后台（SPA）。
+- **服务商连接库**：内置模板与自定义连接、模型目录获取和手动维护、模型搜索与收藏，以及可复用连接的 AI 配置预设，详见 [服务商连接与模型目录](docs/ai-provider-connections.md)。
 - 提供系统监控、AI 与群配置的可视化编辑、会话记录查询、Token 用量统计与主动发言决策审计。
 - **安全鉴权机制**：管理口令 PBKDF2 加盐哈希认证、初始口令首次登录强制修改、暴力破解频率限制、远程 Session 会话吊销。
 
@@ -305,6 +306,8 @@ sudo ./deploy/install.sh ./publish
 - 妥善备份已有的 SQLite 数据库（含 `-wal` 与 `-shm` 缓存日志防丢）；
 - 注册并启动 systemd 守护服务（以 `--headless` 无头模式运行）。
 
+> **升级到含服务商连接库的版本时**：首次启动会幂等迁移 AI 配置与预设（当前配置生成“现有连接”，含独立密钥的预设改为引用连接，无法判断归属的无密钥预设标记为“未绑定连接”）。升级前请务必备份 SQLite（含 `-wal`/`-shm`）；迁移不需要手工操作，重复启动不会重复建连接。详见 [服务商连接与模型目录](docs/ai-provider-connections.md)。
+
 管理服务：
 ```bash
 sudo systemctl status mutter-bot
@@ -329,6 +332,9 @@ sudo journalctl -u mutter-bot -f
 ```bash
 # 执行逻辑与运行时回归自检（CI 流水线内置，仅使用合成临时库与假 HTTP）
 dotnet run --project tools/ProactiveCheck -- --logic-only
+
+# 只执行服务商连接自检（旧库补表/补列、迁移、掩码往返、引用保护、两种协议传输）
+dotnet run --project tools/ProactiveCheck -- --connections-only
 
 # 单独执行运行时回归（合成临时库与假 HTTP，不访问真实服务）
 dotnet run --project tools/ProactiveCheck -- --runtime-only

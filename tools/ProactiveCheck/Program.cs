@@ -33,6 +33,7 @@ using Mutter.Web.Services;
 //   dotnet run --project tools/ProactiveCheck -- --logic-only
 // --logic-only 跑第 1~3 段及合成临时库运行时回归，供 CI 使用（第 4~6 段需要源库副本）。
 var logicOnly = args.Contains("--logic-only");
+if (args.Contains("--connections-only")) return await AiConnectionChecks.RunAsync() ? 0 : 1;
 if (args.Contains("--runtime-only")) return await RuntimeChecks.RunAsync() ? 0 : 1;
 var sourceDb = args.FirstOrDefault(a => !a.StartsWith("--")) ?? "mutter-bot.db";
 if (!logicOnly && !File.Exists(sourceDb))
@@ -1463,8 +1464,9 @@ Check(!AppLayerManifest.IsSafeRelativePath("../evil.dll", out _), "应用层清�
 Check(!AppLayerManifest.IsSafeRelativePath("/etc/passwd", out _), "应用层清单拒绝绝对路径");
 Check(!AppLayerManifest.IsSafeRelativePath("appsettings.json", out _), "应用层清单拒绝配置文件");
 Check(!AppLayerManifest.IsSafeRelativePath("mutter-bot.db", out _), "应用层清单拒绝数据库");
-Check(AppLayerManifest.IsProtectedPath("update-settings.json"),
-    "update-settings.json 在所有更新路径中受保护");
+Check(AppLayerManifest.IsProtectedPath("update-settings.json")
+    && AppLayerManifest.IsProtectedPath("outbound-settings.json"),
+    "update-settings.json / outbound-settings.json 在所有更新路径中受保护");
 
 var manifestJson = """
     {"schema":1,"version":"2.0.5","assets":[
@@ -1546,6 +1548,7 @@ else
     }
 }
 
+ok &= await AiConnectionChecks.RunAsync();
 ok &= await RuntimeChecks.RunAsync();
 
 if (logicOnly)
