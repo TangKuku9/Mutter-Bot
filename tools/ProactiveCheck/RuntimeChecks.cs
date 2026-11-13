@@ -379,11 +379,22 @@ internal static partial class RuntimeChecks
         Require(repaired.Result?.Data.Line == "hi" && repaired.PromptTokens == 30 && repaired.CompletionTokens == 12,
             "structured fallback must sum both attempts exactly once");
         sequence = 0;
+        // 关掉联网搜索：400 在启用搜索时会先走“退回不检索”的重试，测不出格式分类本身的差异。
+        var formatOnly = config with { WebSearchEnabled = false };
         env.Http.Handler = (_, _, _) => Task.FromResult(++sequence == 1
             ? new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("response_format json_object unsupported") }
             : JsonReply("{\"reason\":\"没有接话必要\"}"));
-        var unsupported = await structured.GetStructuredOutcomeAsync<ProactiveVerdict>("s", "u", config);
+        var unsupported = await structured.GetStructuredOutcomeAsync<ProactiveVerdict>("s", "u", formatOnly);
         Require(unsupported.Result is not null && sequence == 2, "explicit JSON mode rejection may fall back");
+        // “请求体不是合法 JSON”之类的 4xx 与 response_format 无关：不能当成格式不支持再打一次。
+        var beforeMalformed = env.Http.Requests.Count;
+        env.Http.Handler = (_, _, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("We could not parse the JSON body of your request")
+        });
+        var malformed = await structured.GetStructuredOutcomeAsync<ProactiveVerdict>("s", "u", formatOnly);
+        Require(malformed.FailureKind == StructuredAiFailureKind.ApiError && env.Http.Requests.Count == beforeMalformed + 1,
+            "unrelated json errors must not masquerade as a format rejection");
         env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("{}"));
         Require((await structured.GetStructuredOutcomeAsync<ProactiveVerdict>("s", "u", config)).FailureKind
             == StructuredAiFailureKind.Unparsable, "empty object is not an explicit decline");

@@ -373,10 +373,16 @@ public sealed class AiConnectionsController(AppDbContext db, IHttpClientFactory 
         var defaultModel = (dto.DefaultModel ?? "").Trim();
         if (requireModels && !ids.Contains(defaultModel)) return (null, "请从模型列表中选择默认模型");
         // 省略 templateId 时保留原值，避免部分更新把模板重置成 custom（进而改变请求参数约束）。
-        // 内置模板的协议就是请求体形状的契约：只要模板不是 custom，协议就必须与之一致，
-        // 否则运行时会稳定失败（例如选择 Gemini 模板却按 OpenAI 兼容发请求）。
+        // 内置模板的协议就是请求体形状的契约：不允许把模板或协议改成互相冲突的组合。
+        // 但旧版本可能已经留下错配行；只要本次没有改动模板/协议，仍然允许改名、密钥、模型等编辑，
+        // 用户也可以把协议改成模板要求的值来修复它。
+        var templateChanged = !string.IsNullOrWhiteSpace(dto.TemplateId)
+            && !string.Equals(dto.TemplateId, saved?.TemplateId, StringComparison.Ordinal);
+        var protocolChanged = dto.Protocol != null
+            && !string.Equals(dto.Protocol.Trim(), saved?.Protocol, StringComparison.Ordinal);
         if (template is { Id: not "custom" }
-            && !string.Equals(template.Protocol, protocol, StringComparison.Ordinal))
+            && !string.Equals(template.Protocol, protocol, StringComparison.Ordinal)
+            && (saved == null || templateChanged || protocolChanged))
         {
             return (null, $"模板「{template.Name}」使用{(template.Protocol == "gemini" ? "Gemini 原生" : "OpenAI 兼容")}协议，与当前选择的协议不一致");
         }

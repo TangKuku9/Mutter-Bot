@@ -184,6 +184,28 @@ internal static class AiConnectionChecks
             }, default);
             Require(mismatched.Result is BadRequestObjectResult,
                 "a built-in template must reject a conflicting connection protocol");
+            // 旧版本可能留下“模板/协议错配”的连接：不改变模板与协议时应仍可编辑，改出新错配仍要拒绝。
+            var legacyCreate = (AiConnectionDto)((OkObjectResult)(await connections.Create(new AiConnectionInputDto
+            {
+                Name = "legacy-mismatch", TemplateId = "openai", Protocol = "openai",
+                ApiBaseUrl = "https://legacy-mismatch.example.test/v1", DefaultModel = "legacy-model",
+                Models = [new() { Id = "legacy-model", Name = "legacy-model" }]
+            }, default)).Result!).Value!;
+            var legacyEntity = (await db.AiProviderConnections.FindAsync(legacyCreate.Id))!;
+            legacyEntity.Protocol = "gemini"; // 模拟旧版本落下的错配
+            await db.SaveChangesAsync();
+            var legacyEdit = new AiConnectionInputDto
+            {
+                Name = "legacy-mismatch-renamed", TemplateId = "openai", Protocol = "gemini",
+                ApiBaseUrl = legacyEntity.ApiBaseUrl, DefaultModel = "legacy-model",
+                Models = [new() { Id = "legacy-model", Name = "legacy-model" }]
+            };
+            Require((await connections.Update(legacyCreate.Id!, legacyEdit, default)).Result is OkObjectResult,
+                "a pre-existing template/protocol mismatch must stay editable without changing either");
+            legacyEdit.TemplateId = "gemini";
+            legacyEdit.Protocol = "openai";
+            Require((await connections.Update(legacyCreate.Id!, legacyEdit, default)).Result is BadRequestObjectResult,
+                "changing a built-in template into a conflicting protocol is still rejected");
             capabilities.RecordProbe("same", "Model/A", "s", true, "account-a");
             Require(capabilities.GetProbeImageCapability("same", "Model/A", "s", "account-a") is true,
                 "probe records must be readable under the same key");

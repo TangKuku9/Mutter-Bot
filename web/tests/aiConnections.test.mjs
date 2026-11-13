@@ -1,10 +1,22 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  MAX_CONNECTION_MODELS, appendConnectionModel, connectionHeaderError, filterConnectionModels,
+  MAX_CONNECTION_MODELS, appendConnectionModel, clearMaskedSecretsForOriginChange,
+  connectionHeaderError, filterConnectionModels,
   mergeConnectionModels, mergeConnectionModelsWithinLimit, preferredModel, groupConnectionModels,
   rememberModel, rememberLastModel, readModelPreferences
 } from '../src/aiConnections.js'
+
+test('换 origin 只清掉打码值，用户新填的密钥与请求头保持原样', () => {
+  const draft = { apiKey: '********' }
+  const headers = [{ name: 'X-Tenant', value: '********' }, { name: 'X-Trace', value: 'typed-value' }]
+  assert.equal(clearMaskedSecretsForOriginChange(draft, headers), true)
+  assert.equal(draft.apiKey, '')
+  assert.equal(headers[0].value, '')
+  assert.equal(headers[1].value, 'typed-value')
+  assert.equal(clearMaskedSecretsForOriginChange({ apiKey: 'fresh-key' }, [{ name: 'X', value: 'fresh' }]), false,
+    '没有打码值时不应误报清理')
+})
 
 test('模型刷新保留手动目录、名称与限额，准确区分大小写 ID', () => {
   const existing = [{ id: 'Model/A', name: '我的模型', isManual: true, contextWindowTokens: 8192 }]

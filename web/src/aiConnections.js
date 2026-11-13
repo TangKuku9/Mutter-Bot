@@ -2,7 +2,24 @@ const STORAGE_KEY = 'mutter.ai-model-preferences.v1'
 
 // 与服务端 AiConnectionsController.PrepareAsync 的上限保持一致
 export const MAX_CONNECTION_MODELS = 2000
-const SECRET_MASK = '********'
+export const SECRET_MASK = '********'
+
+// 换了 origin 后打码值必然解析不到旧密钥：在草稿里直接清掉，避免用户提交后才被 400 拦下。
+// 返回是否发生了清理，供调用方决定是否提示“请重新填写”。
+export function clearMaskedSecretsForOriginChange(draft, headers = []) {
+  let cleared = false
+  if (draft && draft.apiKey === SECRET_MASK) {
+    draft.apiKey = ''
+    cleared = true
+  }
+  for (const header of Array.isArray(headers) ? headers : []) {
+    if (header && header.value === SECRET_MASK) {
+      header.value = ''
+      cleared = true
+    }
+  }
+  return cleared
+}
 
 export function groupProviderTemplates(templates = []) {
   return [

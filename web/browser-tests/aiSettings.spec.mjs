@@ -203,6 +203,20 @@ test('旧连接可补充新内置模型，保留旧模型、显示名、默认�
   expect(state.writes.filter(w => w.path === '/api/config/ai')).toHaveLength(0)
 })
 
+test('更换接口 origin 会清空草稿密钥，换回原地址恢复掩码', async ({ page }) => {
+  await setup(page)
+  await page.getByRole('button', { name: '管理服务商', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '管理服务商', exact: true })
+  const address = dialog.getByLabel('API 地址', { exact: true })
+  const key = dialog.getByLabel('API Key', { exact: true })
+  await expect(key).toHaveValue('********')
+  await address.fill('https://other.example.test/v1')
+  await expect(key).toHaveValue('')
+  await expect(page.getByText('接口地址已更换，请重新填写 API Key 与自定义请求头')).toBeVisible()
+  await address.fill('https://model.example.test/v1')
+  await expect(key).toHaveValue('********')
+})
+
 test('连接超时清空后保存仍按默认 60 秒提交', async ({ page }) => {
   const state = await setup(page)
   await page.getByRole('button', { name: '管理服务商', exact: true }).click()

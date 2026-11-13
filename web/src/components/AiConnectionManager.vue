@@ -125,8 +125,8 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
 import {
-  appendConnectionModel, connectionHeaderError, filterConnectionModels,
-  groupProviderTemplates, mergeConnectionModelsWithinLimit
+  SECRET_MASK, appendConnectionModel, clearMaskedSecretsForOriginChange, connectionHeaderError,
+  filterConnectionModels, groupProviderTemplates, mergeConnectionModelsWithinLimit
 } from '../aiConnections'
 import { safeHttpUrl } from '../aiSettings'
 
@@ -158,10 +158,45 @@ watch([modelSearch, () => filteredModels.value.length], () => { modelPage.value 
 const modelSource = row => row.isManual ? '手动' : (row.isBuiltin || selectedTemplate.value?.models?.includes(row.id)) ? '内置' : '获取'
 watch(() => fingerprint(), () => { testResult.value = '' })
 watch(dirty, value => emit('update:dirty', value), { immediate: true })
+const originOf = value => {
+  try {
+    const url = new URL(String(value ?? '').trim())
+    return url.protocol && url.host ? `${url.protocol}//${url.host}` : ''
+  } catch { return '' }
+}
+// 编辑已有连接时记住它保存的 origin。换成别的 origin 后打码值一定不会被后端解析，
+// 与其等保存/测试返回 400，不如在草稿里清掉并提示重填；换回原地址则恢复掩码。
+const baselineOrigin = ref(''), originClearedKey = ref(false)
+let originClearedHeaders = []
+watch(() => draft.value.apiBaseUrl, value => {
+  if (!draft.value.id || !baselineOrigin.value) return
+  const origin = originOf(value)
+  if (!origin) return // 正在输入，URL 还不完整
+  if (origin === baselineOrigin.value) {
+    if (originClearedKey.value && draft.value.apiKey === '') draft.value.apiKey = SECRET_MASK
+    originClearedKey.value = false
+    for (const cleared of originClearedHeaders) {
+      const header = headers.value.find(item => item.name === cleared.name)
+      if (header && header.value === '') header.value = SECRET_MASK
+    }
+    originClearedHeaders = []
+    return
+  }
+  const hadKey = draft.value.apiKey === SECRET_MASK
+  const hadHeaders = headers.value.filter(header => header.value === SECRET_MASK).map(header => ({ name: header.name }))
+  if (!clearMaskedSecretsForOriginChange(draft.value, headers.value)) return
+  if (hadKey) originClearedKey.value = true
+  originClearedHeaders.push(...hadHeaders)
+  ElMessage.warning('接口地址已更换，请重新填写 API Key 与自定义请求头')
+})
 const reset = connection => {
   const copy = connection ? JSON.parse(JSON.stringify(connection)) : blank()
   headers.value = Object.entries(copy.headers || {}).map(([name, value]) => ({ name, value, originalName: name }))
   delete copy.headers
+  // 先记下目标 origin 再切 draft：watcher 看到同 origin，不会把刚恢复的密钥当成“换地址”清掉。
+  baselineOrigin.value = originOf(copy.apiBaseUrl)
+  originClearedKey.value = false
+  originClearedHeaders = []
   draft.value = copy
   modelEntry.value = ''; modelSearch.value = ''; error.value = ''; testResult.value = ''; advanced.value = []
   baseline.value = fingerprint()
