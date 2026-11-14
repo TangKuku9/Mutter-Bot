@@ -172,6 +172,7 @@ public class AppDbContext : DbContext
     {
         await EnsureRuntimeSchemaAsync(ct);
         // 不扫描或总结已有聊天，不创建开启状态；旧端升级保持零学习调用。
+        // 注意：ExecuteSqlRawAsync 把 SQL 当复合格式字符串，DEFAULT '{{}}' 落库后才是 '{}'。
         await Database.ExecuteSqlRawAsync("""
             CREATE TABLE IF NOT EXISTS "GroupMemoryItems" (
                 "Id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, "GroupId" TEXT NOT NULL,

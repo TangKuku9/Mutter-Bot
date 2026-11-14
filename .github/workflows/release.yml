@@ -129,7 +129,8 @@ jobs:
             mkdir -p "stage/${pkg}"
             cp -a "out/${kind}/." "stage/${pkg}/"
             cp LICENSE README.md "stage/${pkg}/"
-            rm -f "stage/${pkg}/appsettings.Development.json" "stage/${pkg}/appsettings.example.json"
+            # 只允许保留占位 appsettings.json；任何本地环境覆盖文件都不能进包。
+            rm -f "stage/${pkg}/appsettings.Development.json" "stage/${pkg}/appsettings.Production.json" "stage/${pkg}/appsettings.example.json"
             if [ "${{ matrix.rid }}" = "linux-x64" ]; then
               cp deploy/install.sh deploy/mutter-bot.service "stage/${pkg}/"
               chmod +x "stage/${pkg}/mutter-bot" "stage/${pkg}/install.sh"

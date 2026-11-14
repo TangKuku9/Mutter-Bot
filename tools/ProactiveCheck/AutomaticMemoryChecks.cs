@@ -114,8 +114,8 @@ internal static partial class RuntimeChecks
         {
             operations = new[]
             {
-                new { op = "add", content = "成员自述不吃辣。", subjectUserId = "MEMBER-A", sourceRowIds = new[] { source }, evidence = "我不吃辣", tags = new[] { "饮食", "辣" } },
-                new { op = "add", content = "另一成员不吃辣。", subjectUserId = "MEMBER-B", sourceRowIds = new[] { source }, evidence = "我不吃辣", tags = new[] { "饮食" } },
+                new { op = "add", content = "成员自述不吃辣。", subjectUserId = "MEMBER-A", sourceRowIds = new[] { source }, evidence = "我不吃辣，推荐", tags = new[] { "饮食", "辣" } },
+                new { op = "add", content = "另一成员不吃辣。", subjectUserId = "MEMBER-B", sourceRowIds = new[] { source }, evidence = "我不吃辣，推荐", tags = new[] { "饮食" } },
                 new { op = "add", content = "臆造的记忆", subjectUserId = "MEMBER-A", sourceRowIds = new[] { source + 999 }, evidence = "不存在", tags = Array.Empty<string>() }
             }
         })));
@@ -141,7 +141,7 @@ internal static partial class RuntimeChecks
                 && json.RootElement.GetProperty("items").GetArrayLength() == 1
                 && json.RootElement.GetProperty("items")[0].GetProperty("expiresAt").GetDateTime().Kind == DateTimeKind.Utc,
                 "real management API returns config, items and unambiguous UTC timestamps without credentials");
-            Require(await controller.Sources("OTHER-GROUP", (await db.GroupMemoryItems.SingleAsync()).Id, default) is NotFoundResult,
+            Require(await controller.Sources("OTHER-GROUP", (await db.GroupMemoryItems.SingleAsync()).Id, default) is NotFoundObjectResult,
                 "source lookup cannot cross groups");
             var connections = new AiConnectionsController(db, env.Services.GetRequiredService<IHttpClientFactory>(),
                 env.Services.GetRequiredService<IAiModelExecutor>());
@@ -149,10 +149,37 @@ internal static partial class RuntimeChecks
                 "a connection referenced by memory cannot be removed");
         }
         var built = await env.Services.GetRequiredService<IContextBuilder>().BuildGroupContextAsync("GROUP", "吃辣吗", "Synthetic");
-        Require(built.AutomaticMemory.Count == 1 && built.Messages[0].Content.Contains("本群自动记忆")
+        Require(built.AutomaticMemory.Count == 1 && built.Messages[0].Content.Contains("系统附加") && built.Messages[0].Content.Contains("不要回应")
             && !built.ComposeSystemPrompt().Contains("成员自述不吃辣"), "automatic memory is low-priority user background, not system instructions");
+        using (var tight = env.Services.CreateScope())
+        {
+            var configRepo = tight.ServiceProvider.GetRequiredService<IConfigRepository>();
+            var cfg = (await configRepo.GetAiConfigAsync())! with
+            {
+                MaxTokens = 512, ContextWindowTokens = 1024, MaxInputTokens = 512
+            };
+            await configRepo.SaveAiConfigAsync(cfg);
+        }
+        var constrained = await env.Services.GetRequiredService<IContextBuilder>()
+            .BuildGroupContextAsync("GROUP", "吃辣吗", "Synthetic");
+        Require(constrained.AutomaticMemory.Count == 0,
+            "memory is dropped when the text budget cannot fit it");
         var privateContext = await env.Services.GetRequiredService<IContextBuilder>().BuildPrivateContextAsync("MEMBER-A", "吃辣吗");
         Require(privateContext.AutomaticMemory.Count == 0, "private chat does not use group memories");
+        await NewMemoryMessageAsync(env, "连接缺失后的新消息");
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.AiProviderConnections.Remove(await db.AiProviderConnections.SingleAsync(c => c.Id == "MEMORY-CONNECTION"));
+            await db.SaveChangesAsync();
+        }
+        await env.Services.GetRequiredService<GroupMemoryLearningService>().RunGroupAsync("GROUP");
+        Require(env.Http.Requests.Count == 1, "missing memory connection makes no HTTP request");
+        using (var scope = env.Services.CreateScope())
+        {
+            var state = await scope.ServiceProvider.GetRequiredService<AutomaticMemoryRepository>().StateAsync("GROUP");
+            Require(state!.LastOutcome == "connection_missing", "missing connection is reported without consuming retry attempts");
+        }
         Require(env.Http.Requests.Count == 1, "recall requires no extra model calls");
     }
 
@@ -168,6 +195,21 @@ internal static partial class RuntimeChecks
         var repo = scope.ServiceProvider.GetRequiredService<AutomaticMemoryRepository>();
         var batch = (await repo.PrepareAsync("GROUP", true, default))!;
         Require(batch.Reasons.Count == 3, "count, interval and schedule are combined into one batch");
+        long inFlightId;
+        using (var seed = env.Services.CreateScope())
+        {
+            var db = seed.ServiceProvider.GetRequiredService<AppDbContext>();
+            var item = new GroupMemoryItemEntity
+            {
+                GroupId = "GROUP", Content = "待删除的合成记忆", ExpiresAt = env.Clock.GetUtcNow().UtcDateTime.AddDays(1)
+            };
+            db.GroupMemoryItems.Add(item); await db.SaveChangesAsync(); inFlightId = item.Id;
+        }
+        using (var delete = env.Services.CreateScope())
+            Require(await delete.ServiceProvider.GetRequiredService<AutomaticMemoryRepository>()
+                .DeleteAsync("GROUP", inFlightId, default), "single item delete works");
+        Require(!await repo.CompleteAsync(batch, new(), "success", default),
+            "single delete rejects an in-flight old patch");
         using (var clearScope = env.Services.CreateScope()) await clearScope.ServiceProvider.GetRequiredService<AutomaticMemoryRepository>().ClearAsync("GROUP", default);
         Require(!await repo.CompleteAsync(batch, new(), "success", default), "clearing rejects an in-flight old patch even with a tracked EF snapshot");
         using (var read = env.Services.CreateScope())
@@ -197,6 +239,161 @@ internal static partial class RuntimeChecks
                 "restart skips missed schedule slots without resetting the history cursor or quota");
     }
 
+    private static async Task AutomaticMemoryQualityAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        await ConfigureMemoryAsync(env);
+        var source = await NewMemoryMessageAsync(env, "我不吃辣，不过明天下午三点要去考试，最近都在图书馆复习。");
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply(JsonSerializer.Serialize(new
+        {
+            operations = new object[]
+            {
+                new { op = "add", content = "明天下午要考试。", subjectUserId = "MEMBER-A",
+                    sourceRowIds = new[] { source }, evidence = "明天下午三点要去考试", tags = new[] { "考试", "日程" }, kind = "fact" },
+                new { op = "add", content = "在图书馆复习。", subjectUserId = "MEMBER-A",
+                    sourceRowIds = new[] { source }, evidence = "最近都在图书馆复习", tags = new[] { "学习" }, kind = "fact" },
+                new { op = "add", content = "喜欢\n喝茶。", subjectUserId = "MEMBER-A",
+                    sourceRowIds = new[] { source.ToString() }, evidence = "我不吃辣，不过", tags = new[] { "饮食" }, kind = "preference" },
+                new { op = "add", content = "考试后晚上开黑。", subjectUserId = "MEMBER-A",
+                    sourceRowIds = new[] { source }, evidence = "明天下午三点要去考试", tags = new[] { "开黑" },
+                    kind = "fact", eventEndAt = "2026-11-04T20:00:00+08:00" }
+            }
+        })));
+        await env.Services.GetRequiredService<GroupMemoryLearningService>().RunGroupAsync("GROUP");
+        using var scope = env.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var request = env.Http.Requests.Single();
+        using var outer = JsonDocument.Parse(request.Body);
+        var contentText = string.Join("\n", outer.RootElement.GetProperty("messages").EnumerateArray()
+            .Select(m => m.GetProperty("content").GetString()));
+        Require(contentText.Contains("\"u1\"") && !contentText.Contains("MEMBER-A"),
+            "model payload uses per-batch handles instead of raw openids");
+        var items = await db.GroupMemoryItems.ToListAsync();
+        Require(items.Count == 4, "string source ids, short evidence and newline content are handled");
+        var now = env.Clock.GetUtcNow().UtcDateTime;
+        var exam = items.Single(i => i.Content.Contains("考试。"));
+        Require(exam.ExpiresAt <= now.AddDays(7) && exam.ExpiresAt > now.AddDays(6),
+            "one-off relative date expires in seven days");
+        var study = items.Single(i => i.Content.Contains("图书馆"));
+        Require(study.ExpiresAt > now.AddDays(60), "stable fact keeps ninety-day lifetime");
+        var game = items.Single(i => i.Content.Contains("开黑"));
+        Require(game.ExpiresAt > now && game.ExpiresAt < now.AddDays(7),
+            "eventEndAt is honored even when the model labels the operation as fact");
+        Require(items.All(i => !i.Content.Contains('\n')), "memory content sanitizes newlines");
+        var recall = scope.ServiceProvider.GetRequiredService<IAutomaticMemoryRecall>();
+        Require((await recall.RecallAsync("GROUP", "你之前提到过什么")).Count == 0,
+            "prefix words do not recall every group fact");
+        Require((await recall.RecallAsync("GROUP", "现在知道了吗")).Count == 0,
+            "common time and mental verbs do not force recall");
+        Require((await recall.RecallAsync("GROUP", "考试安排")).Count == 1, "relevant date fact still recalls");
+        for (var i = 0; i < 10; i++)
+            db.GroupMemoryItems.Add(new GroupMemoryItemEntity
+            {
+                GroupId = "GROUP", Content = $"考试安排提醒{i}", TagsJson = "[\"考试\"]",
+                FirstSeenAt = now, LastSeenAt = now, ExpiresAt = now.AddDays(1)
+            });
+        await db.SaveChangesAsync();
+        var capped = await recall.RecallAsync("GROUP", "考试安排");
+        Require(capped.Count is > 0 and <= 4 && capped.Text.Length <= 600,
+            "recall is capped by item count and text budget");
+    }
+
+    private static async Task AutomaticMemoryRecallContextAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        await ConfigureMemoryAsync(env);
+        var now = env.Clock.GetUtcNow().UtcDateTime;
+        using (var seed = env.Services.CreateScope())
+        {
+            var db = seed.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.GroupMemoryItems.Add(new GroupMemoryItemEntity
+            {
+                GroupId = "GROUP", Content = "群约定：每周五开黑。", TagsJson = "[\"开黑\"]",
+                FirstSeenAt = now.AddDays(-1), LastSeenAt = now.AddDays(-1), ExpiresAt = now.AddDays(30)
+            });
+            db.ChatMessages.Add(new ChatMessage
+            {
+                GroupId = "GROUP", UserId = "MEMBER-A", UserName = "Synthetic member",
+                MessageId = "history-before-turn", PlainText = "今晚还开黑吗？", HasAtBot = false, CreatedAt = now.AddMinutes(-5)
+            });
+            await db.SaveChangesAsync();
+        }
+        using var turn = new ConversationTurnScope("current-message", now, 999);
+        var built = await env.Services.GetRequiredService<IContextBuilder>()
+            .BuildGroupContextAsync("GROUP", "还是老时间吗？", "Synthetic");
+        Require(built.AutomaticMemory.Count == 1,
+            "recall uses the preceding human message when the current turn has no matching words");
+    }
+
+    private static async Task AutomaticMemoryContextAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        await ConfigureMemoryAsync(env);
+        long oldId;
+        using (var seed = env.Services.CreateScope())
+        {
+            var seedDb = seed.ServiceProvider.GetRequiredService<AppDbContext>();
+            var now = env.Clock.GetUtcNow().UtcDateTime;
+            var old = new GroupMemoryItemEntity
+            {
+                GroupId = "GROUP", SubjectUserId = "MEMBER-A", Content = "Synthetic member自述：不吃辣。",
+                TagsJson = "[\"饮食\"]", FirstSeenAt = now.AddDays(-10), LastSeenAt = now.AddDays(-10),
+                ExpiresAt = now.AddDays(80)
+            };
+            seedDb.GroupMemoryItems.Add(old);
+            for (var i = 0; i < 12; i++)
+                seedDb.GroupMemoryItems.Add(new GroupMemoryItemEntity
+                {
+                    GroupId = "GROUP", Content = $"群友曾提到：火锅店{i}", TagsJson = "[\"火锅\"]",
+                    FirstSeenAt = now, LastSeenAt = now, ExpiresAt = now.AddDays(30)
+                });
+            await seedDb.SaveChangesAsync();
+            oldId = old.Id;
+        }
+        var source = await NewMemoryMessageAsync(env, "口味改了，现在能吃火锅。");
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply(JsonSerializer.Serialize(new
+        {
+            operations = new[]
+            {
+                new { op = "replace", targetId = oldId, subjectUserId = "u1", content = "现在能吃火锅。",
+                    sourceRowIds = new[] { source }, evidence = "现在能吃火锅", tags = new[] { "饮食" }, kind = "preference" }
+            }
+        })));
+        await env.Services.GetRequiredService<GroupMemoryLearningService>().RunGroupAsync("GROUP");
+        using var scope = env.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        using var outer = JsonDocument.Parse(env.Http.Requests.Single().Body);
+        var contentText = string.Join("\n", outer.RootElement.GetProperty("messages").EnumerateArray()
+            .Select(m => m.GetProperty("content").GetString()));
+        Require(contentText.Contains("不吃辣"), "member's own prior memory is always offered to the extractor");
+        var updated = await db.GroupMemoryItems.SingleAsync(i => i.Id == oldId);
+        Require(updated.Content.Contains("能吃火锅") && !updated.Content.Contains("不吃辣"),
+            "same-subject replace updates the old memory");
+    }
+
+    private static async Task AutomaticMemoryWindowAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        await ConfigureMemoryAsync(env);
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var connection = await db.AiProviderConnections.SingleAsync(c => c.Id == "MEMORY-CONNECTION");
+            connection.ModelsJson = """[{"id":"memory-small","contextWindowTokens":4096,"maxOutputTokens":1024}]""";
+            await db.SaveChangesAsync();
+        }
+        var source = await NewMemoryMessageAsync(env);
+        await env.Services.GetRequiredService<GroupMemoryLearningService>().RunGroupAsync("GROUP");
+        Require(env.Http.Requests.Count == 0, "local window check never sends an oversized request");
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var state = await db.GroupMemoryLearningStates.SingleAsync();
+            Require(state.LastOutcome == "input_too_large" && state.CallsToday == 0 && state.LastProcessedRowId < source,
+                "local oversize pauses without consuming quota or cursor");
+        }
+    }
+
     private static async Task AutomaticMemoryFailureAsync()
     {
         await using var env = await TestEnvironment.CreateAsync();
@@ -206,6 +403,12 @@ internal static partial class RuntimeChecks
         var learner = env.Services.GetRequiredService<GroupMemoryLearningService>();
         await learner.RunGroupAsync("GROUP");
         Require(env.Http.Requests.Count == 1, "memory failure must not cause transport retries or format repair calls");
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            Require(await db.AiCallRecords.AnyAsync(c => c.Purpose == "group_memory" && c.State != "success"),
+                "failed memory request still enters the actual-call ledger");
+        }
         await learner.RunGroupAsync("GROUP");
         Require(env.Http.Requests.Count == 1, "persistent cooldown suppresses an immediate retry");
         env.Clock.Advance(TimeSpan.FromMinutes(6)); await learner.RunGroupAsync("GROUP");

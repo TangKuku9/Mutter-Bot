@@ -342,7 +342,7 @@ npm run build
 
 ### 8.1 凭据与密钥安全
 - **严禁提交任何真实密钥**：包括 `AppId`、`ClientSecret`、大模型 `ApiKey`、面板 Token 等。
-- `src/Mutter.Web/appsettings.json` 在仓库中仅允许保留占位符（如 `YOUR_APP_ID`）。真实凭证请使用本地环境变量或本地 `appsettings.Development.json`。
+- `src/Mutter.Web/appsettings.json` 已不再被 Git 跟踪（`.gitignore` 忽略），仓库只保留 `appsettings.example.json` 模板。真实凭证请写入本地 `appsettings.json`、环境变量或本地 `appsettings.Development.json`，不要使用 `git add -f` 强行入库。
 - 若不慎误提交凭证：**必须立即在对应平台重置轮换凭据**。仅删除 Git Commit 无法清除历史泄漏风险。
 
 ### 8.2 群成员隐私保护

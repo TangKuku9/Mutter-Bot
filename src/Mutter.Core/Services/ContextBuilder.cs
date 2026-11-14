@@ -88,11 +88,13 @@ public class ContextBuilder : IContextBuilder
         // 直到条数够用为止 —— 面板填 N 条就得真给 N 条，不能因为过滤而缩水。
         var candidatesFetched = 0;
         var conversation = new List<(string Role, string Content)>();
+        var recentHistory = new List<ChatMessage>();
 
         foreach (var candidates in CandidateFetchLadder(
                      effectiveConfig.MaxContextMessages, InitialHistoryCandidates))
         {
             var history = await messageRepo.GetGroupHistoryAsync(groupId, candidates, ct);
+            recentHistory = history;
             candidatesFetched = history.Count;
             conversation = BuildConversation(history, currentMessage, senderName, effectiveConfig);
 
@@ -124,9 +126,24 @@ public class ContextBuilder : IContextBuilder
             && scope.ServiceProvider.GetService<IAutomaticMemoryRecall>() is { } recall)
         {
             var turn = ConversationTurnScope.Current;
-            automatic = await recall.RecallAsync(groupId, currentMessage, turn?.CreatedAt, turn?.MessageRowId, ct);
-            // 自动资料放最前面；最终输入预算先丢它，不侵占当前消息，也不进入 system。
-            if (automatic.Count > 0) truncatedConversation.Insert(0, ("user", automatic.Text));
+            var recallQuery = BuildRecallQuery(currentMessage, turn, recentHistory);
+            automatic = await recall.RecallAsync(groupId, recallQuery, turn?.CreatedAt, turn?.MessageRowId, ct);
+            if (automatic.Count > 0)
+            {
+                var budget = AiRequestBudget.InputBudget(
+                    effectiveConfig.MaxTokens, effectiveConfig.ContextWindowTokens, effectiveConfig.MaxInputTokens);
+                var memoryTokens = AiRequestBudget.EstimateText(automatic.Text) + 8;
+                if (estimatedTokens + memoryTokens <= budget)
+                {
+                    // 自动资料放最前面；最终输入预算先丢它，不侵占当前消息，也不进入 system。
+                    truncatedConversation.Insert(0, ("user", automatic.Text));
+                    estimatedTokens += memoryTokens;
+                    _logger.LogDebug(
+                        "Group {GroupId} automatic memory injected: {Count} 条 / {Chars} 字, ids={Ids}",
+                        groupId, automatic.Count, automatic.Text.Length, string.Join(",", automatic.Ids));
+                }
+                else automatic = AutomaticMemoryRecall.Empty;
+            }
         }
 
         return new BuildContextResult
@@ -218,6 +235,24 @@ public class ContextBuilder : IContextBuilder
         }
 
         return (config, characterPrompt);
+    }
+
+    /// <summary>
+    /// 召回查询以当前回合为主，补上同批合并输入和最近两条人类消息作为话题上下文；
+    /// 只取回合时间边界之前的消息，避免把后续回合的内容带进更早排队的回复。
+    /// </summary>
+    private static string BuildRecallQuery(string currentMessage, ConversationTurnScope? turn, List<ChatMessage> history)
+    {
+        if (turn is null) return currentMessage;
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(turn.CombinedInput)) parts.Add(turn.CombinedInput);
+        else if (!string.IsNullOrWhiteSpace(currentMessage)) parts.Add(currentMessage);
+        foreach (var message in history
+                     .Where(m => !m.IsBotMessage && m.CreatedAt <= turn.CreatedAt
+                         && !turn.MessageIds.Contains(m.MessageId) && !string.IsNullOrWhiteSpace(m.PlainText))
+                     .TakeLast(2))
+            parts.Add(message.PlainText);
+        return parts.Count == 0 ? currentMessage : string.Join("\n", parts);
     }
 
     private List<(string Role, string Content)> BuildConversation(

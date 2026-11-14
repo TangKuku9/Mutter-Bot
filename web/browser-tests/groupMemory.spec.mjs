@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test'
 
-async function setup(page, { failLoad = false } = {}) {
+async function setup(page, { failLoad = false, conflictOnPut = false } = {}) {
   const config = { enabled: false, countEnabled: true, count: 50, intervalEnabled: true, intervalMinutes: 120, scheduleEnabled: false, schedules: [{ frequency: 'daily', time: '22:00', weekday: 1 }], providerConnectionId: '', modelName: '' }
-  const state = { config, revision: 0, writes: [], failLoad, items: [{ id: 1, content: '合成成员自述喜欢喝茶。', tags: ['饮品'], lastSeenAt: '2026-11-14T12:00:00Z', expiresAt: '2027-01-01T00:00:00Z' }] }
+  const state = { config, revision: 0, writes: [], reads: 0, failLoad, conflictOnPut, items: [{ id: 1, content: '合成成员自述喜欢喝茶。', tags: ['饮品'], lastSeenAt: '2026-11-14T12:00:00Z', expiresAt: '2027-01-01T00:00:00Z' }] }
   const payload = () => ({ config: structuredClone(state.config), revision: state.revision, items: state.items, runs: [], status: { pending: 0, callsToday: 0, lastOutcome: state.revision ? 'baseline_set' : 'not_enabled', groupEnabled: true } })
   await page.route('**/hub/**', route => route.fulfill({ status: 503, body: '' }))
   await page.route('**/api/**', async route => {
@@ -13,8 +13,12 @@ async function setup(page, { failLoad = false } = {}) {
       { id: 'other-provider', name: '另一总结连接', protocol: 'gemini', models: [{ id: 'memory-other', name: 'memory-other' }], defaultModel: 'memory-other', hasApiKey: true }
     ] })
     if (path === '/api/groups/GROUP/memory-auto') {
-      if (method === 'GET') return state.failLoad ? route.fulfill({ status: 503, json: { error: '合成读取失败' } }) : route.fulfill({ json: payload() })
+      if (method === 'GET') { state.reads++; return state.failLoad ? route.fulfill({ status: 503, json: { error: '合成读取失败' } }) : route.fulfill({ json: payload() }) }
       state.writes.push({ path, method, body: request.postDataJSON() })
+      if (method === 'PUT' && state.conflictOnPut) {
+        state.conflictOnPut = false
+        return route.fulfill({ status: 409, json: { error: '群记忆设置或处理状态已更新，请刷新后重试' } })
+      }
       if (method === 'PUT') { Object.assign(state.config, request.postDataJSON().config); state.revision++ }
       if (method === 'DELETE') { state.items = []; state.revision++ }
       return route.fulfill({ json: payload() })
@@ -39,9 +43,11 @@ test('旧环境打开页面不写配置，三种触发与独立模型一起保�
   await page.getByText('按定时任务', { exact: true }).click()
   await page.getByRole('button', { name: '添加时间', exact: true }).click()
   await expect(page.getByLabel('定时时刻 2', { exact: true })).toBeVisible()
+  // 先手填目录外模型，再切换连接：手填值不能被连接选择清空。
+  await page.getByLabel('手动填写记忆模型 ID', { exact: true }).fill('custom-memory-model')
   await page.getByTestId('memory-connection-select').click()
   await page.getByRole('option', { name: '独立总结连接', exact: false }).click()
-  await page.getByLabel('手动填写记忆模型 ID', { exact: true }).fill('custom-memory-model')
+  await expect(page.getByLabel('手动填写记忆模型 ID', { exact: true })).toHaveValue('custom-memory-model')
   await page.getByRole('button', { name: '保存设置', exact: true }).click()
   await expect(page.getByText('群记忆设置已保存', { exact: true })).toBeVisible()
   expect(state.writes).toHaveLength(1)
@@ -59,6 +65,7 @@ test('记忆来源和逐条删除可用，窄屏不溢出', async ({ page }) => 
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog', { name: '记忆来源' })).toBeHidden()
   await page.getByRole('button', { name: '删除记忆 1', exact: true }).click()
+  await page.getByRole('button', { name: '删除', exact: true }).click()
   await expect(page.getByText('还没有自动记忆', { exact: false })).toBeVisible()
   expect(state.writes).toHaveLength(1)
   expect(await page.locator('.memory-page').evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
@@ -69,4 +76,12 @@ test('读取失败不会出现可保存的空配置', async ({ page }) => {
   await expect(page.getByText('记忆配置读取失败', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '保存设置', exact: true })).toHaveCount(0)
   expect(state.writes).toEqual([])
+})
+
+test('Revision 冲突后自动刷新服务器版本并保留草稿', async ({ page }) => {
+  const state = await setup(page, { conflictOnPut: true })
+  await page.getByRole('button', { name: '保存设置', exact: true }).click()
+  await expect(page.getByText('群记忆设置或处理状态已更新', { exact: false })).toBeVisible()
+  await expect.poll(() => state.reads).toBeGreaterThanOrEqual(2)
+  await expect(page.getByRole('button', { name: '保存设置', exact: true })).toBeVisible()
 })

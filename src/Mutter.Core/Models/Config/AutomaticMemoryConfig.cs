@@ -31,7 +31,8 @@ public sealed class AutomaticMemoryConfig
         ? "请至少启用一种学习条件"
         : Enabled && (ProviderConnectionId.Length == 0 || ModelName.Length == 0)
             ? "请选择独立的记忆总结服务商和模型"
-            : ProviderConnectionId.Length > 256 || ModelName.Length > 256 || ModelName.Any(char.IsControl)
+            : ProviderConnectionId.Length > 256 || ModelName.Length > 256
+                || ProviderConnectionId.Any(char.IsControl) || ModelName.Any(char.IsControl)
                 ? "服务商或模型 ID 无效"
                 : ScheduleEnabled && (Schedules.Count == 0 || Schedules.Any(s => !s.IsValid))
                     ? "定时任务需要有效的频率、日期和时刻" : null;

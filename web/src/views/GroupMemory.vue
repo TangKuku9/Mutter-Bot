@@ -7,9 +7,13 @@
         </el-select>
         <el-button :disabled="!groupId || saving" @click="refresh">刷新</el-button>
       </div>
-      <el-empty v-if="!groupId" description="选择已有群后配置记忆学习" />
+      <el-result v-if="!loading && groupsFailed" icon="warning" title="群列表读取失败" sub-title="请检查网络或登录状态后重试">
+        <template #extra><el-button type="primary" @click="retryGroups">重试</el-button></template>
+      </el-result>
+      <el-empty v-else-if="!groupId" description="选择已有群后配置记忆学习" />
       <template v-else-if="loaded">
         <el-alert title="首次开启只学习开启后的新消息；旧生产环境的历史记录不会自动触发总结。" type="info" :closable="false" show-icon />
+        <p class="memory-hint">本页只负责学习与条目管理；是否把记忆注入普通回复/择机判定，仍由「AI 设置」和「群管理」中的记忆注入开关控制。</p>
         <el-tabs v-model="tab">
           <el-tab-pane label="学习设置" name="settings">
             <el-form label-position="top" @submit.prevent="save">
@@ -18,11 +22,11 @@
               <div class="memory-rules">
                 <section class="memory-rule">
                   <el-checkbox v-model="config.countEnabled" aria-label="按新增记录">按新增记录</el-checkbox>
-                  <div class="memory-inline"><span>累计新增</span><el-input-number v-model="config.count" :min="1" :max="1000" :disabled="!config.countEnabled" aria-label="新增记录触发条数" /><span>条</span></div>
+                  <div class="memory-inline"><span>累计新增</span><el-input-number v-model="config.count" :min="1" :max="limits.maxCount" :disabled="!config.countEnabled" aria-label="新增记录触发条数" /><span>条</span></div>
                 </section>
                 <section class="memory-rule">
                   <el-checkbox v-model="config.intervalEnabled" aria-label="按时间间隔">按时间间隔</el-checkbox>
-                  <div class="memory-inline"><span>距离上次完成</span><el-input-number v-model="config.intervalMinutes" :min="1" :max="10080" :disabled="!config.intervalEnabled" aria-label="学习间隔分钟数" /><span>分钟</span></div>
+                  <div class="memory-inline"><span>距离上次完成</span><el-input-number v-model="config.intervalMinutes" :min="1" :max="limits.maxIntervalMinutes" :disabled="!config.intervalEnabled" aria-label="学习间隔分钟数" /><span>分钟</span></div>
                 </section>
                 <section class="memory-rule">
                   <el-checkbox v-model="config.scheduleEnabled" aria-label="按定时任务">按定时任务</el-checkbox>
@@ -36,24 +40,24 @@
                     <input v-model="schedule.time" type="time" class="memory-time" :disabled="!config.scheduleEnabled" :aria-label="`定时时刻 ${index + 1}`" />
                     <el-button link type="danger" :disabled="config.schedules.length === 1 || !config.scheduleEnabled" :aria-label="`移除定时 ${index + 1}`" @click="config.schedules.splice(index, 1)">移除</el-button>
                   </div>
-                  <el-button link type="primary" :disabled="!config.scheduleEnabled || config.schedules.length >= 4" @click="config.schedules.push({ frequency: 'daily', time: '09:00', weekday: 1 })">添加时间</el-button>
+                  <el-button link type="primary" :disabled="!config.scheduleEnabled || config.schedules.length >= limits.maxSchedules" @click="config.schedules.push({ frequency: 'daily', time: '09:00', weekday: 1 })">添加时间</el-button>
                   <p class="memory-hint">北京时间；最多 4 个时刻，重复时刻会合并。空闲时跳过，不补跑过去的定时任务。</p>
                 </section>
               </div>
               <el-divider />
               <h3>由谁总结记忆</h3>
               <p class="memory-hint">独立于日常聊天，复用 AI 设置中的服务商连接。未选择时不会使用聊天模型代替。</p>
-              <ProviderModelPicker v-model:connection-id="config.providerConnectionId" v-model:model-name="config.modelName" :connections="connections" id-prefix="memory" />
+              <ProviderModelPicker v-model:connection-id="config.providerConnectionId" v-model:model-name="config.modelName" :connections="connections" id-prefix="memory" preserve-manual-model />
               <el-form-item label="模型 ID（也可直接填写）"><el-input v-model="config.modelName" maxlength="256" aria-label="手动填写记忆模型 ID" placeholder="选择目录中的模型，或填写连接支持的模型 ID" /></el-form-item>
               <div class="memory-save"><span class="memory-hint">{{ dirty ? '有未保存修改' : '设置已同步' }}</span><el-button type="primary" :loading="saving" native-type="submit" @click.prevent="save">保存设置</el-button></div>
             </el-form>
           </el-tab-pane>
           <el-tab-pane :label="`记忆条目 ${items.length}`" name="items">
-            <div class="memory-heading"><h3>自动记忆 <small>{{ items.length }} / 128 条</small></h3><el-popconfirm title="清空后只学习后续新消息，确定清空自动记忆？" @confirm="clear"><template #reference><el-button type="danger" plain :disabled="busy">清空自动记忆</el-button></template></el-popconfirm></div>
+            <div class="memory-heading"><h3>自动记忆 <small>{{ items.length }} / {{ limits.capacity }} 条</small></h3><el-popconfirm title="清空后只学习后续新消息，确定清空自动记忆？" @confirm="clear"><template #reference><el-button type="danger" plain :disabled="busy">清空自动记忆</el-button></template></el-popconfirm></div>
             <p class="memory-hint">管理员原有摘要继续在群管理中单独维护。删除的条目不会从旧聊天历史重新回灌。</p>
             <el-empty v-if="!items.length" description="还没有自动记忆，开启后会从新消息中逐步学习" />
             <article v-for="item in items" :key="item.id" class="memory-item">
-              <div class="memory-heading"><p>{{ item.content }}</p><el-button link type="danger" :disabled="busy" :aria-label="`删除记忆 ${item.id}`" @click="remove(item.id)">删除</el-button></div>
+              <div class="memory-heading"><p>{{ item.content }}</p><el-popconfirm title="删除这条自动记忆？" confirm-button-text="删除" cancel-button-text="取消" @confirm="remove(item.id)"><template #reference><el-button link type="danger" :disabled="busy" :aria-label="`删除记忆 ${item.id}`">删除</el-button></template></el-popconfirm></div>
               <div class="memory-tags"><el-tag v-for="tag in item.tags" :key="tag" size="small" type="info">{{ tag }}</el-tag></div>
               <p class="memory-hint">最近确认 {{ fmt(item.lastSeenAt) }} · 到期 {{ fmt(item.expiresAt) }}</p>
               <el-button link type="primary" @click="showSources(item.id)">查看来源</el-button>
@@ -69,7 +73,7 @@
           </el-tab-pane>
         </el-tabs>
         <div class="memory-status" aria-live="polite">
-          <span>{{ outcome(status.lastOutcome) }}</span><span>待处理 {{ status.pending }}{{ status.pendingCapped ? '+' : '' }} 条</span><span>今日学习 {{ status.callsToday }} / 12 次</span>
+          <span>{{ outcome(status.lastOutcome) }}</span><span>待处理 {{ status.pending }}{{ status.pendingCapped ? '+' : '' }} 条</span><span>今日学习 {{ status.callsToday }} / {{ limits.perGroupDailyCalls }} 次</span>
           <span v-if="!status.groupEnabled">本群响应未启用，学习暂停</span>
         </div>
       </template>
@@ -83,7 +87,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '../api'
@@ -94,7 +98,8 @@ const route = useRoute(), router = useRouter()
 const groups = ref([]), connections = ref([]), groupId = ref(''), config = ref(null)
 const items = ref([]), runs = ref([]), status = ref({}), revision = ref(0), original = ref('')
 const loading = ref(false), loaded = ref(false), saving = ref(false), busy = ref(false), tab = ref('settings')
-const sources = ref([]), sourcesOpen = ref(false)
+const sources = ref([]), sourcesOpen = ref(false), groupsFailed = ref(false)
+const limits = ref({ capacity: 128, perGroupDailyCalls: 12, maxCount: 1000, maxIntervalMinutes: 10080, maxSchedules: 4 })
 const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 const dirty = computed(() => loaded.value && JSON.stringify(config.value) !== original.value)
 const confirmDiscard = useUnsavedChanges(dirty)
@@ -103,6 +108,7 @@ const fmt = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: f
 const outcome = value => ({ success: '学习完成', baseline_set: '已建立新消息起点', boundary_reset: '学习范围已更新', not_enabled: '尚未开启', running: '正在学习', interrupted: '上次学习未完成，等待下一触发', model_failed: '模型调用失败', invalid_json: '输出格式无效', timeout: '总结超时', truncated: '输出被截断', input_too_large: '总结输入超出模型窗口', connection_missing: '总结连接不可用', skipped_after_failures: '连续失败，本批已跳过', skipped_noise_or_old: '已跳过无效或过期记录' }[value] || '等待新消息')
 function apply(data, preserve = false) {
   revision.value = data.revision; items.value = data.items; runs.value = data.runs; status.value = data.status
+  if (data.limits) limits.value = data.limits
   original.value = JSON.stringify(data.config)
   if (!preserve) config.value = data.config
   loaded.value = true
@@ -127,6 +133,11 @@ async function save() {
   try {
     const { data } = await api.put(endpoint(), { config: config.value, revision: revision.value })
     apply(data); ElMessage.success('群记忆设置已保存')
+  } catch (error) {
+    // 409 说明后台学习或另一窗口已推进 Revision：保留草稿，同步服务器版本后由用户重试。
+    if (error.response?.status === 409) {
+      try { await load(true) } catch { /* 全局拦截器已提示 */ }
+    }
   } finally { saving.value = false }
 }
 async function clear() {
@@ -141,17 +152,34 @@ async function showSources(id) {
   const { data } = await api.get(`${endpoint()}/${id}/sources`)
   sources.value = data; sourcesOpen.value = true
 }
+async function bootstrap() {
+  groupsFailed.value = false
+  const results = await Promise.allSettled([api.get('/groups'), api.get('/config/ai/connections')])
+  if (results[0].status !== 'fulfilled') { groupsFailed.value = true; return }
+  groups.value = results[0].value.data
+  if (results[1].status === 'fulfilled') connections.value = results[1].value.data
+  const requested = typeof route.query.group === 'string' ? route.query.group : ''
+  groupId.value = groups.value.some(g => g.groupOpenId === requested) ? requested : groups.value[0]?.groupOpenId || ''
+  if (groupId.value) await load()
+}
+async function retryGroups() {
+  loading.value = true
+  try { await bootstrap() } finally { loading.value = false }
+}
+async function selectRequestedGroup(requested) {
+  if (typeof requested !== 'string' || requested === groupId.value) return
+  if (!groups.value.some(g => g.groupOpenId === requested)) return
+  if (!await confirmDiscard()) {
+    await router.replace({ query: { group: groupId.value || undefined } })
+    return
+  }
+  groupId.value = requested; loaded.value = false; loading.value = true
+  try { await load() } finally { loading.value = false }
+}
+watch(() => route.query.group, selectRequestedGroup)
 onMounted(async () => {
   loading.value = true
-  try {
-    const results = await Promise.allSettled([api.get('/groups'), api.get('/config/ai/connections')])
-    if (results[0].status !== 'fulfilled') return
-    groups.value = results[0].value.data
-    if (results[1].status === 'fulfilled') connections.value = results[1].value.data
-    const requested = typeof route.query.group === 'string' ? route.query.group : ''
-    groupId.value = groups.value.some(g => g.groupOpenId === requested) ? requested : groups.value[0]?.groupOpenId || ''
-    if (groupId.value) await load()
-  } finally { loading.value = false }
+  try { await bootstrap() } finally { loading.value = false }
 })
 </script>
 

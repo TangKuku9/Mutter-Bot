@@ -25,10 +25,20 @@ public sealed class AutomaticMemoryController(AppDbContext db, AutomaticMemoryRe
         return Ok(new
         {
             Config = config, Revision = state?.Revision ?? 0,
+            Limits = new
+            {
+                Capacity = AutomaticMemoryRepository.Capacity,
+                PerGroupDailyCalls = AutomaticMemoryRepository.PerGroupDailyCalls,
+                GlobalDailyCalls = AutomaticMemoryRepository.GlobalDailyCalls,
+                MaxCount = 1000,
+                MaxIntervalMinutes = 10080,
+                MaxSchedules = 4
+            },
             Status = new
             {
                 Pending = pending, PendingCapped = pending == 1000,
-                LastOutcome = state?.LastOutcome == "running" && state.NextAttemptAt <= clock.GetUtcNow().UtcDateTime ? "interrupted" : state?.LastOutcome,
+                LastOutcome = state?.LastOutcome == "running" && state.NextAttemptAt <= clock.GetUtcNow().UtcDateTime
+                    ? "interrupted" : state?.LastOutcome ?? "not_enabled",
                 LastCompletedAt = Utc(state?.LastCompletedAt),
                 state?.LastProcessedRowId, NextAttemptAt = Utc(state?.NextAttemptAt),
                 CallsToday = state?.QuotaDay == AutomaticMemoryRepository.Day(clock.GetUtcNow().UtcDateTime) ? state.CallsToday : 0,
@@ -65,13 +75,15 @@ public sealed class AutomaticMemoryController(AppDbContext db, AutomaticMemoryRe
     }
     [HttpDelete("{id:long}")]
     public async Task<IActionResult> Delete(string groupId, long id, CancellationToken ct) =>
-        await memories.DeleteAsync(groupId, id, ct) ? Ok(new { message = "记忆已删除" }) : NotFound();
+        await memories.DeleteAsync(groupId, id, ct)
+            ? Ok(new { message = "记忆已删除" })
+            : NotFound(new { error = "记忆不存在或已被删除" });
 
     [HttpGet("{id:long}/sources")]
     public async Task<IActionResult> Sources(string groupId, long id, CancellationToken ct)
     {
         var item = await db.GroupMemoryItems.AsNoTracking().SingleOrDefaultAsync(i => i.GroupId == groupId && i.Id == id, ct);
-        if (item is null) return NotFound();
+        if (item is null) return NotFound(new { error = "记忆不存在或已被删除" });
         var ids = AutomaticMemoryRepository.Read(item.SourceRowIdsJson, new List<long>()).Take(3).ToList();
         return Ok(await db.ChatMessages.AsNoTracking().Where(m => ids.Contains(m.Id) && m.ChatType == 0
             && m.GroupId == groupId && !m.IsBotMessage).OrderBy(m => m.Id)

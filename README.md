@@ -206,7 +206,13 @@ Mutter-Bot/
 
 配置分为两部分：QQ 机器人凭据与面板口令在 `appsettings.json` 中，AI 服务商配置在面板「AI 设置」里写入 SQLite。
 
-仓库中的 [`src/Mutter.Web/appsettings.json`](src/Mutter.Web/appsettings.json) 只保留占位符，**不要**把真实凭据写进去——它是受 Git 跟踪的文件。本地开发推荐用环境变量覆盖：
+仓库只保留占位符模板 [`src/Mutter.Web/appsettings.example.json`](src/Mutter.Web/appsettings.example.json)，**不再跟踪**本地 `appsettings.json`（已被 `.gitignore` 忽略）。首次开发先复制模板：
+
+```bash
+cp src/Mutter.Web/appsettings.example.json src/Mutter.Web/appsettings.json
+```
+
+然后可以直接编辑本地 `appsettings.json`；也可以继续用环境变量覆盖，避免把凭据落盘：
 
 ```bash
 # Linux / macOS
@@ -243,7 +249,7 @@ $env:Mutter__ClientSecret="YOUR_CLIENT_SECRET"
 - 修改 `appsettings.json` 后必须重启进程；运行中的进程不会热加载凭据。
 - 面板只读展示打码后的 `AppId` 与连接状态，不提供凭据编辑入口。
 
-> ⚠️ 严禁把真实凭据提交到仓库；`src/Mutter.Web/appsettings.json` 在版本库中只允许保留占位符。
+> ⚠️ 严禁把真实凭据提交到仓库。`appsettings.json` 与 `appsettings.*.json` 都已被 `.gitignore` 忽略；仓库中的 `appsettings.example.json` 只允许保留占位符。发布前请确认本地凭据文件没有被带进发布目录，或按发布工作流从模板生成占位配置。
 
 ### 3. 构建与本地运行
 
@@ -298,7 +304,7 @@ dotnet publish src/Mutter.ConsoleHost -c Release -r linux-x64 --self-contained f
 sudo ./deploy/install.sh ./publish
 ```
 
-> `dotnet publish` 会自动把 `appsettings.json` 带进发布目录，无需手工复制。
+> `dotnet publish` 会优先使用本地 `appsettings.json`；本地没有该文件时自动用 `appsettings.example.json` 生成占位配置。从源码发布前请确认本地文件是占位符，否则真实凭据会进入发布目录；部署后再到服务器上填写真实值。
 > 使用 `--self-contained false` 发布时，服务器需预先安装 **ASP.NET Core 9 Runtime**（不需要 SDK）。
 > 首次部署后编辑 `/opt/mutter-bot/appsettings.json` 填入真实的 `Mutter:AppId`、`Mutter:ClientSecret` 与面板口令，再执行 `sudo systemctl restart mutter-bot`。该文件位于服务器、不在 Git 仓库中，可以安全写入真实凭据。
 

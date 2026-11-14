@@ -24,7 +24,9 @@
 
   <ItemGroup>
     <Content Include="..\Mutter.Web\wwwroot\**" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\Mutter.Web\appsettings.json" Link="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 本地凭据文件不入库；没有本地文件时用 example 生成占位 appsettings.json，保证发布包可启动。 -->
+    <Content Include="..\Mutter.Web\appsettings.json" Link="appsettings.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\Mutter.Web\appsettings.json')" />
+    <Content Include="..\Mutter.Web\appsettings.example.json" Link="appsettings.json" CopyToOutputDirectory="PreserveNewest" Condition="!Exists('..\Mutter.Web\appsettings.json')" />
     <!-- 环境后缀配置不入库，本地没有时不应因此构建失败 -->
     <Content Include="..\Mutter.Web\appsettings.Development.json" Link="appsettings.Development.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\Mutter.Web\appsettings.Development.json')" />
   </ItemGroup>

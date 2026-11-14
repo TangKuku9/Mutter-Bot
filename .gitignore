@@ -33,7 +33,9 @@ src/Mutter.Web/wwwroot/
 *.sqlite
 *.sqlite3
 
-# Environment-specific settings (keep appsettings.json, ignore environment overrides)
+# 本地凭据配置不入库：仓库只保留 example 模板；本地复制后按需填写。
+# appsettings.json 过去被跟踪过，解跟踪后即使再次出现在工作区也不能被提交。
+/src/Mutter.Web/appsettings.json
 appsettings.*.json
 !src/Mutter.Web/appsettings.example.json
 
