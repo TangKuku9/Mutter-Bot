@@ -18,13 +18,15 @@ public sealed class AiCallScope : IDisposable
     private int _attempts;
     private int _promptTokens;
     private int _completionTokens;
+    private readonly int _maxAttempts;
     private readonly int _startPromptTokens;
     private readonly int _startCompletionTokens;
 
-    private AiCallScope(CancellationToken ct, string? purpose, AiCallMetadata? metadata)
+    private AiCallScope(CancellationToken ct, string? purpose, AiCallMetadata? metadata, int maxAttempts)
     {
         _parent = Ambient.Value;
         _root = _parent?._root ?? this;
+        _maxAttempts = _parent?._root._maxAttempts ?? Math.Clamp(maxAttempts, 1, 4);
         _hostToken = _parent?._root._hostToken ?? ct;
         Purpose = purpose ?? _parent?.Purpose ?? "chat";
         OperationId = _parent?.OperationId ?? RuntimeActivity.Current?.Id ?? Guid.NewGuid().ToString("N");
@@ -41,7 +43,8 @@ public sealed class AiCallScope : IDisposable
         Ambient.Value = this;
     }
 
-    public static AiCallScope Begin(CancellationToken ct, string? purpose = null, AiCallMetadata? metadata = null) => new(ct, purpose, metadata);
+    public static AiCallScope Begin(CancellationToken ct, string? purpose = null, AiCallMetadata? metadata = null,
+        int maxAttempts = 4) => new(ct, purpose, metadata, maxAttempts);
     public static AiCallScope? Current => Ambient.Value?._root;
 
     /// <summary>宿主启动时从 RuntimeOptions 下发根期限；测试与未装配场景保持 120 秒默认。</summary>
@@ -63,14 +66,16 @@ public sealed class AiCallScope : IDisposable
     public string Purpose { get; }
     public string OperationId { get; }
     public AiCallMetadata Metadata { get; }
+    /// <summary>候选自动资料；最终是否保留由执行入口在完整请求预算裁剪后记录。</summary>
+    public AutomaticMemoryRecall AutomaticMemory { get; set; } = AutomaticMemoryRecall.Empty;
     public string Stage { get; set; } = "generate";
     public int Attempts => _root._attempts;
 
     public void BeginAttempt()
     {
         Token.ThrowIfCancellationRequested();
-        if (Interlocked.Increment(ref _root._attempts) > 4)
-            throw new InvalidOperationException("AI 调用已达到本轮 4 次尝试上限。");
+        if (Interlocked.Increment(ref _root._attempts) > _root._maxAttempts)
+            throw new InvalidOperationException($"AI 调用已达到本轮 {_root._maxAttempts} 次尝试上限。");
     }
 
     public void RecordUsage(int prompt, int completion)

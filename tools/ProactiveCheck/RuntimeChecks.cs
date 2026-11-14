@@ -66,6 +66,17 @@ internal static partial class RuntimeChecks
             ("统计 SQL 聚合、缓存与大记录集", StatisticsPerformanceAsync),
             ("图片缓存容量、下载并发与取消隔离", ImageLimitsAsync),
             ("普通回复群记忆与各层开关", SharedMemoryAsync),
+            ("5 万条旧群聊升级与首次启用零回灌", AutomaticMemoryUpgradeAsync),
+            ("独立总结模型、来源验证与自动记忆注入", AutomaticMemoryFlowAsync),
+            ("记忆质量门槛、事件有效期与批内句柄", AutomaticMemoryQualityAsync),
+            ("记忆句柄映射后的成员归属与混合来源校验", AutomaticMemoryOwnershipAsync),
+            ("记忆模型昵称回退与历史身份脱敏", AutomaticMemoryIdentityAsync),
+            ("记忆短追问召回与新话题、过期话题隔离", AutomaticMemoryRecallContextAsync),
+            ("记忆留痕与最终系统词、图片预算一致", AutomaticMemoryFinalTraceAsync),
+            ("记忆更新候选并集与同成员替换", AutomaticMemoryContextAsync),
+            ("记忆模型窗口缩批与本地暂停", AutomaticMemoryWindowAsync),
+            ("记忆触发合并、清空竞态与重启预算", AutomaticMemoryTriggersAsync),
+            ("记忆单次 HTTP、失败退避与容量过期", AutomaticMemoryFailureAsync),
             ("群设置与记忆保存事务", AtomicGroupSettingsAsync),
             ("运行队列快照与调用过程关联", RuntimeSnapshotAsync),
             ("运行账本保留策略与累计统计事务", RetentionAsync),
@@ -865,9 +876,9 @@ internal static partial class RuntimeChecks
                 {
                     var script = db.Database.GenerateCreateScript();
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|AiUsageArchives)\" \\([\\s\\S]*?\\);", "");
+                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|AiUsageArchives|GroupMemoryItems|GroupMemoryLearningStates)\" \\([\\s\\S]*?\\);", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords)\"[^;]*;", "");
+                        "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|GroupMemoryItems|GroupMemoryLearningStates)\"[^;]*;", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
                         "^.*\"(?:ContextWindowTokens|MaxInputTokens|GroupMemoryInjectionEnabled|AiOperationId)\" [^\\r\\n]*\\r?\\n", "", System.Text.RegularExpressions.RegexOptions.Multiline);
                     await db.Database.ExecuteSqlRawAsync(script);

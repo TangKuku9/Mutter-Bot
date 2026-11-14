@@ -14,10 +14,12 @@ namespace Mutter.Web.Controllers;
 public class GroupsController : ControllerBase
 {
     private readonly AppDbContext _db;
+    private readonly TimeProvider _clock;
 
-    public GroupsController(AppDbContext db)
+    public GroupsController(AppDbContext db, TimeProvider? clock = null)
     {
         _db = db;
+        _clock = clock ?? TimeProvider.System;
     }
 
     /// <summary>已知群列表（合并群配置）。</summary>
@@ -75,6 +77,7 @@ public class GroupsController : ControllerBase
     [HttpPut("{groupId}/config")]
     public async Task<IActionResult> UpdateGroupConfig(string groupId, [FromBody] GroupConfigUpdateDto dto, CancellationToken ct)
     {
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
         var entity = await _db.GroupConfigs.FirstOrDefaultAsync(c => c.GroupId == groupId, ct);
         if (entity is null)
         {
@@ -82,6 +85,8 @@ public class GroupsController : ControllerBase
             _db.GroupConfigs.Add(entity);
         }
 
+        if (entity.IsEnabled != dto.IsEnabled || entity.TriggerMode != (dto.TriggerMode == 2 ? 2 : 0))
+            await AutomaticMemoryRepository.InvalidateAsync(_db, groupId, _clock.GetUtcNow().UtcDateTime, ct);
         entity.IsEnabled = dto.IsEnabled;
         entity.TriggerMode = dto.TriggerMode == 2 ? 2 : 0;
         entity.AiProactiveEnabled = dto.AiProactiveEnabled;
@@ -116,6 +121,7 @@ public class GroupsController : ControllerBase
         }
 
         await _db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
         return Ok(new { message = "群配置已保存" });
     }
 

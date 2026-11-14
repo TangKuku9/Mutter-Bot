@@ -46,6 +46,7 @@ public sealed class DataRetentionService(
         await using var scope = scopes.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await db.GroupMemoryItems.Where(i => i.ExpiresAt <= clock.GetUtcNow().UtcDateTime).ExecuteDeleteAsync(ct);
         // 决策留痕没有外键，但会长期增长：与运行账本同样保留 90 天。
         // 先删旧留痕，后面的归档/回执清理才只需要看“清理后仍存在”的引用。
         var decisions = await db.ProactiveChatLogs

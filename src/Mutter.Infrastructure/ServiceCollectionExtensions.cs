@@ -21,6 +21,10 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IMessageRepository, MessageRepository>();
         services.AddScoped<IConfigRepository, ConfigRepository>();
         services.AddScoped<IGroupMemoryRepository, GroupMemoryRepository>();
+        services.AddScoped<AutomaticMemoryRepository>();
+        services.AddScoped<IAutomaticMemoryRecall>(sp => sp.GetRequiredService<AutomaticMemoryRepository>());
+        services.AddSingleton<GroupMemoryLearningService>();
+        services.AddHostedService(sp => sp.GetRequiredService<GroupMemoryLearningService>());
         services.AddSingleton<IStructuredAiService, StructuredAiService>();
         // HttpClient.Timeout 只是兜底；真正的预算在每次尝试内（min(尝试上限, 根期限剩余)）。
         // 不跟随重定向：上游 302 会把带密钥的 POST 改写成发往任意地址的 GET（SSRF 放大面）。

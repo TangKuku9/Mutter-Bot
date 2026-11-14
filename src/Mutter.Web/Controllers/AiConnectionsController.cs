@@ -107,6 +107,7 @@ public sealed class AiConnectionsController(AppDbContext db, IHttpClientFactory 
         // 页面版本防止旧草稿覆盖新修改；EF 并发令牌继续防止读到实体后发生的写竞争。
         var stored = await db.AiProviderConnections.FirstOrDefaultAsync(c => c.Id == id, ct);
         if (stored == null) return NotFound(new { error = "连接已不存在，请刷新后重试" });
+        var previousModelIds = AiConnectionStore.Models(stored).Select(m => m.Id).ToHashSet();
         if (dto.UpdatedAt != stored.UpdatedAt)
             return Conflict(new { error = "连接已被其他会话修改，请重新读取连接后再保存" });
         var (connection, error) = await PrepareAsync(dto, true, ct);
@@ -114,6 +115,10 @@ public sealed class AiConnectionsController(AppDbContext db, IHttpClientFactory 
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         // 删除模型前检查当前配置与预设，避免产生悬空引用。
         var modelIds = AiConnectionStore.Models(connection!).Select(m => m.Id).ToHashSet();
+        var memoryConfigs = (await db.GroupMemoryLearningStates.AsNoTracking().Select(s => s.ConfigJson).ToListAsync(ct))
+            .Select(AutomaticMemoryConfig.Decode).Where(c => c.ProviderConnectionId == id);
+        if (memoryConfigs.Any(c => previousModelIds.Contains(c.ModelName) && !modelIds.Contains(c.ModelName)))
+            return Conflict(new { error = "模型仍被群记忆使用，请先修改对应群的总结模型" });
         var current = await db.AiConfigs.FirstOrDefaultAsync(c => c.ProviderConnectionId == id, ct);
         var referenced = (await db.AiPresets.ToListAsync(ct))
             .Where(p => ReadConnectionId(p.ConfigJson) == id).ToList();
@@ -194,6 +199,9 @@ public sealed class AiConnectionsController(AppDbContext db, IHttpClientFactory 
         if (connection == null) return NotFound();
         if (await db.AiConfigs.AnyAsync(c => c.ProviderConnectionId == id, ct))
             return Conflict(new { error = "该连接正在使用，请先切换并保存当前 AI 配置" });
+        if ((await db.GroupMemoryLearningStates.AsNoTracking().Select(s => s.ConfigJson).ToListAsync(ct))
+            .Select(AutomaticMemoryConfig.Decode).Any(c => c.ProviderConnectionId == id))
+            return Conflict(new { error = "该连接仍被群记忆引用，请先修改对应群的总结连接" });
         if ((await db.AiPresets.Select(p => p.ConfigJson).ToListAsync(ct)).Any(p => ReadConnectionId(p) == id))
             return Conflict(new { error = "该连接仍被预设引用，请先修改或删除对应预设" });
         db.AiProviderConnections.Remove(connection);

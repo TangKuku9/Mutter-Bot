@@ -29,7 +29,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { Odometer, ChatDotRound, DataLine, Setting, User, ChatLineSquare, Document, Postcard, ChatDotSquare, InfoFilled, Close } from '@element-plus/icons-vue'
+import { Odometer, ChatDotRound, DataLine, Setting, User, ChatLineSquare, Document, Postcard, ChatDotSquare, InfoFilled, Close, Collection } from '@element-plus/icons-vue'
 import { panelSections } from '../panelNavigation'
 import { botStatus } from '../botStatus'
 import { appVersion } from '../version'
@@ -37,7 +37,7 @@ import { appVersion } from '../version'
 defineProps({ dismissible: Boolean })
 defineEmits(['close'])
 const route = useRoute()
-const icons = { Odometer, ChatDotRound, DataLine, Setting, User, ChatLineSquare, Document, Postcard, ChatDotSquare, InfoFilled }
+const icons = { Odometer, ChatDotRound, DataLine, Setting, User, ChatLineSquare, Document, Postcard, ChatDotSquare, InfoFilled, Collection }
 const connectionState = computed(() => botStatus.stale ? 'unknown' : botStatus.data.isConnected ? 'online' : 'offline')
 const connectionText = computed(() => botStatus.stale ? '状态待更新' : botStatus.data.isConnected ? 'QQ 网关已连接' : 'QQ 网关未连接')
 </script>

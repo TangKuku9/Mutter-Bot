@@ -8,6 +8,7 @@ const components = {
   '/ai-stats': () => import('./views/AiStats.vue'),
   '/ai-settings': () => import('./views/AiSettings.vue'),
   '/groups': () => import('./views/Groups.vue'),
+  '/group-memory': () => import('./views/GroupMemory.vue'),
   '/proactive': () => import('./views/Proactive.vue'),
   '/private-chats': () => import('./views/PrivateChats.vue'),
   '/logs': () => import('./views/Logs.vue'),

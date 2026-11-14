@@ -32,6 +32,8 @@ public class AppDbContext : DbContext
     public DbSet<ProactivePresetEntity> ProactivePresets => Set<ProactivePresetEntity>();
     public DbSet<ProactiveChatLogEntity> ProactiveChatLogs => Set<ProactiveChatLogEntity>();
     public DbSet<GroupMemoryEntity> GroupMemories => Set<GroupMemoryEntity>();
+    public DbSet<GroupMemoryItemEntity> GroupMemoryItems => Set<GroupMemoryItemEntity>();
+    public DbSet<GroupMemoryLearningStateEntity> GroupMemoryLearningStates => Set<GroupMemoryLearningStateEntity>();
 
     // 修仙RPG 的 5 张表（PlayerProfiles / GroupWorlds / PlayerInventories /
     // GameCooldowns / CultivationEventLogs）保留建表语句与补列迁移，但不再建实体：
@@ -46,6 +48,17 @@ public class AppDbContext : DbContext
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<GroupMemoryItemEntity>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.GroupId, x.ExpiresAt });
+        });
+        modelBuilder.Entity<GroupMemoryLearningStateEntity>(e =>
+        {
+            e.HasKey(x => x.GroupId);
+            e.Property(x => x.Revision).IsConcurrencyToken();
+            e.HasIndex(x => x.Enabled);
+        });
         modelBuilder.Entity<AiProviderConnectionEntity>(e =>
         {
             e.HasKey(c => c.Id);
@@ -158,6 +171,26 @@ public class AppDbContext : DbContext
     public async Task EnsureSchemaUpgradedAsync(CancellationToken ct = default)
     {
         await EnsureRuntimeSchemaAsync(ct);
+        // 不扫描或总结已有聊天，不创建开启状态；旧端升级保持零学习调用。
+        // 注意：ExecuteSqlRawAsync 把 SQL 当复合格式字符串，DEFAULT '{{}}' 落库后才是 '{}'。
+        await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "GroupMemoryItems" (
+                "Id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, "GroupId" TEXT NOT NULL,
+                "SubjectUserId" TEXT NULL, "Content" TEXT NOT NULL, "TagsJson" TEXT NOT NULL,
+                "SourceRowIdsJson" TEXT NOT NULL, "FirstSeenAt" TEXT NOT NULL, "LastSeenAt" TEXT NOT NULL,
+                "LastSourceRowId" INTEGER NOT NULL, "ExpiresAt" TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS "IX_GroupMemoryItems_GroupId_ExpiresAt" ON "GroupMemoryItems" ("GroupId", "ExpiresAt");
+            CREATE TABLE IF NOT EXISTS "GroupMemoryLearningStates" (
+                "GroupId" TEXT NOT NULL PRIMARY KEY, "Enabled" INTEGER NOT NULL DEFAULT 0,
+                "ConfigJson" TEXT NOT NULL DEFAULT '{{}}', "Revision" INTEGER NOT NULL DEFAULT 0,
+                "LastProcessedRowId" INTEGER NOT NULL DEFAULT 0, "LastCompletedAt" TEXT NOT NULL,
+                "LastScheduleCheckAt" TEXT NOT NULL, "NextAttemptAt" TEXT NOT NULL,
+                "ConsecutiveFailures" INTEGER NOT NULL DEFAULT 0, "QuotaDay" TEXT NOT NULL DEFAULT '',
+                "CallsToday" INTEGER NOT NULL DEFAULT 0, "LastOutcome" TEXT NOT NULL DEFAULT 'not_enabled',
+                "RecentRunsJson" TEXT NOT NULL DEFAULT '[]');
+            CREATE INDEX IF NOT EXISTS "IX_GroupMemoryLearningStates_Enabled" ON "GroupMemoryLearningStates" ("Enabled");
+            CREATE INDEX IF NOT EXISTS "IX_ChatMessages_MemoryCursor" ON "ChatMessages" ("GroupId", "Id");
+            """, ct);
         await Database.ExecuteSqlRawAsync("""
             CREATE TABLE IF NOT EXISTS "AiProviderConnections" (
                 "Id" TEXT NOT NULL PRIMARY KEY, "Revision" TEXT NOT NULL, "Name" TEXT NOT NULL, "TemplateId" TEXT NOT NULL,

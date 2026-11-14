@@ -565,6 +565,10 @@ public class MessageEventHandler
             else
                 context = await _contextBuilder.BuildPrivateContextAsync(senderId, parsed.PlainText, senderName, ct);
 
+            // 只登记候选；系统词、图片和外搜齐备后的最终使用情况由执行入口记录。
+            if (AiCallScope.Current is { } callScope)
+                callScope.AutomaticMemory = context.AutomaticMemory;
+
             var systemPrompt = context.ComposeSystemPrompt();
 
 

@@ -11,6 +11,7 @@ public class BuildContextResult
     public bool WasTruncated { get; set; }
     public string? CharacterPrompt { get; set; }
     public string? GroupMemory { get; set; }
+    public AutomaticMemoryRecall AutomaticMemory { get; set; } = AutomaticMemoryRecall.Empty;
 
     /// <summary>
     /// 组装最终系统提示词：基础提示（含性格）→ 场景补充 → 人设锁定。

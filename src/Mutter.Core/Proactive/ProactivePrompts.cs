@@ -122,9 +122,16 @@ public static class ProactivePrompts
         IReadOnlyList<(string Role, string Content)> history,
         int attachedImages = 0,
         string? groupMemory = null,
-        DateTime? utcNow = null)
+        DateTime? utcNow = null,
+        string? automaticMemory = null)
     {
         var sb = new System.Text.StringBuilder();
+
+        if (!string.IsNullOrWhiteSpace(automaticMemory))
+        {
+            sb.AppendLine(automaticMemory);
+            sb.AppendLine();
+        }
 
         if (utcNow is { } now)
         {

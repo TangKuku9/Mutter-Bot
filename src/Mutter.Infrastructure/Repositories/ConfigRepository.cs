@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
@@ -13,11 +14,13 @@ public class ConfigRepository : IConfigRepository
 {
     private readonly AppDbContext _dbContext;
     private readonly ILogger<ConfigRepository>? _logger;
+    private readonly TimeProvider _clock;
 
-    public ConfigRepository(AppDbContext dbContext, ILogger<ConfigRepository>? logger = null)
+    public ConfigRepository(AppDbContext dbContext, ILogger<ConfigRepository>? logger = null, TimeProvider? clock = null)
     {
         _dbContext = dbContext;
         _logger = logger;
+        _clock = clock ?? TimeProvider.System;
     }
 
     public async Task<AiConfig?> GetAiConfigAsync(CancellationToken ct = default)
@@ -158,8 +161,13 @@ public class ConfigRepository : IConfigRepository
 
     public async Task SaveGroupConfigAsync(GroupConfig config, CancellationToken ct = default)
     {
+        // 群开关/记录模式变化会递增记忆状态的 Revision 并发令牌；与记忆任务相交时
+        // 必须让群配置与失效标记同事务提交，否则整次保存会因令牌冲突失败。
+        await using var tx = await _dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var entity = await _dbContext.GroupConfigs
             .FirstOrDefaultAsync(g => g.GroupId == config.GroupId, ct);
+        if (entity is not null && (entity.IsEnabled != config.IsEnabled || entity.TriggerMode != config.TriggerMode))
+            await AutomaticMemoryRepository.InvalidateAsync(_dbContext, config.GroupId, _clock.GetUtcNow().UtcDateTime, ct);
 
         if (entity == null)
         {
@@ -194,6 +202,7 @@ public class ConfigRepository : IConfigRepository
         }
 
         await _dbContext.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     /// <summary>
