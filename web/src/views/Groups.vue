@@ -34,10 +34,10 @@
         <el-table-column prop="config.activeCharacter" label="人设" width="100">
           <template #default="{ row }">{{ characterLabel(row.config?.activeCharacter) }}</template>
         </el-table-column>
-        <el-table-column label="加入时间" width="160">
+        <el-table-column v-if="!narrow" label="加入时间" width="160">
           <template #default="{ row }">{{ fmt(row.addedAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="90">
+        <el-table-column label="操作" width="90" fixed="right">
           <template #default="{ row }">
             <el-button size="small" type="primary" plain @click="edit(row)">编辑</el-button>
           </template>
@@ -73,7 +73,7 @@
           <ParamHelpButton :label="helpLabel('aiProactiveEnabled')" @click="openHelp('aiProactiveEnabled')" />
         </el-form-item>
         <el-form-item label="@ 识别码">
-          <el-input v-model="form.botMentionOpenId" clearable placeholder="留空 = 认不出有人 @ 机器人" style="width: 355px" />
+          <el-input v-model="form.botMentionOpenId" clearable placeholder="留空 = 认不出有人 @ 机器人" />
           <ParamHelpButton :label="helpLabel('botMentionOpenId')" @click="openHelp('botMentionOpenId')" />
         </el-form-item>
         <el-form-item label="人设">
@@ -158,8 +158,12 @@ import { ElMessage } from 'element-plus'
 import api from '../api'
 import { useUnsavedChanges } from '../useUnsavedChanges'
 import { useParamHelp } from '../paramHelp'
+import { useMediaQuery } from '../useMediaQuery'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
+
+// 窄屏收起加入时间等次要列，保留群名/OpenId 身份列与操作列（操作列固定在右侧）
+const narrow = useMediaQuery('(max-width: 600px)')
 
 const groups = ref([])
 const quotas = ref([])

@@ -140,6 +140,8 @@ async function createPage(t, { initialModel = 'base-model' } = {}) {
   }
   let failConfigGet = false
   let failSave = false
+  let failNetworkGet = false
+  let networkProxy = false
   const writes = []
   const api = {
     async get(url) {
@@ -149,6 +151,10 @@ async function createPage(t, { initialModel = 'base-model' } = {}) {
       }
       if (url === '/config/ai/presets') return { data: state.presets }
       if (url === '/config/characters') return { data: [] }
+      if (url === '/config/network') {
+        if (failNetworkGet) { failNetworkGet = false; throw Object.assign(new Error('503'), { response: { status: 503 } }) }
+        return { data: { allowSystemProxy: networkProxy } }
+      }
       throw new Error(`unexpected GET ${url}`)
     },
     async put(url, body) {
@@ -156,6 +162,11 @@ async function createPage(t, { initialModel = 'base-model' } = {}) {
         if (failSave) { failSave = false; throw Object.assign(new Error('503'), { response: { status: 503 } }) }
         writes.push({ url, body })
         state.config = { ...state.config, ...body }
+        return { data: {} }
+      }
+      if (url === '/config/network') {
+        writes.push({ url, body })
+        networkProxy = body.allowSystemProxy
         return { data: {} }
       }
       throw new Error(`unexpected PUT ${url}`)
@@ -187,7 +198,7 @@ async function createPage(t, { initialModel = 'base-model' } = {}) {
   t.after(() => unmounts.forEach(fn => fn()))
   mounts.forEach(fn => fn())
   await flush()
-  return { component, state, messages, writes, setConfigGetFailure: () => { failConfigGet = true }, setSaveFailure: () => { failSave = true } }
+  return { component, state, messages, writes, setConfigGetFailure: () => { failConfigGet = true }, setSaveFailure: () => { failSave = true }, failNetwork: () => { failNetworkGet = true } }
 }
 
 test('page harness mounts the real setup', async t => {
@@ -261,6 +272,54 @@ test('选用保存失败时回滚联网策略选择，按钮回到「选用」�
   assert.equal(component.form.value.webSearchEndpoint, '')
   assert.equal(component.form.value.webSearchEnabled, false)
   assert.ok(messages.some(m => m.kind === 'error' && m.text.includes('已回退')))
+})
+
+test('内建搜索报告立即更新当前目标的验证状态，不改脏标记或伪造带图结论', async t => {
+  const { component } = await createPage(t)
+  component.form.value.webSearchShape = 'enable_search'
+  const done = (imageStatus, status = 'verified') => component.handleProbeEvent({
+    type: 'done', report: { reachable: true, results: [{ shape: 'enable_search', status, imageStatus }] }
+  })
+  assert.equal(component.builtinImageCapable.value, null)
+  done('verified')
+  assert.equal(component.builtinTargetStale.value, false)
+  assert.equal(component.builtinTextLabel.value, '文字已验证')
+  assert.equal(component.builtinImageCapable.value, true)
+  done('image_rejected')
+  assert.equal(component.builtinImageCapable.value, false)
+  done('not_tested')
+  assert.equal(component.builtinImageCapable.value, null)
+  done('verified', 'rejected')
+  assert.equal(component.builtinProbeResult.value.status, 'rejected')
+  assert.equal(component.builtinTextLabel.value, '文字未通过')
+  assert.equal(component.builtinImageCapable.value, null)
+  component.handleProbeEvent({ type: 'done', report: { reachable: true, results: [] } })
+  assert.equal(component.builtinTextLabel.value, '本次报告未含该策略')
+  component.form.value.modelName = 'dirty-model'
+  assert.equal(component.builtinTargetStale.value, true)
+  assert.equal(component.isDirty.value, true)
+  component.form.value.modelName = 'base-model'
+  assert.equal(component.builtinTargetStale.value, false)
+})
+
+test('网络设置读取失败不提交默认 false，恢复后显示真实状态', async t => {
+  const { component, failNetwork, writes } = await createPage(t)
+  assert.equal(component.network.value.loadFailed, false)
+  failNetwork()
+  await component.loadNetwork()
+  assert.equal(component.network.value.loadFailed, true)
+  assert.equal(component.network.value.loading, false)
+  await component.saveNetwork()
+  assert.equal(writes.some(write => write.url === '/config/network'), false)
+  failNetwork()
+  await component.loadNetwork()
+  assert.equal(component.network.value.loadFailed, true)
+  await component.loadNetwork()
+  assert.equal(component.network.value.loadFailed, false)
+  assert.equal(component.network.value.allowSystemProxy, false)
+  component.network.value.allowSystemProxy = true
+  await component.saveNetwork()
+  assert.deepEqual(writes.find(write => write.url === '/config/network').body, { allowSystemProxy: true })
 })
 
 test('表单产生未保存修改后清掉预设选中标记（P2-2）', async t => {

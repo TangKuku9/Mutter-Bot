@@ -91,9 +91,9 @@
               <el-form-item label="连接超时（秒）" for="connection-timeout">
                 <el-input-number id="connection-timeout" v-model="draft.timeoutSeconds" :min="5" :max="120" :value-on-clear="60" />
               </el-form-item>
-              <div class="connection-model-heading"><h4>自定义请求头</h4><el-button link type="primary" @click="headers.push({ name: '', value: '' })">添加请求头</el-button></div>
+              <div class="connection-model-heading"><h4>自定义请求头</h4><el-button link type="primary" @click="headers.push(makeHeaderRow())">添加请求头</el-button></div>
               <p class="connection-hint">同名请求头会覆盖内置 Authorization / x-goog-api-key。</p>
-              <div v-for="(header, index) in headers" :key="index" class="connection-header-row">
+              <div v-for="(header, index) in headers" :key="header.uid" class="connection-header-row">
                 <el-input v-model="header.name" placeholder="Header 名称" :aria-label="`请求头 ${index + 1} 名称`" />
                 <el-input v-model="header.value" type="password" show-password placeholder="Header 内容" :aria-label="`请求头 ${index + 1} 内容`" />
                 <el-button link type="danger" @click="headers.splice(index, 1)">移除</el-button>
@@ -136,6 +136,10 @@ const visible = computed({ get: () => props.modelValue, set: value => emit('upda
 const blank = () => ({ id: null, name: '', templateId: 'custom', protocol: 'openai', apiBaseUrl: '', apiKey: '', timeoutSeconds: 60, defaultModel: '', models: [] })
 const draft = ref(blank()), headers = ref([]), search = ref(''), modelEntry = ref(''), modelSearch = ref(''), advanced = ref([])
 const saving = ref(false), testing = ref(false), discovering = ref(false), error = ref(''), testResult = ref(''), baseline = ref('')
+// 请求头行用稳定 uid 作 key：删除中间行时，输入框（尤其密码框的明文状态）跟随所在行而不是位置；
+// payload 只提交 name/value，uid 与 originalName 不会进入请求体。
+let headerUid = 0
+const makeHeaderRow = (name = '', value = '', originalName = '') => ({ uid: ++headerUid, name, value, originalName })
 const busy = computed(() => saving.value || testing.value || discovering.value)
 const payload = () => ({ ...draft.value, headers: Object.fromEntries(headers.value.filter(h => h.name || h.value).map(h => [h.name.trim(), h.value])) })
 const fingerprint = () => JSON.stringify({ connection: payload(), modelEntry: modelEntry.value })
@@ -147,12 +151,22 @@ const selectedTemplate = computed(() => props.templates.find(template => templat
 // 编辑已有连接时不锁，允许把历史错配的连接改成模板要求的协议。
 const protocolLocked = computed(() => !draft.value.id && !!selectedTemplate.value && selectedTemplate.value.id !== 'custom')
 const filteredModels = computed(() => filterConnectionModels(draft.value.models, modelSearch.value))
-// 大目录（几千个模型）一次渲染会卡顿：每页 100 条，搜索或增删后回到第一页
+// 大目录（几千个模型）一次渲染会卡顿：每页 100 条。搜索变化回第一页；
+// 数量变化（增删/合并）只钳制最大页，不把浏览位置拽回第一页。
 const MODEL_PAGE_SIZE = 100
 const modelPage = ref(1)
+const modelPageCount = computed(() => Math.max(1, Math.ceil(filteredModels.value.length / MODEL_PAGE_SIZE)))
 const pagedModels = computed(() => filteredModels.value.slice(
   (modelPage.value - 1) * MODEL_PAGE_SIZE, modelPage.value * MODEL_PAGE_SIZE))
-watch([modelSearch, () => filteredModels.value.length], () => { modelPage.value = 1 })
+// sync：先清搜索词再翻页时，页码赋值不会被异步 watcher 冲回第一页
+watch(modelSearch, () => { modelPage.value = 1 }, { flush: 'sync' })
+watch(modelPageCount, () => { if (modelPage.value > modelPageCount.value) modelPage.value = modelPageCount.value })
+// 新增的模型排在目录尾部，往往不在当前页：清掉挡路的搜索词，再翻到所在页
+const revealModel = id => {
+  if (!filteredModels.value.some(model => model.id === id)) modelSearch.value = ''
+  const index = filteredModels.value.findIndex(model => model.id === id)
+  if (index >= 0) modelPage.value = Math.floor(index / MODEL_PAGE_SIZE) + 1
+}
 // 内置目录 / 手动添加 / 接口获取三态：内置模型标记 isManual:false 且 isBuiltin:true；
 // 保存后 isBuiltin 不落库，按当前模板的模型目录回推，避免把内置模型显示成“获取”。
 const modelSource = row => row.isManual ? '手动' : (row.isBuiltin || selectedTemplate.value?.models?.includes(row.id)) ? '内置' : '获取'
@@ -191,7 +205,7 @@ watch(() => draft.value.apiBaseUrl, value => {
 })
 const reset = connection => {
   const copy = connection ? JSON.parse(JSON.stringify(connection)) : blank()
-  headers.value = Object.entries(copy.headers || {}).map(([name, value]) => ({ name, value, originalName: name }))
+  headers.value = Object.entries(copy.headers || {}).map(([name, value]) => makeHeaderRow(name, value, name))
   delete copy.headers
   // 先记下目标 origin 再切 draft：watcher 看到同 origin，不会把刚恢复的密钥当成“换地址”清掉。
   baselineOrigin.value = originOf(copy.apiBaseUrl)
@@ -199,10 +213,16 @@ const reset = connection => {
   originClearedHeaders = []
   draft.value = copy
   modelEntry.value = ''; modelSearch.value = ''; error.value = ''; testResult.value = ''; advanced.value = []
+  modelPage.value = 1
   baseline.value = fingerprint()
 }
+let busyNoticeAt = 0
 const canLeave = async () => {
-  if (busy.value) return false
+  if (busy.value) {
+    // 保存/测试/获取进行中不能离开草稿；连点关闭时只提示一次，避免 toast 刷屏
+    if (Date.now() - busyNoticeAt > 1500) { busyNoticeAt = Date.now(); ElMessage.warning('正在处理请求，请稍候') }
+    return false
+  }
   if (!dirty.value) return true
   try { await ElMessageBox.confirm('连接有未保存修改，是否放弃？', '未保存的连接', { confirmButtonText: '放弃修改', cancelButtonText: '继续编辑', type: 'warning' }); return true }
   catch { return false }
@@ -228,15 +248,19 @@ const applyTemplate = id => {
   draft.value.protocol = template.protocol || 'openai'
   draft.value.apiKey = ''
   headers.value = []
+  // 换模板等于换一份目录：旧校验错误、模型筛选词与待添加的模型 ID 都不再有意义
+  error.value = ''; modelSearch.value = ''; modelEntry.value = ''
+  modelPage.value = 1
 }
 const mergeBuiltinModels = () => {
-  const before = draft.value.models.length
+  const known = new Set(draft.value.models.map(model => model.id))
   const incoming = (selectedTemplate.value?.models || []).map(id => ({ id, name: id, isManual: false, isBuiltin: true }))
+  const added = incoming.filter(model => !known.has(model.id))
   const { models, exceeded } = mergeConnectionModelsWithinLimit(draft.value.models, incoming)
   if (exceeded) { ElMessage.error('最多保存 2000 个模型'); return }
   draft.value.models = models
-  const added = draft.value.models.length - before
-  ElMessage.info(added ? `已补充 ${added} 个模型，保存连接后生效；原有模型与默认选择已保留` : '内置模型已全部包含在当前目录中')
+  if (added.length) revealModel(added[0].id)
+  ElMessage.info(added.length ? `已补充 ${added.length} 个模型，保存连接后生效；原有模型与默认选择已保留` : '内置模型已全部包含在当前目录中')
 }
 const addModel = () => {
   const id = modelEntry.value.trim()
@@ -247,6 +271,8 @@ const addModel = () => {
   draft.value.models = result.models
   if (!draft.value.defaultModel) draft.value.defaultModel = id
   modelEntry.value = ''
+  // 手动模型追加在目录尾部：翻到所在页让用户立刻看到
+  revealModel(id)
 }
 const removeModel = id => {
   draft.value.models = draft.value.models.filter(model => model.id !== id)
@@ -261,10 +287,10 @@ const validate = () => {
   if (!Number.isInteger(draft.value.timeoutSeconds) || draft.value.timeoutSeconds < 5 || draft.value.timeoutSeconds > 120) {
     error.value = '请填写 5～120 之间的连接超时（秒）'
   }
+  // 校验错误显示在可滚动编辑区顶部，footer 触发的操作可能看不到：toast 兜底，alert 仍保留完整信息
+  if (error.value) ElMessage.error(error.value)
   return !error.value
 }
-// 删除/测试/获取模型失败时错误只显示在可滚动编辑区顶部，footer 操作后可能看不到；
-// 这些操作用 ElMessage 额外提示，顶部 alert 仍保留完整信息。
 const apiError = (failure, notify = false) => {
   const message = failure.response?.data?.error || failure.message || '请求失败，当前草稿已保留'
   error.value = message
@@ -275,11 +301,17 @@ const discover = async () => {
   discovering.value = true
   try {
     const { data } = await api.post('/config/ai/connections/discover', payload(), { skipErrorMessage: true, timeout: 35000 })
+    const known = new Set(draft.value.models.map(model => model.id))
+    // 上游偶尔会返回重复 ID；按实际合并后的新增数提示，避免“新增 N 个”虚高
+    const added = data.filter(model => !known.has(model.id) && known.add(model.id))
     const { models, exceeded } = mergeConnectionModelsWithinLimit(draft.value.models, data)
     if (exceeded) { ElMessage.error('最多保存 2000 个模型'); return }
     draft.value.models = models
     if (!draft.value.defaultModel) draft.value.defaultModel = draft.value.models[0]?.id || ''
-    ElMessage.success(`已获取 ${data.length} 个模型，保存连接后可选用`)
+    if (added.length) revealModel(added[0].id)
+    ElMessage.success(added.length === data.length
+      ? `已获取 ${data.length} 个模型，保存连接后可选用`
+      : `已获取 ${data.length} 个模型，新增 ${added.length} 个，保存连接后可选用`)
   } catch (failure) { apiError(failure, true) }
   finally { discovering.value = false }
 }
@@ -289,6 +321,8 @@ const testConnection = async () => {
   try {
     const { data } = await api.post('/config/ai/connections/test', payload(), { skipErrorMessage: true, timeout: 35000 })
     testResult.value = `${data.message} · ${data.model} · ${data.elapsedMs} ms`
+    // 成功 alert 在编辑区末尾，footer 点击后可能滚出视野：toast 同步提示
+    ElMessage.success(testResult.value)
   } catch (failure) { apiError(failure, true) }
   finally { testing.value = false }
 }

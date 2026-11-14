@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { normalizeAiSettings } from '../src/aiSettings.js'
 
-async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyConnections = false } = {}) {
+async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyConnections = false, webSearchShape = '' } = {}) {
   const state = {
     config: normalizeAiSettings({
       providerConnectionId: 'primary',
@@ -12,7 +12,7 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
           models: ['other-model', 'draft-model'].map(id => ({ id, name: id, isManual: true })) }
       ],
       apiBaseUrl: 'https://model.example.test/v1', apiKey: 'sk-****', modelName: 'daily-model', personality: 'helper',
-      defaultSystemPrompt: '内置提示词示例', webSearchEnabled: true, temperature: initialTemperature,
+      defaultSystemPrompt: '内置提示词示例', webSearchEnabled: true, webSearchShape, webSearchImageCapable: null, temperature: initialTemperature,
       availableProviders: [
         { id: 'example', name: '示例服务商', category: 'china', apiBaseUrl: 'https://other.example.test/v1', defaultModel: 'other-model', keyHelpText: '服务商提供的密钥' },
         { id: 'deepseek', name: 'DeepSeek', category: 'china', protocol: 'openai', apiBaseUrl: 'https://api.deepseek.com/v1', defaultModel: 'deepseek-flash', models: ['deepseek-flash', 'deepseek-v4-pro'], modelsUpdatedAt: '2026-11-13', documentationUrl: 'https://api-docs.deepseek.com/quick_start/pricing/' },
@@ -23,7 +23,7 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
       externalSearch: { baseUrl: 'https://search.example.test', apiKey: 'search-****' }
     }),
     presets: [{ id: 'daily', providerConnectionId: 'primary', name: '日常配置', description: '日常对话', modelName: 'preset-model', apiBaseUrl: 'https://model.example.test/v1', isValid: true, hasApiKey: false, updatedAt: '2026-11-11T00:00:00Z' }],
-    writes: [], probes: [], failSave: false, failDiscover: false, failLoad, allowSystemProxy: false
+    writes: [], probes: [], failSave: false, failDiscover: false, failLoad, allowSystemProxy: false, failNetwork: false, probeImageStatus: 'not_tested'
   }
   if (emptyConnections) Object.assign(state.config, { connections: [], providerConnectionId: '', modelName: '', apiBaseUrl: '', apiKey: '' })
   for (const connection of state.config.connections) connection.updatedAt = '2026-11-13T00:00:00.000Z'
@@ -52,7 +52,9 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
     }
     if (path === '/api/config/ai/connections/test') return route.fulfill({ json: { message: '模型调用成功', model: body().defaultModel, elapsedMs: 12 } })
     if (path === '/api/config/network') {
-      if (method === 'GET') return route.fulfill({ json: { allowSystemProxy: state.allowSystemProxy } })
+      if (method === 'GET') return state.failNetwork
+        ? route.fulfill({ status: 503, json: { error: '测试：网络出口读取失败' } })
+        : route.fulfill({ json: { allowSystemProxy: state.allowSystemProxy } })
       state.writes.push({ path, body: body() })
       state.allowSystemProxy = !!body().allowSystemProxy
       return route.fulfill({ status: 204, body: '' })
@@ -103,7 +105,7 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
     }
     if (path === '/api/config/ai/probe-websearch/stream') {
       state.probes.push(body())
-      return route.fulfill({ contentType: 'application/x-ndjson', body: JSON.stringify({ type: 'done', report: { reachable: true, basePromptTokens: 12, results: [{ shape: 'enable_search', description: '示例策略', status: 'verified', imageStatus: 'not_tested', note: '合成验证结果' }] } }) + '\n' })
+      return route.fulfill({ contentType: 'application/x-ndjson', body: JSON.stringify({ type: 'done', report: { reachable: true, basePromptTokens: 12, results: [{ shape: 'enable_search', description: '示例策略', status: 'verified', imageStatus: state.probeImageStatus, note: '合成验证结果' }] } }) + '\n' })
     }
     if (path === '/api/config/characters' && method === 'GET') return route.fulfill({ json: [] })
     if (path === '/api/status') return route.fulfill({ json: { isConnected: false } })
@@ -122,6 +124,39 @@ async function selectModel(page, id) {
   await modelSelect(page).click()
   await page.getByRole('option', { name: new RegExp(id) }).click()
 }
+
+test('当前内建策略检测成功后立即同步文字与带图状态，不需要切换面板或保存', async ({ page }) => {
+  const state = await setup(page, { webSearchShape: 'enable_search' })
+  const card = page.locator('.ai-builtin-search')
+  await expect(card).toContainText('文字已验证 · 带图未测')
+  state.probeImageStatus = 'verified'
+  await page.getByRole('button', { name: '检测联网搜索', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '联网搜索探测报告' })
+  await expect(dialog).toContainText('enable_search')
+  await expect(card).toContainText('文字已验证 · 带图已验证')
+  expect(state.writes.filter(write => write.path === '/api/config/ai')).toEqual([])
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+  await selectModel(page, 'draft-model')
+  await expect(card).toContainText('尚未选用实测策略，当前按 API 地址推断。')
+})
+
+test('网络设置读取失败明确提示且禁止保存，重新读取后恢复真实状态', async ({ page }) => {
+  const state = await setup(page)
+  state.failNetwork = true
+  state.allowSystemProxy = true
+  await page.reload()
+  const outlet = page.locator('.ai-network-outlet')
+  const toggle = outlet.getByRole('switch', { name: '允许使用系统代理' })
+  await expect(outlet).toContainText('当前开关不代表真实状态')
+  await expect(toggle).toBeDisabled()
+  await expect(outlet.getByRole('button', { name: '保存网络设置' })).toBeDisabled()
+  expect(state.writes.filter(write => write.path === '/api/config/network')).toEqual([])
+  state.failNetwork = false
+  await outlet.getByRole('button', { name: '重新读取' }).click()
+  await expect(outlet.getByRole('alert')).toHaveCount(0)
+  await expect(toggle).toBeEnabled()
+  await expect(toggle).toHaveAttribute('aria-checked', 'true')
+})
 
 test('自定义服务商保存、模型获取失败保留手动目录、选用与测试', async ({ page }) => {
   const state = await setup(page)
@@ -276,6 +311,9 @@ test('编辑预设可以切换连接和模型，并清空旧搜索策略', async
   await dialog.getByTestId('preset-edit-connection-select').click()
   await page.getByRole('option', { name: /示例服务商/ }).click()
   await expect(dialog.getByTestId('preset-edit-provider-model-summary')).toContainText('other-model')
+  const preferences = await page.evaluate(() => JSON.parse(localStorage.getItem('mutter.ai-model-preferences.v1') || '{}'))
+  expect(preferences.recent ?? []).toEqual([])
+  expect(preferences.last ?? {}).toEqual({})
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
   await expect(dialog).toBeHidden()
   expect(state.writes.at(-1).body.config).toMatchObject({

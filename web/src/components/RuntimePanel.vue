@@ -4,32 +4,32 @@
     <div class="runtime-overview">
       <el-card shadow="never" class="runtime-activity">
         <template #header><div class="card-head"><b>当前与近期任务</b><span class="runtime-refresh-note">每 5 秒更新</span></div></template>
-        <div class="queue-summary" aria-label="当前处理队列">
+        <div class="queue-summary" role="group" aria-label="当前处理队列">
           <div><span>正在处理</span><strong>{{ loaded ? queue.running ?? 0 : '—' }}<small v-if="loaded"> / {{ queue.parallelism ?? 3 }}</small></strong></div>
-          <div><span>等待处理</span><strong>{{ loaded ? queue.waiting ?? 0 : '—' }}<small> 条</small></strong></div>
-          <div><span>队列容量</span><strong>{{ loaded ? queue.capacity ?? 256 : '—' }}<small> 条</small></strong></div>
+          <div><span>等待处理</span><strong>{{ loaded ? queue.waiting ?? 0 : '—' }}<small v-if="loaded"> 条</small></strong></div>
+          <div><span>队列容量</span><strong>{{ loaded ? queue.capacity ?? 256 : '—' }}<small v-if="loaded"> 条</small></strong></div>
         </div>
-        <el-tabs v-model="activityTab" class="runtime-tabs" aria-label="任务与模型请求">
+        <el-tabs ref="activityTabs" v-model="activityTab" class="runtime-tabs">
           <el-tab-pane label="会话任务" name="tasks">
-            <el-table :data="tasks" v-loading="loading" max-height="420" :empty-text="emptyText('暂无会话任务')">
+            <el-table :data="tasks" v-loading="loading" :max-height="tableMaxHeight" :empty-text="emptyText('暂无会话任务')">
               <el-table-column label="会话 / 发起方" min-width="150" show-overflow-tooltip>
                 <template #default="{ row }"><div class="task-conversation">{{ conversationName(row.conversationId) }}</div><div class="task-description">{{ row.description || '—' }}</div></template>
               </el-table-column>
               <el-table-column label="类型" width="100"><template #default="{ row }">{{ row.background ? '主动评估' : '用户请求' }}</template></el-table-column>
               <el-table-column label="状态" min-width="148"><template #default="{ row }"><el-tag size="small" :type="runtimeType(row.outcome || row.state)">{{ runtimeLabel(row.outcome || row.state) }}</el-tag></template></el-table-column>
               <el-table-column label="进入队列" width="166"><template #default="{ row }"><span class="runtime-time">{{ formatTime(row.enqueuedAt) }}</span></template></el-table-column>
-              <el-table-column label="操作" width="100" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="showDetail(row.id)">查看过程</el-button></template></el-table-column>
+              <el-table-column label="操作" width="100" fixed="right"><template #default="{ row }"><el-button link type="primary" :aria-label="`查看 ${conversationName(row.conversationId)} 于 ${formatTime(row.enqueuedAt)} 的处理过程`" @click="showDetail(row.id)">查看过程</el-button></template></el-table-column>
             </el-table>
             <p class="note activity-note">优先展示当前任务，以及本次启动最近 100 条任务中的前 30 条。</p>
           </el-tab-pane>
           <el-tab-pane label="模型请求" name="calls">
-            <el-table :data="runtime.calls || []" v-loading="loading" max-height="420" :empty-text="emptyText('暂无模型调用记录')">
+            <el-table :data="runtime.calls || []" v-loading="loading" :max-height="tableMaxHeight" :empty-text="emptyText('暂无模型调用记录')">
               <el-table-column prop="model" label="模型" min-width="140" show-overflow-tooltip />
               <el-table-column label="用途" width="100"><template #default="{ row }">{{ row.purpose === 'proactive' ? '主动发言' : row.purpose === 'reply' ? '聊天回复' : row.purpose === 'probe' ? '手动探测' : '其他调用' }}</template></el-table-column>
               <el-table-column label="耗时" width="90"><template #default="{ row }">{{ seconds(row.elapsedMs) }}</template></el-table-column>
               <el-table-column label="结果" min-width="150"><template #default="{ row }"><el-tag size="small" :type="runtimeType(row.state)">{{ runtimeLabel(row.state) }}</el-tag></template></el-table-column>
               <el-table-column label="请求时间" width="166"><template #default="{ row }"><span class="runtime-time">{{ formatTime(row.startedAt) }}</span></template></el-table-column>
-              <el-table-column label="操作" width="100" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="showDetail(row.operationId)">查看过程</el-button></template></el-table-column>
+              <el-table-column label="操作" width="100" fixed="right"><template #default="{ row }"><el-button link type="primary" :aria-label="`查看 ${row.model} 于 ${formatTime(row.startedAt)} 的处理过程`" @click="showDetail(row.operationId)">查看过程</el-button></template></el-table-column>
             </el-table>
             <p class="note activity-note">展示近期模型请求。已保存的调用与发送结果可在重启后继续查看。</p>
           </el-tab-pane>
@@ -62,7 +62,7 @@
     </el-card>
   </div>
 
-  <el-dialog v-model="detailVisible" title="处理经过" width="min(900px, 94vw)" @closed="detailRequest.cancel()">
+  <el-dialog v-model="detailVisible" title="处理经过" width="min(900px, 94vw)" @closed="onDetailClosed">
     <div v-loading="detailLoading">
       <el-alert v-if="detailError" :title="detailError" type="warning" show-icon :closable="false" />
       <el-timeline v-if="detail.task?.steps?.length" class="operation-timeline">
@@ -78,12 +78,12 @@
       </el-table>
       <el-card v-for="delivery in detail.deliveries || []" :key="delivery.id" shadow="never" class="delivery-card"><el-tag :type="runtimeType(delivery.state)">{{ runtimeLabel(delivery.state) }}</el-tag><p class="delivery-content">{{ delivery.content }}</p><p v-if="delivery.detail" class="note">{{ delivery.detail }}</p></el-card>
     </div>
-    <template #footer><el-button @click="loadDetail">刷新过程</el-button><el-button @click="detailVisible = false">关闭</el-button></template>
+    <template #footer><el-button @click="loadDetail()">刷新过程</el-button><el-button @click="detailVisible = false">关闭</el-button></template>
   </el-dialog>
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Monitor } from '@element-plus/icons-vue'
 import api from '../api'
 import { LatestRequest } from '../latestRequest'
@@ -97,11 +97,15 @@ const tasks = computed(() => [...(queue.value.tasks || [])].sort((a, b) => {
   const active = (t) => t.state === 'running' ? 2 : t.state === 'queued' ? 1 : 0
   return active(b) - active(a) || new Date(b.enqueuedAt) - new Date(a.enqueuedAt)
 }).slice(0, 30))
+// 大屏保持 420px 上限；矮视口按固定占位收缩，移动端给可读下限并允许页面滚动。
+const tableMaxHeight = 'min(420px, max(calc(100dvh - var(--runtime-table-reserve, 812px)), var(--runtime-table-floor, 110px)))'
+const activityTabs = ref(null)
 const activityTab = ref('tasks')
 const detail = ref({})
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detailError = ref('')
+const detailExpired = ref(false)
 const operationId = ref('')
 const detailRequest = new LatestRequest()
 const seconds = (value) => Number.isFinite(value) ? `${(value / 1000).toFixed(1)} 秒` : '—'
@@ -110,21 +114,34 @@ const emptyText = (empty) => props.loaded ? empty : props.stale ? '数据暂不�
 const conversationName = (id) => id?.startsWith('g:')
   ? props.runtime.groupNames?.[id.slice(2)] || `群 ${id.slice(2, 10)}…` : '私聊'
 
-const loadDetail = async () => {
-  if (!detailVisible.value || !operationId.value) return
-  detailLoading.value = true
+// 轮询带 signal 静默刷新不弹遮罩；首次与手动刷新显示 loading。
+const loadDetail = async (signal) => {
+  if (signal?.aborted) return
+  const silent = Boolean(signal)
+  if (!silent) detailExpired.value = false
+  if (!detailVisible.value || !operationId.value || detailExpired.value) return
+  if (!silent) detailLoading.value = true
   const id = operationId.value
   try {
-    await detailRequest.run((signal) => api.get(`/runtime/operations/${encodeURIComponent(id)}`, { signal, skipErrorMessage: true }), ({ data }) => { detail.value = data; detailError.value = '' })
-  } catch { detailError.value = '处理过程暂时无法读取，请刷新重试。' }
-  finally { if (!detailRequest.pending) detailLoading.value = false }
+    await detailRequest.run((inner) => api.get(`/runtime/operations/${encodeURIComponent(id)}`, { signal: inner.signal, skipErrorMessage: true }), ({ data }) => { detail.value = data; detailError.value = '' })
+  } catch (error) {
+    if (error?.response?.status === 404) {
+      detailError.value = `${error.response.data?.error || '该任务已不在近期运行记录中'}，已停止自动刷新。`
+      detailExpired.value = true
+    } else { detailError.value = '处理过程暂时无法读取，请刷新重试。' }
+  } finally { if (!detailRequest.pending) detailLoading.value = false }
 }
-const showDetail = (id) => { operationId.value = id; detail.value = {}; detailError.value = ''; detailVisible.value = true; loadDetail() }
+const showDetail = (id) => { operationId.value = id; detail.value = {}; detailError.value = ''; detailExpired.value = false; detailVisible.value = true; loadDetail() }
+const onDetailClosed = () => { detailRequest.cancel(); detail.value = {}; detailError.value = ''; detailLoading.value = false; detailExpired.value = false }
+onMounted(() => activityTabs.value?.$el?.querySelector('[role="tablist"]')?.setAttribute('aria-label', '任务与模型请求'))
 useVisiblePolling(loadDetail, 5000)
 onUnmounted(() => detailRequest.cancel())
 </script>
 
 <style scoped>
+/* 表格高度预留量按实测校准：常规布局 812px，矮视口紧凑布局 632px（1366×768 诊断收起后页面恰好无纵向滚动）；
+   下限保证空表与表头完整可见，移动端放宽到可读高度并允许页面滚动。 */
+.runtime-panel { --runtime-table-reserve: 812px; --runtime-table-floor: 110px; }
 .runtime-notice { margin-bottom: 16px; }
 .runtime-overview { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: stretch; }
 .runtime-activity, .runtime-health { min-width: 0; }
@@ -148,7 +165,7 @@ onUnmounted(() => detailRequest.cancel())
 .runtime-diagnostics :deep(.el-collapse), .runtime-diagnostics :deep(.el-collapse-item__header), .runtime-diagnostics :deep(.el-collapse-item__wrap) { border: 0; background: transparent; }
 .runtime-diagnostics :deep(.el-collapse-item__header) { min-height: 62px; height: auto; }
 .runtime-diagnostics :deep(.el-collapse-item__content) { padding-bottom: 18px; }
-.diagnostics-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 13px 0; font-size: 14px; color: var(--panel-text-regular); }
+.diagnostics-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 13px 0; font-size: 14px; line-height: 1.6; color: var(--panel-text-regular); }
 .diagnostics-heading > .el-icon { color: var(--panel-accent-text); font-size: 17px; }
 .diagnostics-subtitle { color: var(--panel-text-muted); font-size: 12px; font-weight: 400; }
 .diagnostic-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 0 0 20px; }
@@ -160,7 +177,20 @@ onUnmounted(() => detailRequest.cancel())
 @media (max-width: 1200px) {
   .runtime-overview { grid-template-columns: minmax(0, 1fr); }
 }
+/* 矮视口（常见 1366×768）启用紧凑排布：说明文字让位给表格，预留量同步收紧。 */
+@media (max-height: 970px) {
+  .runtime-panel { --runtime-table-reserve: 632px; }
+  .runtime-activity { --el-card-padding: 16px; }
+  .runtime-activity :deep(.el-card__header) { padding-top: 12px; padding-bottom: 12px; }
+  .queue-summary { padding-bottom: 14px; }
+  .queue-summary strong { font-size: 21px; }
+  .runtime-tabs { margin-top: 6px; }
+  .runtime-tabs :deep(.el-tabs__header) { margin-bottom: 9px; }
+  .activity-note { display: none; }
+  .runtime-diagnostics { margin-top: 12px; }
+}
 @media (max-width: 600px) {
+  .runtime-panel { --runtime-table-floor: 240px; }
   .queue-summary { gap: 9px; }
   .queue-summary > div + div { padding-left: 10px; }
   .queue-summary > div > span, .queue-summary small { font-size: 12px; }

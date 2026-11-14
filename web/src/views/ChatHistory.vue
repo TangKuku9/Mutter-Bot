@@ -15,6 +15,7 @@
       <section class="chat-conversation" aria-label="聊天记录">
         <header class="conversation-heading"><div><h2>{{ selectedGroup?.name || (groupId ? shortId(groupId) : '全部记录') }}</h2><p>{{ groupDescription }}</p></div><el-tag v-if="selectedGroup?.config?.isEnabled === false" type="info" size="small">群聊已停用</el-tag><el-tag v-else-if="selectedGroup?.config?.aiProactiveEnabled" size="small">群级择机已开启</el-tag></header>
         <div class="mobile-group-picker"><el-select :model-value="groupId" placeholder="选择群聊" aria-label="选择群聊" filterable @change="selectGroup"><el-option label="全部记录" value="" /><el-option v-for="group in groups" :key="group.groupOpenId" :value="group.groupOpenId" :label="group.name || shortId(group.groupOpenId)" /></el-select></div>
+        <div v-if="groupsError" class="mobile-groups-error" role="status"><span>暂时无法读取群列表</span><el-button link type="primary" size="small" @click="loadGroups">重试</el-button></div>
         <div class="chat-toolbar">
           <div class="source-filters" role="group" aria-label="消息来源"><button v-for="option in sources" :key="option.value" type="button" :aria-pressed="source === option.value" @click="setSource(option.value)">{{ option.label }}</button></div>
           <div class="chat-live"><el-switch v-model="live" aria-label="实时更新" @change="toggleLive" /><span>{{ live ? connOk ? '实时更新' : '连接中' : '已暂停' }}</span><el-button size="small" :loading="loading" @click="refreshLatest">刷新</el-button></div>
@@ -375,10 +376,11 @@ onUnmounted(() => {
 .empty-brand { width: 38px; height: 30px; background: var(--panel-accent-text); mask: url('/logo-mark.svg') center / contain no-repeat; opacity: .65; }
 .observe-help { max-width: 390px; }
 .mobile-group-picker { display: none; }
+.mobile-groups-error { display: none; }
 html.compact .chat-message { margin-bottom: 18px; }
 html.compact .conversation-heading { padding-top: 16px; padding-bottom: 13px; }
 html.compact .decision-event { margin-bottom: 18px; }
 @media (max-width: 1200px) { .chat-workspace { grid-template-columns: 180px minmax(0, 1fr); } .conversation-heading, .chat-search, .conversation-footer { padding-left: 18px; padding-right: 18px; } .conversation-stream { padding-left: 18px; padding-right: 18px; } }
-@media (max-width: 700px) { .chat-workspace { display: block; } .chat-groups { display: none; } .mobile-group-picker { display: block; padding: 14px 16px 0; } .mobile-group-picker .el-select { width: 100%; } .conversation-heading { padding: 16px; } .chat-toolbar { padding: 12px 10px; gap: 8px; } .chat-search { padding: 0 16px 14px; } .conversation-stream { padding: 0 14px 20px; min-height: 300px; max-height: 65vh; } .sender-avatar { width: 26px; height: 26px; } .chat-message { gap: 8px; } .decision-event { margin-left: 34px; } .conversation-footer { padding: 12px 16px; } .search-summary, .new-message-notice { padding: 10px 16px; } .source-filters button { font-size: 12px; padding: 6px 8px; } }
+@media (max-width: 700px) { .chat-workspace { display: block; } .chat-groups { display: none; } .mobile-group-picker { display: block; padding: 14px 16px 0; } .mobile-group-picker .el-select { width: 100%; } .mobile-groups-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px 0; font-size: 12px; color: var(--panel-text-muted); } .conversation-heading { padding: 16px; } .chat-toolbar { padding: 12px 10px; gap: 8px; } .chat-search { padding: 0 16px 14px; } .conversation-stream { padding: 0 14px 20px; min-height: 300px; max-height: 65vh; } .sender-avatar { width: 26px; height: 26px; } .chat-message { gap: 8px; } .decision-event { margin-left: 34px; } .conversation-footer { padding: 12px 16px; } .search-summary, .new-message-notice { padding: 10px 16px; } .source-filters button { font-size: 12px; padding: 6px 8px; } }
 @media (pointer: coarse) { .source-filters button, .group-button { min-height: 44px; } }
 </style>
