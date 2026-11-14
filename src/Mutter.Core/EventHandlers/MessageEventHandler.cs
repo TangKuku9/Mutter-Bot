@@ -565,10 +565,9 @@ public class MessageEventHandler
             else
                 context = await _contextBuilder.BuildPrivateContextAsync(senderId, parsed.PlainText, senderName, ct);
 
-            // 留痕：实际注入的自动记忆条目与字符数（选择发生在本地，不额外调用模型）。
-            if (groupOpenId is not null && context.AutomaticMemory.Count > 0)
-                RuntimeActivity.Current?.Mark("memory",
-                    $"自动记忆 {context.AutomaticMemory.Count} 条 / {context.AutomaticMemory.Text.Length} 字：{string.Join(",", context.AutomaticMemory.Ids)}");
+            // 只登记候选；系统词、图片和外搜齐备后的最终使用情况由执行入口记录。
+            if (AiCallScope.Current is { } callScope)
+                callScope.AutomaticMemory = context.AutomaticMemory;
 
             var systemPrompt = context.ComposeSystemPrompt();
 

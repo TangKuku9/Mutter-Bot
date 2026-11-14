@@ -66,6 +66,8 @@ public sealed class AiCallScope : IDisposable
     public string Purpose { get; }
     public string OperationId { get; }
     public AiCallMetadata Metadata { get; }
+    /// <summary>候选自动资料；最终是否保留由执行入口在完整请求预算裁剪后记录。</summary>
+    public AutomaticMemoryRecall AutomaticMemory { get; set; } = AutomaticMemoryRecall.Empty;
     public string Stage { get; set; } = "generate";
     public int Attempts => _root._attempts;
 

@@ -458,6 +458,8 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
                     else if (sources.Any(s => s.UserId == rawSubject)) subject = rawSubject;
                     else continue;
                 }
+                // 句柄只解析身份，不能授予修改该成员记忆的权限。个人事实的每条来源都必须由本人发送。
+                if (subject is not null && sources.Any(s => s.UserId != subject)) continue;
                 var target = op.TargetId.HasValue && batch.Existing.Any(i => i.Id == op.TargetId)
                     ? items.FirstOrDefault(i => i.Id == op.TargetId) : null;
                 if (op.Op is "replace" or "remove" && (target is null || target.SubjectUserId != subject)) continue;

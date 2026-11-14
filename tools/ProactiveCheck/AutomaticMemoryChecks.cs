@@ -323,6 +323,25 @@ internal static partial class RuntimeChecks
             .BuildGroupContextAsync("GROUP", "还是老时间吗？", "Synthetic");
         Require(built.AutomaticMemory.Count == 1,
             "recall uses the preceding human message when the current turn has no matching words");
+        var builder = env.Services.GetRequiredService<IContextBuilder>();
+        foreach (var question in new[] { "帮我计算12乘13", "请解释什么是光合作用" })
+            Require((await builder.BuildGroupContextAsync("GROUP", question, "Synthetic")).AutomaticMemory.Count == 0,
+                "a complete new question must not recall the preceding game topic");
+        Require((await builder.BuildGroupContextAsync("GROUP", "几点开始？", "Synthetic")).AutomaticMemory.Count == 1,
+            "a short follow-up still uses the recent topic");
+        Require((await builder.BuildGroupContextAsync("GROUP", "周五开黑安排", "Synthetic")).AutomaticMemory.Count == 1,
+            "an explicit current topic still recalls its own memory");
+        using (var staleTurn = new ConversationTurnScope("later-message", now.AddMinutes(6), 1000))
+            Require((await builder.BuildGroupContextAsync("GROUP", "还是老时间吗？", "Synthetic")).AutomaticMemory.Count == 0,
+                "a topic older than ten minutes cannot resolve an ambiguous follow-up");
+        using (var earlierTurn = new ConversationTurnScope("earlier-message", now.AddMinutes(-6), 998))
+            Require((await builder.BuildGroupContextAsync("GROUP", "还是老时间吗？", "Synthetic")).AutomaticMemory.Count == 0,
+                "a later message cannot supply the topic for an earlier queued turn");
+        using (var mergedTurn = new ConversationTurnScope("batch-tail", now, 1001,
+            [new() { MessageId = "batch-first", UserName = "Synthetic", PlainText = "周五还开黑吗？" },
+             new() { MessageId = "batch-tail", UserName = "Synthetic", PlainText = "再帮我计算12乘13" }]))
+            Require((await builder.BuildGroupContextAsync("GROUP", "再帮我计算12乘13", "Synthetic")).AutomaticMemory.Count == 1,
+                "accepted messages in the same batch remain part of the current topic");
     }
 
     private static async Task AutomaticMemoryContextAsync()

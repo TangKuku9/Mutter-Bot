@@ -8,6 +8,16 @@ namespace Mutter.Core.Services;
 
 public class ContextBuilder : IContextBuilder
 {
+    private static readonly string[] RecallReferences =
+    [
+        "刚才", "刚刚", "上面", "前面", "之前说", "之前提", "之前聊", "老时间", "老地方", "照旧",
+        "这件事", "那件事", "这个安排", "那个安排", "这个活动", "那个活动"
+    ];
+    private static readonly HashSet<string> ShortRecallFollowUps = new(StringComparer.Ordinal)
+    {
+        "那呢", "这个呢", "那个呢", "然后呢", "后来呢", "继续", "接着呢", "几点", "几点开始",
+        "什么时候", "什么时候开始", "多久", "还去吗", "还约吗", "还参加吗"
+    };
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ContextBuilder> _logger;
 
@@ -139,7 +149,7 @@ public class ContextBuilder : IContextBuilder
                     truncatedConversation.Insert(0, ("user", automatic.Text));
                     estimatedTokens += memoryTokens;
                     _logger.LogDebug(
-                        "Group {GroupId} automatic memory injected: {Count} 条 / {Chars} 字, ids={Ids}",
+                        "Group {GroupId} automatic memory selected: {Count} 条 / {Chars} 字, ids={Ids}",
                         groupId, automatic.Count, automatic.Text.Length, string.Join(",", automatic.Ids));
                 }
                 else automatic = AutomaticMemoryRecall.Empty;
@@ -238,8 +248,8 @@ public class ContextBuilder : IContextBuilder
     }
 
     /// <summary>
-    /// 召回查询以当前回合为主，补上同批合并输入和最近两条人类消息作为话题上下文；
-    /// 只取回合时间边界之前的消息，避免把后续回合的内容带进更早排队的回复。
+    /// 当前回合和同批输入决定话题；仅明确的短追问补充最近十分钟内的两条人类消息。
+    /// 完整的新问题不拼接旧话题，也不把后续回合的内容带进更早排队的回复。
     /// </summary>
     private static string BuildRecallQuery(string currentMessage, ConversationTurnScope? turn, List<ChatMessage> history)
     {
@@ -247,8 +257,13 @@ public class ContextBuilder : IContextBuilder
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(turn.CombinedInput)) parts.Add(turn.CombinedInput);
         else if (!string.IsNullOrWhiteSpace(currentMessage)) parts.Add(currentMessage);
+        var question = string.Concat(currentMessage.Where(c => !char.IsWhiteSpace(c) && !char.IsPunctuation(c)));
+        var followUp = question.Length <= 48 && (ShortRecallFollowUps.Contains(question)
+            || RecallReferences.Any(reference => question.Contains(reference, StringComparison.Ordinal)));
+        if (!followUp) return parts.Count == 0 ? currentMessage : string.Join("\n", parts);
         foreach (var message in history
                      .Where(m => !m.IsBotMessage && m.CreatedAt <= turn.CreatedAt
+                         && m.CreatedAt >= turn.CreatedAt.AddMinutes(-10)
                          && !turn.MessageIds.Contains(m.MessageId) && !string.IsNullOrWhiteSpace(m.PlainText))
                      .TakeLast(2))
             parts.Add(message.PlainText);
