@@ -23,4 +23,10 @@
     <InternalsVisibleTo Include="ProactiveCheck" />
   </ItemGroup>
 
+  <ItemGroup Condition="!Exists('appsettings.json')">
+    <!-- 仓库不再跟踪本地凭据文件：新克隆/CI 构建时以 example 作为输出与发布包的占位配置。 -->
+    <Content Update="appsettings.example.json" Link="appsettings.json"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

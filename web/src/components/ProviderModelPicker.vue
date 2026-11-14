@@ -43,7 +43,9 @@ import {
 
 const props = defineProps({
   connections: { type: Array, default: () => [] }, connectionId: { type: String, default: '' },
-  modelName: { type: String, default: '' }, idPrefix: { type: String, default: 'ai' }, disabled: Boolean
+  modelName: { type: String, default: '' }, idPrefix: { type: String, default: 'ai' }, disabled: Boolean,
+  // 记忆配置允许手填目录外模型；切换连接时不要把手填值清空。
+  preserveManualModel: Boolean
 })
 const emit = defineEmits(['update:connectionId', 'update:modelName', 'change'])
 const preferences = ref(readModelPreferences())
@@ -78,7 +80,11 @@ const selectConnection = id => {
   preferences.value = readModelPreferences()
   const selected = props.connections.find(item => item.id === id)
   // 自动选中偏好模型只更新 last，不算一次「最近使用」
-  if (selected) select(selected, preferredModel(selected, preferences.value), false)
+  if (selected) {
+    const modelId = props.preserveManualModel && props.modelName
+      ? props.modelName : preferredModel(selected, preferences.value)
+    select(selected, modelId, false)
+  }
 }
 const selectModel = id => { if (connection.value) select(connection.value, id) }
 </script>

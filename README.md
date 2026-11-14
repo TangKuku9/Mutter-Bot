@@ -68,6 +68,7 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 - **独立搜索服务（预检索注入）**：可选接入 SearXNG / Tavily / 博查 / Brave / DeepSeek 搜索，也可用「自定义（JSON API）」按固定契约接入其他搜索端点；先检索再把资料注入对话，不依赖模型服务商内建搜索；任意 OpenAI 兼容端点（含中转站）都能联网，失败自动降级且不影响回复。配置见面板「AI 设置 → 独立搜索服务」，运行时边界见 [AI 与消息运行时](docs/ai-runtime.md)。
 - **会话运行时**：同会话顺序执行、跨会话并行，使用有界队列与统一投递账本；模型调用通过 `IChatClient` 适配，设计与兼容边界见 [AI 与消息运行时](docs/ai-runtime.md)。
 - **运行监控与面板体验**：实际模型请求记账、数据库汇总与短期缓存、任务处理过程、共用群记忆及配置编辑保护，详见 [性能与管理面板改进](docs/panel-improvements.md)。
+- **自动群记忆**：可组合的新增记录、间隔及定时触发，独立选择总结模型，本地按需召回；旧部署默认关闭，首次开启只学习新消息，详见 [自动群记忆](docs/automatic-group-memory.md)。
 
 ### 2. 择机主动发言 (Proactive Speak)
 - **群语境动态观察**：滑动窗口监听群聊消息，交由 AI 分析研判当前讨论焦点与接话价值。
@@ -205,7 +206,13 @@ Mutter-Bot/
 
 配置分为两部分：QQ 机器人凭据与面板口令在 `appsettings.json` 中，AI 服务商配置在面板「AI 设置」里写入 SQLite。
 
-仓库中的 [`src/Mutter.Web/appsettings.json`](src/Mutter.Web/appsettings.json) 只保留占位符，**不要**把真实凭据写进去——它是受 Git 跟踪的文件。本地开发推荐用环境变量覆盖：
+仓库只保留占位符模板 [`src/Mutter.Web/appsettings.example.json`](src/Mutter.Web/appsettings.example.json)，**不再跟踪**本地 `appsettings.json`（已被 `.gitignore` 忽略）。首次开发先复制模板：
+
+```bash
+cp src/Mutter.Web/appsettings.example.json src/Mutter.Web/appsettings.json
+```
+
+然后可以直接编辑本地 `appsettings.json`；也可以继续用环境变量覆盖，避免把凭据落盘：
 
 ```bash
 # Linux / macOS
@@ -242,7 +249,7 @@ $env:Mutter__ClientSecret="YOUR_CLIENT_SECRET"
 - 修改 `appsettings.json` 后必须重启进程；运行中的进程不会热加载凭据。
 - 面板只读展示打码后的 `AppId` 与连接状态，不提供凭据编辑入口。
 
-> ⚠️ 严禁把真实凭据提交到仓库；`src/Mutter.Web/appsettings.json` 在版本库中只允许保留占位符。
+> ⚠️ 严禁把真实凭据提交到仓库。`appsettings.json` 与 `appsettings.*.json` 都已被 `.gitignore` 忽略；仓库中的 `appsettings.example.json` 只允许保留占位符。发布前请确认本地凭据文件没有被带进发布目录，或按发布工作流从模板生成占位配置。
 
 ### 3. 构建与本地运行
 
@@ -297,7 +304,7 @@ dotnet publish src/Mutter.ConsoleHost -c Release -r linux-x64 --self-contained f
 sudo ./deploy/install.sh ./publish
 ```
 
-> `dotnet publish` 会自动把 `appsettings.json` 带进发布目录，无需手工复制。
+> `dotnet publish` 会优先使用本地 `appsettings.json`；本地没有该文件时自动用 `appsettings.example.json` 生成占位配置。从源码发布前请确认本地文件是占位符，否则真实凭据会进入发布目录；部署后再到服务器上填写真实值。
 > 使用 `--self-contained false` 发布时，服务器需预先安装 **ASP.NET Core 9 Runtime**（不需要 SDK）。
 > 首次部署后编辑 `/opt/mutter-bot/appsettings.json` 填入真实的 `Mutter:AppId`、`Mutter:ClientSecret` 与面板口令，再执行 `sudo systemctl restart mutter-bot`。该文件位于服务器、不在 Git 仓库中，可以安全写入真实凭据。
 

@@ -136,13 +136,27 @@ public sealed class ProactiveWorkflow
         var memoryText = memory?.Summary?.Trim();
         var memoryCount = string.IsNullOrWhiteSpace(memoryText) ? 0 : 1;
         var memoryChars = memoryCount == 0 ? 0 : memoryText!.Length;
+        var automatic = AutomaticMemoryRecall.Empty;
+        using var memoryScope = _scopeFactory.CreateScope();
+        var memoryGroup = await memoryScope.ServiceProvider.GetRequiredService<IConfigRepository>().GetGroupConfigAsync(window.GroupId, aiToken);
+        if (config.MemoryInjectionEnabled && memoryGroup?.MemoryInjectionEnabled != false)
+            automatic = await memoryScope.ServiceProvider.GetRequiredService<IAutomaticMemoryRecall>().RecallAsync(window.GroupId,
+                string.Join("\n", window.Messages.TakeLast(3).Select(m => m.Text)), window.LastMessageUtcAt, ct: aiToken);
 
         // 择机判定是内部决策，不该继承全局联网开关：它只是在判断“要不要接话”，
         // 每条群消息都去检索既慢又费 token。联网只服务于最终话术，不服务于判断。
         var judgeConfig = context.EffectiveConfig with { WebSearchEnabled = false };
 
         var judgePrompt = BuildJudgePrompt(context, config.Liveliness);
-        var userPrompt = ProactivePrompts.BuildUserPrompt(window, history, images.Count, memoryText, nowUtc);
+        var userPrompt = ProactivePrompts.BuildUserPrompt(window, history, images.Count, memoryText, nowUtc, automatic.Text);
+        if (automatic.Count > 0 && judgePrompt.Length + userPrompt.Length + images.Count * AiRequestBudget.ImageTokens + 136
+            > AiRequestBudget.InputBudget(judgeConfig.MaxTokens, judgeConfig.ContextWindowTokens, judgeConfig.MaxInputTokens))
+        {
+            automatic = AutomaticMemoryRecall.Empty;
+            userPrompt = ProactivePrompts.BuildUserPrompt(window, history, images.Count, memoryText, nowUtc);
+        }
+        memoryCount += automatic.Count;
+        memoryChars += automatic.Text.Length;
         aiToken.ThrowIfCancellationRequested();
         // 将实际评估阶段与最终投递结果分开，发送前的开关/时段复核不能抹掉已发生的评估。
         onEvaluationStarted();

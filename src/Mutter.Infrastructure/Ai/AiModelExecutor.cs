@@ -15,6 +15,8 @@ public sealed class AiModelExecutor(HttpModelTransport transport, ILogger<AiMode
         AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct)
     {
         config = config with { };
+        var automatic = AiCallScope.Current?.AutomaticMemory ?? AutomaticMemoryRecall.Empty;
+        var hasAutomatic = automatic.Count > 0 && request.Messages.Any(m => m.Text == automatic.Text);
         if (config.Protocol == "gemini")
             strategy = new AiSearchStrategy("gemini", strategy.WithSearch ? "gemini_native" : null);
         else if (config.Protocol == "openai" && strategy.Endpoint == "gemini")
@@ -41,6 +43,16 @@ public sealed class AiModelExecutor(HttpModelTransport transport, ILogger<AiMode
                     .ToList()
             };
             request = AiRequestBudget.Fit(request, config);
+        }
+        // 前置看图/检索调用不携带这块资料，不记成“被预算剔除”；只记录原本包含资料的最终请求。
+        if (hasAutomatic)
+        {
+            var retained = request.Messages.Any(m => m.Text == automatic.Text) ? automatic : AutomaticMemoryRecall.Empty;
+            RuntimeActivity.Current?.Mark("memory",
+                $"最终请求自动记忆 {retained.Count} 条 / {retained.Text.Length} 字：{string.Join(",", retained.Ids)}"
+                + (retained.Count == 0 ? "（输入预算已剔除）" : ""));
+            logger.LogDebug("Final automatic memory: {Count} 条 / {Chars} 字, ids={Ids}",
+                retained.Count, retained.Text.Length, string.Join(",", retained.Ids));
         }
         try
         {
