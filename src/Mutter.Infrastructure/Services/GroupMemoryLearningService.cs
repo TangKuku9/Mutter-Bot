@@ -15,11 +15,21 @@ using Mutter.Infrastructure.Repositories;
 namespace Mutter.Infrastructure.Services;
 
 public sealed class GroupMemoryLearningService(IServiceScopeFactory scopes, IConversationWorkQueue queue,
-    IAiChatService ai, TimeProvider clock, ILogger<GroupMemoryLearningService> logger) : BackgroundService
+    IAiChatService ai, TimeProvider clock, ILogger<GroupMemoryLearningService> logger,
+    GroupMemoryUpstreamHealth health) : BackgroundService
 {
     private int _pending;
     private int _rotation;
     private static readonly Regex StoredIdentityPrefix = new(@"^.{1,24}?(自述|曾提到)：", RegexOptions.Compiled);
+
+    private static bool IsCausedBy<T>(Exception exception) where T : Exception
+    {
+        // 真实 Socket 取消可能是 TaskCanceledException -> IOException -> SocketException。
+        // 只取 GetBaseException 会丢掉中间的取消/超时/HTTP 类型。
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+            if (current is T) return true;
+        return false;
+    }
 
     private static string ModelMemberName(ChatMessage message, IReadOnlyDictionary<string, string> handles)
     {
@@ -118,7 +128,9 @@ public sealed class GroupMemoryLearningService(IServiceScopeFactory scopes, ICon
                 // 每个 scope 一次候选事务；不把过时的 EF 跟踪行带到实际执行阶段。
                 await using var candidateScope = scopes.CreateAsyncScope();
                 var repo = candidateScope.ServiceProvider.GetRequiredService<AutomaticMemoryRepository>();
-                if (await repo.PrepareAsync(groupId, false, ct) is null) continue;
+                var candidate = await repo.PrepareAsync(groupId, false, ct);
+                if (candidate is null || !health.ForConnection(candidate.Config.ProviderConnectionId).CanScheduleBackground)
+                    continue;
                 var accepted = queue.TryEnqueue("memory:" + groupId, async token =>
                 {
                     try { await RunGroupAsync(groupId, token); }
@@ -136,7 +148,13 @@ public sealed class GroupMemoryLearningService(IServiceScopeFactory scopes, ICon
     {
         await using var scope = scopes.CreateAsyncScope();
         var repo = scope.ServiceProvider.GetRequiredService<AutomaticMemoryRepository>();
-        var batch = await repo.PrepareAsync(groupId, true, ct);
+        var state = await repo.StateAsync(groupId, ct);
+        if (state is not { Enabled: true }) return;
+        var connectionId = AutomaticMemoryConfig.Decode(state.ConfigJson).ProviderConnectionId;
+        // 排队期间可能已降级；领取探测租约早于配额预留，关闭/改配后的候选也不能继续调用。
+        if (!health.ForConnection(connectionId).TryBeginBackgroundCall(out var probe)) return;
+        using var lease = probe;
+        var batch = await repo.PrepareAsync(groupId, true, ct, expectedRevision: state.Revision);
         if (batch is null) return;
         AutomaticMemoryRepository.Patch? patch = null;
         var outcome = "model_failed";
@@ -193,11 +211,10 @@ public sealed class GroupMemoryLearningService(IServiceScopeFactory scopes, ICon
                     outcome = "input_too_large";
                 else
                 {
-                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    deadline.CancelAfter(TimeSpan.FromSeconds(30));
-                    using var operation = AiCallScope.Begin(deadline.Token, "group_memory", new(GroupId: groupId), maxAttempts: 1);
+                    // 后台提炼跟随总结连接的超时，由根期限和队列期限兜底，不再提前在 30 秒取消。
+                    using var operation = AiCallScope.Begin(ct, "group_memory", new(GroupId: groupId), maxAttempts: 1);
                     operation.Stage = "extract";
-                    var response = await ai.ChatAsync(ExtractionPrompt, [("user", prompt)], config, deadline.Token);
+                    var response = await ai.ChatAsync(ExtractionPrompt, [("user", prompt)], config, operation.Token);
                     if (response.FinishReason == "length") outcome = "truncated";
                     else
                     {
@@ -216,9 +233,24 @@ public sealed class GroupMemoryLearningService(IServiceScopeFactory scopes, ICon
                 }
             }
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (OperationCanceledException) { outcome = "timeout"; }
-        catch (JsonException) { outcome = "invalid_json"; }
+        catch (Exception ex) when (ct.IsCancellationRequested && IsCausedBy<OperationCanceledException>(ex))
+        { throw new OperationCanceledException("群记忆任务已取消", ex, ct); }
+        // OpenAI 兼容传输可能把 TaskCanceledException 包在 InvalidOperationException 中。
+        catch (Exception ex) when (IsCausedBy<OperationCanceledException>(ex) || IsCausedBy<TimeoutException>(ex))
+        { outcome = "timeout"; }
+        catch (Exception ex) when (IsCausedBy<JsonException>(ex)) { outcome = "invalid_json"; }
+        catch (AiInputTooLargeException) { outcome = "input_too_large"; }
+        catch (AiRequestException ex)
+        {
+            outcome = ex.StatusCode switch
+            {
+                408 => "timeout",
+                429 => "rate_limited",
+                >= 500 => "upstream_unavailable",
+                _ => "request_rejected"
+            };
+        }
+        catch (Exception ex) when (IsCausedBy<HttpRequestException>(ex)) { outcome = "network_error"; }
         catch (Exception ex) { logger.LogWarning(ex, "群记忆提炼失败 group={Group} type={Type}", groupId, ex.GetType().Name); }
         // 清空/停用/重新配置后的旧结果由 Revision 拒绝，HTTP 期间从不持有写事务。
         try { await repo.CompleteAsync(batch, patch, outcome, ct); }

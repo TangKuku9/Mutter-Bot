@@ -105,7 +105,7 @@ const dirty = computed(() => loaded.value && JSON.stringify(config.value) !== or
 const confirmDiscard = useUnsavedChanges(dirty)
 const endpoint = () => `/groups/${encodeURIComponent(groupId.value)}/memory-auto`
 const fmt = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '—'
-const outcome = value => ({ success: '学习完成', baseline_set: '已建立新消息起点', boundary_reset: '学习范围已更新', not_enabled: '尚未开启', running: '正在学习', interrupted: '上次学习未完成，等待下一触发', model_failed: '模型调用失败', invalid_json: '输出格式无效', timeout: '总结超时', truncated: '输出被截断', input_too_large: '总结输入超出模型窗口', connection_missing: '总结连接不可用', skipped_after_failures: '连续失败，本批已跳过', skipped_noise_or_old: '已跳过无效或过期记录' }[value] || '等待新消息')
+const outcome = value => ({ success: '学习完成', baseline_set: '已建立新消息起点', boundary_reset: '学习范围已更新', not_enabled: '尚未开启', running: '正在学习', interrupted: '上次学习未完成，等待下一触发', model_failed: '模型调用失败，保留本批重试', invalid_json: '输出格式无效', timeout: '总结超时，保留本批重试', network_error: '网络异常，保留本批重试', rate_limited: '上游限流，等待重试', upstream_unavailable: '上游暂不可用，等待重试', request_rejected: '总结请求被拒绝，请检查连接、模型或参数', truncated: '输出被截断', input_too_large: '总结输入超出模型窗口', connection_missing: '总结连接不可用', skipped_after_failures: '输出连续失败，本批已跳过', skipped_noise_or_old: '已跳过无效或过期记录' }[value] || '等待新消息')
 function apply(data, preserve = false) {
   revision.value = data.revision; items.value = data.items; runs.value = data.runs; status.value = data.status
   if (data.limits) limits.value = data.limits
