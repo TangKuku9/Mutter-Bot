@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 
 async function setup(page, { failLoad = false, conflictOnPut = false } = {}) {
-  const config = { enabled: false, countEnabled: true, count: 50, intervalEnabled: true, intervalMinutes: 120, scheduleEnabled: false, schedules: [{ frequency: 'daily', time: '22:00', weekday: 1 }], providerConnectionId: '', modelName: '' }
+  const config = { enabled: false, countEnabled: true, count: 50, intervalEnabled: true, intervalMinutes: 120, scheduleEnabled: false, schedules: [{ frequency: 'daily', time: '22:00', weekday: 1 }], providerConnectionId: '', modelName: '', maxOutputTokens: 1024 }
   const state = { config, revision: 0, writes: [], reads: 0, failLoad, conflictOnPut, items: [{ id: 1, content: '合成成员自述喜欢喝茶。', tags: ['饮品'], lastSeenAt: '2026-11-14T12:00:00Z', expiresAt: '2027-01-01T00:00:00Z' }] }
   const payload = () => ({ config: structuredClone(state.config), revision: state.revision, items: state.items, runs: [], status: { pending: 0, callsToday: 0, lastOutcome: state.revision ? 'baseline_set' : 'not_enabled', groupEnabled: true } })
   await page.route('**/hub/**', route => route.fulfill({ status: 503, body: '' }))
@@ -48,10 +48,11 @@ test('旧环境打开页面不写配置，三种触发与独立模型一起保�
   await page.getByTestId('memory-connection-select').click()
   await page.getByRole('option', { name: '独立总结连接', exact: false }).click()
   await expect(page.getByLabel('手动填写记忆模型 ID', { exact: true })).toHaveValue('custom-memory-model')
+  await page.getByTestId('memory-output-tokens').locator('input').fill('4096')
   await page.getByRole('button', { name: '保存设置', exact: true }).click()
   await expect(page.getByText('群记忆设置已保存', { exact: true })).toBeVisible()
   expect(state.writes).toHaveLength(1)
-  expect(state.writes[0].body).toMatchObject({ revision: 0, config: { enabled: true, countEnabled: true, intervalEnabled: true, scheduleEnabled: true, providerConnectionId: 'memory-provider', modelName: 'custom-memory-model' } })
+  expect(state.writes[0].body).toMatchObject({ revision: 0, config: { enabled: true, countEnabled: true, intervalEnabled: true, scheduleEnabled: true, providerConnectionId: 'memory-provider', modelName: 'custom-memory-model', maxOutputTokens: 4096 } })
   expect(state.writes[0].body.config.schedules).toHaveLength(2)
   expect(state.writes.some(write => write.path === '/api/config/ai')).toBe(false)
 })
