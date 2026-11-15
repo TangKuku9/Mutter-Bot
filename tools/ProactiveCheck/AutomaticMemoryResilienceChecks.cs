@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Mutter.Core.Interfaces;
+using Mutter.Core.Models.Config;
 using Mutter.Core.Services;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
@@ -264,6 +265,49 @@ internal static partial class RuntimeChecks
             Require(state.NextAttemptAt == env.Clock.GetUtcNow().UtcDateTime.AddMinutes(status == 401 ? 60 : 5),
                 "configuration rejection pauses longer than transient failures");
         }
+    }
+
+    private static async Task AutomaticMemoryOutputBudgetAsync()
+    {
+        var high = new AutomaticMemoryConfig { MaxOutputTokens = 100_000 }.Normalize();
+        var low = new AutomaticMemoryConfig { MaxOutputTokens = 1 }.Normalize();
+        Require(high.MaxOutputTokens == AutomaticMemoryConfig.MaximumOutputTokens
+            && low.MaxOutputTokens == AutomaticMemoryConfig.MinimumOutputTokens,
+            "configured output budget is clamped to the supported range");
+
+        await using var env = await TestEnvironment.CreateAsync();
+        var options = MemoryOptions();
+        options.MaxOutputTokens = 4096;
+        await ConfigureMemoryAsync(env, options);
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var connection = await db.AiProviderConnections.SingleAsync(c => c.Id == "MEMORY-CONNECTION");
+            connection.ModelsJson = """[{"id":"memory-small","contextWindowTokens":32768,"maxOutputTokens":8192}]""";
+            await db.SaveChangesAsync();
+        }
+        await NewMemoryMessageAsync(env);
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("{\"operations\":[]}"));
+        var learner = env.Services.GetRequiredService<GroupMemoryLearningService>();
+        await learner.RunGroupAsync("GROUP");
+        Require(env.Http.Requests.Count == 1, "configured output budget still sends one extraction request");
+        using (var request = JsonDocument.Parse(env.Http.Requests[0].Body))
+            Require(request.RootElement.GetProperty("max_tokens").GetInt32() == 4096,
+                "memory extraction uses the configured output budget instead of the old hard-coded 1024");
+
+        // 模型元数据声明的上限更低时仍以元数据为准，用户设置不能越过后端能力。
+        using (var scope = env.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var connection = await db.AiProviderConnections.SingleAsync(c => c.Id == "MEMORY-CONNECTION");
+            connection.ModelsJson = """[{"id":"memory-small","contextWindowTokens":32768,"maxOutputTokens":2048}]""";
+            await db.SaveChangesAsync();
+        }
+        await NewMemoryMessageAsync(env);
+        await learner.RunGroupAsync("GROUP");
+        using (var request = JsonDocument.Parse(env.Http.Requests[1].Body))
+            Require(request.RootElement.GetProperty("max_tokens").GetInt32() == 2048,
+                "model metadata output limit still wins when it is lower than the user setting");
     }
 
     private static async Task AutomaticMemoryFailureUpgradeAsync()

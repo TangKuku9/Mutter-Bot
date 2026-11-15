@@ -49,6 +49,13 @@
               <p class="memory-hint">独立于日常聊天，复用 AI 设置中的服务商连接。未选择时不会使用聊天模型代替。</p>
               <ProviderModelPicker v-model:connection-id="config.providerConnectionId" v-model:model-name="config.modelName" :connections="connections" id-prefix="memory" preserve-manual-model />
               <el-form-item label="模型 ID（也可直接填写）"><el-input v-model="config.modelName" maxlength="256" aria-label="手动填写记忆模型 ID" placeholder="选择目录中的模型，或填写连接支持的模型 ID" /></el-form-item>
+              <el-form-item label="学习输出上限">
+                <div class="memory-inline">
+                  <el-input-number v-model="config.maxOutputTokens" :min="limits.minOutputTokens" :max="limits.maxOutputTokens" :step="256" aria-label="学习输出上限" data-testid="memory-output-tokens" />
+                  <span>Token</span>
+                </div>
+                <p class="memory-hint">包含模型思考 token；默认 1024，使用 Gemini 3.x 等思考模型时建议 4096 以上。设置过高且模型窗口不足时，会以“输入超限”暂停。</p>
+              </el-form-item>
               <div class="memory-save"><span class="memory-hint">{{ dirty ? '有未保存修改' : '设置已同步' }}</span><el-button type="primary" :loading="saving" native-type="submit" @click.prevent="save">保存设置</el-button></div>
             </el-form>
           </el-tab-pane>
@@ -111,7 +118,7 @@ const loading = ref(false), loaded = ref(false), saving = ref(false), busy = ref
 const sources = ref([]), sourcesOpen = ref(false), sourcesLoading = ref(false), sourcesError = ref(false), sourcesItemId = ref(null), groupsFailed = ref(false)
 // 查看来源只允许最后一次点击获胜：旧请求被取消或忽略，弹窗内容不会与最后点击的条目错位。
 const sourcesRequest = new LatestRequest()
-const limits = ref({ capacity: 128, perGroupDailyCalls: 12, maxCount: 1000, maxIntervalMinutes: 10080, maxSchedules: 4 })
+const limits = ref({ capacity: 128, perGroupDailyCalls: 12, maxCount: 1000, maxIntervalMinutes: 10080, maxSchedules: 4, minOutputTokens: 256, maxOutputTokens: 8192 })
 const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 const dirty = computed(() => loaded.value && JSON.stringify(config.value) !== original.value)
 const confirmDiscard = useUnsavedChanges(dirty)
@@ -120,7 +127,7 @@ const fmt = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: f
 const outcome = value => ({ success: '学习完成', baseline_set: '已建立新消息起点', boundary_reset: '学习范围已更新', not_enabled: '尚未开启', running: '正在学习', interrupted: '上次学习未完成，等待下一触发', model_failed: '模型调用失败，保留本批重试', invalid_json: '输出格式无效', timeout: '总结超时，保留本批重试', network_error: '网络异常，保留本批重试', rate_limited: '上游限流，等待重试', upstream_unavailable: '上游暂不可用，等待重试', request_rejected: '总结请求被拒绝，请检查连接、模型或参数', truncated: '输出被截断', input_too_large: '总结输入超出模型窗口', connection_missing: '总结连接不可用', skipped_after_failures: '输出连续失败，本批已跳过', skipped_noise_or_old: '已跳过无效或过期记录' }[value] || '等待新消息')
 function apply(data, preserve = false) {
   revision.value = data.revision; items.value = data.items; runs.value = data.runs; status.value = data.status
-  if (data.limits) limits.value = data.limits
+  if (data.limits) limits.value = { ...limits.value, ...data.limits }
   original.value = JSON.stringify(data.config)
   if (!preserve) config.value = data.config
   loaded.value = true

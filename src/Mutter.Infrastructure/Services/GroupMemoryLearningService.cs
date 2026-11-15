@@ -171,7 +171,7 @@ public sealed class GroupMemoryLearningService(IServiceScopeFactory scopes, ICon
                 var config = new AiConfig
                 {
                     ModelName = batch.Config.ModelName, Temperature = .1,
-                    MaxTokens = AiRequestBudget.ClampOutputTokens(Math.Min(1024, metadata?.MaxOutputTokens ?? 1024), window),
+                    MaxTokens = batch.Config.EffectiveOutputTokens(metadata, window),
                     ContextWindowTokens = window,
                     MaxInputTokens = 6000, WebSearchEnabled = false
                 };
