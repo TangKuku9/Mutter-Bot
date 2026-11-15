@@ -343,7 +343,7 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
         }
         var metadata = AiConnectionStore.Models(connection).FirstOrDefault(m => m.Id == config.ModelName);
         var window = metadata?.ContextWindowTokens ?? AiRequestBudget.DefaultContextWindow;
-        var maxTokens = AiRequestBudget.ClampOutputTokens(Math.Min(1024, metadata?.MaxOutputTokens ?? 1024), window);
+        var maxTokens = config.EffectiveOutputTokens(metadata, window);
         var modelBudget = AiRequestBudget.InputBudget(maxTokens, window, 6000);
         if (modelBudget < PromptReserveChars + MinBatchChars)
         {

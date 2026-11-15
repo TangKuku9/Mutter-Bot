@@ -32,7 +32,9 @@ public sealed class AutomaticMemoryController(AppDbContext db, AutomaticMemoryRe
                 GlobalDailyCalls = AutomaticMemoryRepository.GlobalDailyCalls,
                 MaxCount = 1000,
                 MaxIntervalMinutes = 10080,
-                MaxSchedules = 4
+                MaxSchedules = 4,
+                MinOutputTokens = AutomaticMemoryConfig.MinimumOutputTokens,
+                MaxOutputTokens = AutomaticMemoryConfig.MaximumOutputTokens
             },
             Status = new
             {

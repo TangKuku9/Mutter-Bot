@@ -78,6 +78,7 @@ internal static partial class RuntimeChecks
             ("记忆触发合并、清空竞态与重启预算", AutomaticMemoryTriggersAsync),
             ("记忆单次 HTTP、失败退避与容量过期", AutomaticMemoryFailureAsync),
             ("记忆慢总结超过 30 秒与前台并行", AutomaticMemoryBudgetAsync),
+            ("记忆输出上限可调与模型/窗口钳制", AutomaticMemoryOutputBudgetAsync),
             ("记忆真实超时、持久退避与取消记账", AutomaticMemoryTimeoutAsync),
             ("记忆坏输出计数与固定批次重试", AutomaticMemoryPoisonBatchAsync),
             ("记忆连接降级隔离与后台探测", AutomaticMemoryConnectionHealthAsync),

@@ -1,11 +1,16 @@
 using System.Text.Json;
 using System.Text.Encodings.Web;
 using System.Text.Unicode;
+using Mutter.Core.Services;
 
 namespace Mutter.Core.Models.Config;
 
 public sealed class AutomaticMemoryConfig
 {
+    public const int DefaultOutputTokens = 1024;
+    public const int MinimumOutputTokens = 256;
+    public const int MaximumOutputTokens = 8192;
+
     public bool Enabled { get; set; }
     public bool CountEnabled { get; set; } = true;
     public int Count { get; set; } = 50;
@@ -15,11 +20,21 @@ public sealed class AutomaticMemoryConfig
     public List<MemorySchedule> Schedules { get; set; } = [new()];
     public string ProviderConnectionId { get; set; } = "";
     public string ModelName { get; set; } = "";
+    /// <summary>单次提炼的输出上限；包含思考模型的思考 token，并受模型元数据与上下文窗口再钳制。</summary>
+    public int MaxOutputTokens { get; set; } = DefaultOutputTokens;
+
+    /// <summary>实际请求的输出上限：用户设置、模型元数据上限和上下文窗口三者取最小。</summary>
+    public int EffectiveOutputTokens(AiConnectionModel? model, int contextWindow)
+    {
+        var modelLimit = model?.MaxOutputTokens is > 0 ? model.MaxOutputTokens.Value : MaxOutputTokens;
+        return AiRequestBudget.ClampOutputTokens(Math.Min(MaxOutputTokens, modelLimit), contextWindow);
+    }
 
     public AutomaticMemoryConfig Normalize()
     {
         Count = Math.Clamp(Count, 1, 1000);
         IntervalMinutes = Math.Clamp(IntervalMinutes, 1, 10080);
+        MaxOutputTokens = Math.Clamp(MaxOutputTokens, MinimumOutputTokens, MaximumOutputTokens);
         ProviderConnectionId = (ProviderConnectionId ?? "").Trim();
         ModelName = (ModelName ?? "").Trim();
         Schedules = (Schedules ?? []).Take(4).Where(s => s is not null).ToList();
