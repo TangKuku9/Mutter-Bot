@@ -28,7 +28,7 @@ using Mutter.Web.Services;
 /// <summary>只使用合成标识符、临时 SQLite 和假 HTTP，不读取部署数据或访问外部服务。</summary>
 internal static partial class RuntimeChecks
 {
-    public static async Task<bool> RunAsync()
+    public static async Task<bool> RunAsync(bool memoryOnly = false)
     {
         var ok = true;
         foreach (var (name, run) in new (string, Func<Task>)[]
@@ -77,6 +77,12 @@ internal static partial class RuntimeChecks
             ("记忆模型窗口缩批与本地暂停", AutomaticMemoryWindowAsync),
             ("记忆触发合并、清空竞态与重启预算", AutomaticMemoryTriggersAsync),
             ("记忆单次 HTTP、失败退避与容量过期", AutomaticMemoryFailureAsync),
+            ("记忆慢总结超过 30 秒与前台并行", AutomaticMemoryBudgetAsync),
+            ("记忆真实超时、持久退避与取消记账", AutomaticMemoryTimeoutAsync),
+            ("记忆坏输出计数与固定批次重试", AutomaticMemoryPoisonBatchAsync),
+            ("记忆连接降级隔离与后台探测", AutomaticMemoryConnectionHealthAsync),
+            ("记忆限流、鉴权与网络失败分类", AutomaticMemoryRequestFailuresAsync),
+            ("记忆旧超时计数升级与配额保留", AutomaticMemoryFailureUpgradeAsync),
             ("群设置与记忆保存事务", AtomicGroupSettingsAsync),
             ("运行队列快照与调用过程关联", RuntimeSnapshotAsync),
             ("运行账本保留策略与累计统计事务", RetentionAsync),
@@ -87,7 +93,9 @@ internal static partial class RuntimeChecks
             ("高负载运行列表保留正在执行任务", RuntimeTaskOrderingAsync)
         })
         {
-            try { await run().WaitAsync(TimeSpan.FromSeconds(30)); Console.WriteLine($"PASS  {name}"); }
+            if (memoryOnly && !run.Method.Name.StartsWith("AutomaticMemory", StringComparison.Ordinal)) continue;
+            var timeout = run.Method.Name == nameof(AutomaticMemoryBudgetAsync) ? 60 : 30;
+            try { await run().WaitAsync(TimeSpan.FromSeconds(timeout)); Console.WriteLine($"PASS  {name}"); }
             catch (Exception ex) { ok = false; Console.WriteLine($"FAIL  {name}: {ex}"); }
         }
         return ok;

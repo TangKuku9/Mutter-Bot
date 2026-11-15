@@ -25,7 +25,10 @@ public sealed class GroupMemoryLearningStateEntity
     public DateTime LastCompletedAt { get; set; }
     public DateTime LastScheduleCheckAt { get; set; }
     public DateTime NextAttemptAt { get; set; }
+    /// <summary>仅统计同批次连续的格式/截断失败。</summary>
     public int ConsecutiveFailures { get; set; }
+    public int TransientFailures { get; set; }
+    public long RetryThroughRowId { get; set; }
     public string QuotaDay { get; set; } = "";
     public int CallsToday { get; set; }
     public string LastOutcome { get; set; } = "not_enabled";
