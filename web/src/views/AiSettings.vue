@@ -356,14 +356,18 @@
             </small>
           </div>
           <div class="ai-network-outlet">
+            <el-alert v-if="network.loadFailed" type="warning" :closable="false" show-icon
+              title="网络出口设置读取失败，当前开关不代表真实状态。">
+              <el-button link type="primary" :loading="network.loading" @click="loadNetwork">重新读取</el-button>
+            </el-alert>
             <div class="ai-search-master">
               <span>允许使用系统代理</span>
-              <el-switch v-model="network.allowSystemProxy" aria-label="允许使用系统代理" :loading="network.loading" />
+              <el-switch v-model="network.allowSystemProxy" aria-label="允许使用系统代理" :loading="network.loading" :disabled="network.loadFailed || network.loading" />
             </div>
             <small>
               默认直连并在建连时校验目标地址；开启后 AI、搜索、图片与更新请求会走系统或环境代理，目标由代理解析，仅在你信任代理时开启。
             </small>
-            <el-button size="small" :loading="network.saving" @click="saveNetwork">保存网络设置</el-button>
+            <el-button size="small" :loading="network.saving" :disabled="network.loadFailed || network.loading" @click="saveNetwork">保存网络设置</el-button>
           </div>
           <template v-if="form.externalSearch.enabled">
             <div class="ai-search-fields ai-fields">
@@ -490,11 +494,11 @@
               <p v-if="form.webSearchShape">当前策略：{{ shapeLabel(form.webSearchShape) }}</p>
               <p v-else>尚未选用实测策略，当前按 API 地址推断。</p>
               <small v-if="form.webSearchShape">
-                {{ builtinTargetStale ? '参数已变更，需重新检测' : '文字已验证' }} ·
+                {{ builtinTextLabel }} ·
                 {{
-                  form.webSearchImageCapable === true
+                  builtinImageCapable === true
                     ? '带图已验证'
-                    : form.webSearchImageCapable === false
+                    : builtinImageCapable === false
                       ? '带图不支持'
                       : '带图未测'
                 }}
@@ -631,7 +635,7 @@
           <el-input v-model="presetEditForm.description" maxlength="200" show-word-limit />
         </el-form-item>
         <ProviderModelPicker v-model:connection-id="presetEditForm.providerConnectionId" v-model:model-name="presetEditForm.modelName"
-          id-prefix="preset-edit" :connections="form.connections" :disabled="presetSaving" />
+          id-prefix="preset-edit" :connections="form.connections" :disabled="presetSaving" :remember-recent="false" />
         <p class="hint">修改连接与模型会保留预设原有的人设和行为参数。</p>
         <p class="hint">切换连接或模型后需要重新检测联网搜索。</p>
       </el-form>
@@ -925,15 +929,18 @@ const saving = ref(false)
 const loadError = ref(false), presetsError = ref(false), presetsLoading = ref(false)
 const advancedOpen = ref([]), searchAdvancedOpen = ref([])
 // 出站网络设置独立于 AI 配置保存：它是全局开关，切换后立即对后续请求生效。
-const network = ref({ allowSystemProxy: false, loading: true, saving: false })
+const network = ref({ allowSystemProxy: false, loading: true, saving: false, loadFailed: false })
 const loadNetwork = async () => {
+  network.value.loading = true
   try {
     const { data } = await api.get('/config/network', { skipErrorMessage: true })
     network.value.allowSystemProxy = !!data?.allowSystemProxy
-  } catch { /* 读取失败时保持默认直连，不阻塞 AI 配置 */ }
+    network.value.loadFailed = false
+  } catch { network.value.loadFailed = true }
   finally { network.value.loading = false }
 }
 const saveNetwork = async () => {
+  if (network.value.loading || network.value.loadFailed || network.value.saving) return
   network.value.saving = true
   try {
     await api.put('/config/network', { allowSystemProxy: network.value.allowSystemProxy })
@@ -1039,9 +1046,29 @@ const baselineConfig = computed(() => {
   if (!baseline.value) return null
   try { return JSON.parse(baseline.value) } catch { return null }
 })
+// 探测结论属于当时表单中的连接与模型，不修改服务端配置或保存基线。
+const builtinProbe = ref(null)
+const currentBuiltinProbe = computed(() => {
+  const probe = builtinProbe.value
+  if (!probe) return null
+  return probe.apiBaseUrl === form.value.apiBaseUrl && probe.modelName === form.value.modelName ? probe : null
+})
+const builtinProbeResult = computed(() => currentBuiltinProbe.value?.report.results?.find(row => row.shape === form.value.webSearchShape) || null)
+const builtinImageCapable = computed(() => {
+  const row = builtinProbeResult.value
+  if (row?.status === 'verified' && ['verified', 'image_rejected', 'no_evidence', 'rejected'].includes(row.imageStatus)) return row.imageStatus === 'verified'
+  return form.value.webSearchImageCapable ?? null
+})
+const builtinTextLabel = computed(() => {
+  if (builtinTargetStale.value) return '参数已变更，需重新检测'
+  if (!currentBuiltinProbe.value) return '文字已验证'
+  if (!builtinProbeResult.value) return '本次报告未含该策略'
+  return builtinProbeResult.value.status === 'verified' ? '文字已验证' : '文字未通过'
+})
 const builtinTargetStale = computed(() => {
   const b = baselineConfig.value
   if (!b) return false
+  if (currentBuiltinProbe.value) return false
   return form.value.apiBaseUrl !== b.apiBaseUrl || form.value.modelName !== b.modelName
 })
 const esTargetStale = computed(() => {
@@ -1123,6 +1150,7 @@ const handleProbeEvent = (ev) => {
   }
   if (ev.type === 'done') {
     probeReport.value = ev.report
+    builtinProbe.value = { apiBaseUrl: form.value.apiBaseUrl, modelName: form.value.modelName, report: ev.report }
     probePhase.value = 'done'
     return
   }

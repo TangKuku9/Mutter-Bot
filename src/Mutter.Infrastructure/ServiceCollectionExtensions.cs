@@ -23,6 +23,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IGroupMemoryRepository, GroupMemoryRepository>();
         services.AddScoped<AutomaticMemoryRepository>();
         services.AddScoped<IAutomaticMemoryRecall>(sp => sp.GetRequiredService<AutomaticMemoryRepository>());
+        services.AddSingleton<GroupMemoryUpstreamHealth>();
         services.AddSingleton<GroupMemoryLearningService>();
         services.AddHostedService(sp => sp.GetRequiredService<GroupMemoryLearningService>());
         services.AddSingleton<IStructuredAiService, StructuredAiService>();

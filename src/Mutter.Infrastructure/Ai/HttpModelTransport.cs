@@ -9,13 +9,15 @@ using Mutter.Core.Interfaces;
 using Mutter.Core.Models.Config;
 using Mutter.Core.Configuration;
 using Mutter.Core.Services;
+using Mutter.Infrastructure.Services;
 
 namespace Mutter.Infrastructure.Ai;
 
 /// <summary>现有兼容协议的 HTTP 实现；不拥有搜索决策或工作流重试。</summary>
 public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelTransport> logger,
     IAiCallStore? callStore = null, TimeProvider? clock = null,
-    UpstreamHealthTracker? health = null, RuntimeOptions? runtime = null)
+    UpstreamHealthTracker? health = null, RuntimeOptions? runtime = null,
+    GroupMemoryUpstreamHealth? memoryHealth = null)
 {
     private readonly HttpClient _httpClient = httpClient;
     private readonly ILogger _logger = logger;
@@ -206,7 +208,9 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
     private async Task<HttpResponseMessage> SendWithBudgetAsync(HttpRequestMessage request, AiConfig config,
         string transport, bool search, CancellationToken ct)
     {
-        var cap = _health is { IsDegraded: true } ? _degradedAttemptCap : _attemptCap;
+        var health = memoryHealth is not null && AiCallScope.Current?.Purpose == "group_memory"
+            ? memoryHealth.ForConnection(config.ProviderConnectionId) : _health;
+        var cap = health is { IsDegraded: true } ? _degradedAttemptCap : _attemptCap;
         // 连接上的超时是显式用户设置，允许比默认尝试上限更短或更长；仍需受根期限约束。
         if (config.ConnectionTimeoutSeconds is int timeout)
             cap = TimeSpan.FromSeconds(timeout);
@@ -226,26 +230,26 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
             var response = await AiHttpAudit.SendAsync(_httpClient, request, config.ModelName, transport,
                 attempt.Token, callStore, logger, clock, stage: search ? "search" : null);
             if (response.IsSuccessStatusCode)
-                _health?.Record(true, ElapsedMs());
+                health?.Record(true, ElapsedMs());
             else if (response.StatusCode == HttpStatusCode.RequestTimeout
                 || response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500)
             {
                 var retry = response.Headers.RetryAfter;
                 var retryAfter = retry?.Delta
                     ?? (retry?.Date is { } date ? date - (clock ?? TimeProvider.System).GetUtcNow() : (TimeSpan?)null);
-                _health?.Record(false, ElapsedMs(), (int)response.StatusCode,
+                health?.Record(false, ElapsedMs(), (int)response.StatusCode,
                     retryAfter: retryAfter);
             }
             return response;
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (!(AiCallScope.Current?.HostToken ?? ct).IsCancellationRequested)
         {
-            _health?.Record(false, ElapsedMs());
+            health?.Record(false, ElapsedMs());
             throw;
         }
         catch (HttpRequestException)
         {
-            _health?.Record(false, ElapsedMs());
+            health?.Record(false, ElapsedMs());
             throw;
         }
     }

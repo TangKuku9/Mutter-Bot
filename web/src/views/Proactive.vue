@@ -35,6 +35,11 @@
           </div>
         </div>
       </template>
+      <el-alert v-if="logsError" type="warning" show-icon :closable="false" class="logs-error">
+        <template #title>决策留痕读取失败</template>
+        <span>下方表格仍是上次成功读取的数据，可能与当前筛选或页码不一致。</span>
+        <el-button link type="primary" size="small" @click="loadLogs">重试</el-button>
+      </el-alert>
       <el-table :data="logs" size="small" v-loading="logsLoading">
         <el-table-column label="时间" width="160">
           <template #default="{ row }">{{ fmt(row.evaluatedAt) }}</template>
@@ -140,6 +145,7 @@ const pageSize = 30
 const filterOutcome = ref('')
 const saving = ref(false)
 const logsLoading = ref(false)
+const logsError = ref(false)
 const dirty = ref(false), groupDirty = ref(false), parametersPanel = ref(null)
 const anyDirty = computed(() => dirty.value || groupDirty.value)
 
@@ -193,10 +199,14 @@ const loadLogs = async () => {
   try {
     const params = { page: page.value, pageSize }
     if (filterOutcome.value) params.outcome = filterOutcome.value
-    await logRequest.run((signal) => api.get('/proactive/logs', { params, signal }), ({ data }) => {
+    await logRequest.run((signal) => api.get('/proactive/logs', { params, signal, skipErrorMessage: true }), ({ data }) => {
       logs.value = data.items
       logTotal.value = data.totalCount
+      logsError.value = false
     })
+  } catch {
+    // 读取失败时保留旧数据但明确提示可能与当前筛选不一致，避免旧表被当成正确数据（错误只留在页内）。
+    if (!disposed) logsError.value = true
   } finally {
     if (!logRequest.pending) logsLoading.value = false
   }
@@ -278,5 +288,6 @@ onUnmounted(disconnectHub)
 
 <style scoped>
 .card-head { display: flex; justify-content: space-between; align-items: center; }
+.logs-error { margin-bottom: 12px; }
 .hint { color: var(--el-text-color-secondary); font-size: 12px; margin-left: 10px; }
 </style>

@@ -77,20 +77,30 @@
           <span v-if="!status.groupEnabled">本群响应未启用，学习暂停</span>
         </div>
       </template>
-      <el-result v-else-if="!loading && groupId" icon="warning" title="记忆配置读取失败" sub-title="重新读取成功后才能保存" />
+      <el-result v-else-if="!loading && groupId" icon="warning" title="记忆配置读取失败" sub-title="重新读取成功后才能保存">
+        <template #extra><el-button type="primary" @click="refresh">重试</el-button></template>
+      </el-result>
     </el-card>
     <el-dialog v-model="sourcesOpen" title="记忆来源" width="min(560px, 94vw)">
-      <el-empty v-if="!sources.length" description="来源消息已不可用" />
-      <article v-for="source in sources" :key="source.id" class="memory-item"><b>{{ source.userName }}</b><p>{{ source.plainText }}</p><small>{{ fmt(source.createdAt) }}</small></article>
+      <div v-loading="sourcesLoading" class="memory-sources">
+        <el-alert v-if="sourcesError" title="来源消息暂时无法读取，请重试。" type="warning" :closable="false" show-icon>
+          <el-button link type="primary" @click="showSources(sourcesItemId)">重试</el-button>
+        </el-alert>
+        <el-empty v-else-if="!sourcesLoading && !sources.length" description="来源消息已不可用" />
+        <template v-else-if="sources.length">
+          <article v-for="source in sources" :key="source.id" class="memory-item"><b>{{ source.userName }}</b><p>{{ source.plainText }}</p><small>{{ fmt(source.createdAt) }}</small></article>
+        </template>
+      </div>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '../api'
+import { LatestRequest } from '../latestRequest'
 import ProviderModelPicker from '../components/ProviderModelPicker.vue'
 import { useUnsavedChanges } from '../useUnsavedChanges'
 
@@ -98,14 +108,16 @@ const route = useRoute(), router = useRouter()
 const groups = ref([]), connections = ref([]), groupId = ref(''), config = ref(null)
 const items = ref([]), runs = ref([]), status = ref({}), revision = ref(0), original = ref('')
 const loading = ref(false), loaded = ref(false), saving = ref(false), busy = ref(false), tab = ref('settings')
-const sources = ref([]), sourcesOpen = ref(false), groupsFailed = ref(false)
+const sources = ref([]), sourcesOpen = ref(false), sourcesLoading = ref(false), sourcesError = ref(false), sourcesItemId = ref(null), groupsFailed = ref(false)
+// 查看来源只允许最后一次点击获胜：旧请求被取消或忽略，弹窗内容不会与最后点击的条目错位。
+const sourcesRequest = new LatestRequest()
 const limits = ref({ capacity: 128, perGroupDailyCalls: 12, maxCount: 1000, maxIntervalMinutes: 10080, maxSchedules: 4 })
 const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 const dirty = computed(() => loaded.value && JSON.stringify(config.value) !== original.value)
 const confirmDiscard = useUnsavedChanges(dirty)
 const endpoint = () => `/groups/${encodeURIComponent(groupId.value)}/memory-auto`
 const fmt = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '—'
-const outcome = value => ({ success: '学习完成', baseline_set: '已建立新消息起点', boundary_reset: '学习范围已更新', not_enabled: '尚未开启', running: '正在学习', interrupted: '上次学习未完成，等待下一触发', model_failed: '模型调用失败', invalid_json: '输出格式无效', timeout: '总结超时', truncated: '输出被截断', input_too_large: '总结输入超出模型窗口', connection_missing: '总结连接不可用', skipped_after_failures: '连续失败，本批已跳过', skipped_noise_or_old: '已跳过无效或过期记录' }[value] || '等待新消息')
+const outcome = value => ({ success: '学习完成', baseline_set: '已建立新消息起点', boundary_reset: '学习范围已更新', not_enabled: '尚未开启', running: '正在学习', interrupted: '上次学习未完成，等待下一触发', model_failed: '模型调用失败，保留本批重试', invalid_json: '输出格式无效', timeout: '总结超时，保留本批重试', network_error: '网络异常，保留本批重试', rate_limited: '上游限流，等待重试', upstream_unavailable: '上游暂不可用，等待重试', request_rejected: '总结请求被拒绝，请检查连接、模型或参数', truncated: '输出被截断', input_too_large: '总结输入超出模型窗口', connection_missing: '总结连接不可用', skipped_after_failures: '输出连续失败，本批已跳过', skipped_noise_or_old: '已跳过无效或过期记录' }[value] || '等待新消息')
 function apply(data, preserve = false) {
   revision.value = data.revision; items.value = data.items; runs.value = data.runs; status.value = data.status
   if (data.limits) limits.value = data.limits
@@ -125,10 +137,16 @@ async function changeGroup(id) {
 async function refresh() {
   if (!await confirmDiscard()) return
   loading.value = true
-  try { await load() } finally { loading.value = false }
+  try { await load() } catch { /* API 层已提示；保留失败页以便再次重试 */ } finally { loading.value = false }
 }
+const validScheduleTime = (value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value ?? '')
 async function save() {
   if (saving.value || !loaded.value) return
+  // 与后端 TimeOnly.TryParseExact("HH:mm") 一致：定时开启时任一时刻缺失或无效都不发 PUT。
+  if (config.value.scheduleEnabled && config.value.schedules.some(schedule => !validScheduleTime(schedule.time))) {
+    ElMessage.warning('请为每个定时时刻填写有效的 HH:mm（如 09:30）后再保存')
+    return
+  }
   saving.value = true
   try {
     const { data } = await api.put(endpoint(), { config: config.value, revision: revision.value })
@@ -149,9 +167,23 @@ async function remove(id) {
   try { await api.delete(`${endpoint()}/${id}`); await load(true) } finally { busy.value = false }
 }
 async function showSources(id) {
-  const { data } = await api.get(`${endpoint()}/${id}/sources`)
-  sources.value = data; sourcesOpen.value = true
+  sourcesItemId.value = id
+  sources.value = []
+  sourcesError.value = false
+  sourcesOpen.value = true
+  sourcesLoading.value = true
+  try {
+    await sourcesRequest.run(signal => api.get(`${endpoint()}/${id}/sources`, { signal, skipErrorMessage: true }), ({ data }) => {
+      sources.value = data
+    })
+  } catch { sourcesError.value = true } finally {
+    if (!sourcesRequest.pending) sourcesLoading.value = false
+  }
 }
+watch(sourcesOpen, (open) => {
+  if (!open) { sourcesRequest.cancel(); sourcesLoading.value = false; sourcesError.value = false }
+})
+onUnmounted(() => sourcesRequest.cancel())
 async function bootstrap() {
   groupsFailed.value = false
   const results = await Promise.allSettled([api.get('/groups'), api.get('/config/ai/connections')])
@@ -192,6 +224,7 @@ onMounted(async () => {
 .memory-inline { margin-top: 6px; }.memory-schedule .el-select { width: 120px; }
 .memory-time { background: var(--el-fill-color-blank); color: var(--el-text-color-primary); border: 1px solid var(--el-border-color); border-radius: 4px; padding: 7px 10px; font: inherit; max-width: 100%; }
 .memory-item { padding: 16px 0; border-bottom: 1px solid var(--el-border-color-lighter); overflow-wrap: anywhere; }.memory-item p { margin: 6px 0; white-space: pre-wrap; }
+.memory-sources { min-height: 160px; }
 .memory-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }.memory-status { border-top: 1px solid var(--el-border-color-lighter); padding-top: 16px; color: var(--el-text-color-secondary); font-size: 12px; }
 .memory-save { margin-top: 18px; }h3 small { color: var(--el-text-color-secondary); font-weight: 400; font-size: 12px; }
 @media (max-width: 520px) { .memory-inline .el-input-number { width: 115px; }.memory-header .el-select { width: 100%; } }

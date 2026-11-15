@@ -185,12 +185,33 @@ public class AppDbContext : DbContext
                 "ConfigJson" TEXT NOT NULL DEFAULT '{{}}', "Revision" INTEGER NOT NULL DEFAULT 0,
                 "LastProcessedRowId" INTEGER NOT NULL DEFAULT 0, "LastCompletedAt" TEXT NOT NULL,
                 "LastScheduleCheckAt" TEXT NOT NULL, "NextAttemptAt" TEXT NOT NULL,
-                "ConsecutiveFailures" INTEGER NOT NULL DEFAULT 0, "QuotaDay" TEXT NOT NULL DEFAULT '',
+                "ConsecutiveFailures" INTEGER NOT NULL DEFAULT 0, "TransientFailures" INTEGER NOT NULL DEFAULT 0,
+                "RetryThroughRowId" INTEGER NOT NULL DEFAULT 0, "QuotaDay" TEXT NOT NULL DEFAULT '',
                 "CallsToday" INTEGER NOT NULL DEFAULT 0, "LastOutcome" TEXT NOT NULL DEFAULT 'not_enabled',
                 "RecentRunsJson" TEXT NOT NULL DEFAULT '[]');
             CREATE INDEX IF NOT EXISTS "IX_GroupMemoryLearningStates_Enabled" ON "GroupMemoryLearningStates" ("Enabled");
             CREATE INDEX IF NOT EXISTS "IX_ChatMessages_MemoryCursor" ON "ChatMessages" ("GroupId", "Id");
             """, ct);
+        try
+        {
+            await using var upgrade = await Database.BeginTransactionAsync(ct);
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"GroupMemoryLearningStates\" ADD COLUMN \"TransientFailures\" INTEGER NOT NULL DEFAULT 0", ct);
+            // 旧版把超时/HTTP 故障也算作坏批次，升级不能把这些计数带入新的三次弃批规则。
+            await Database.ExecuteSqlRawAsync("""
+                UPDATE "GroupMemoryLearningStates"
+                SET "TransientFailures" = "ConsecutiveFailures", "ConsecutiveFailures" = 0
+                WHERE "LastOutcome" NOT IN ('invalid_json', 'truncated');
+                """, ct);
+            await upgrade.CommitAsync(ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name")) { }
+        try
+        {
+            await Database.ExecuteSqlRawAsync(
+                "ALTER TABLE \"GroupMemoryLearningStates\" ADD COLUMN \"RetryThroughRowId\" INTEGER NOT NULL DEFAULT 0", ct);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name")) { }
         await Database.ExecuteSqlRawAsync("""
             CREATE TABLE IF NOT EXISTS "AiProviderConnections" (
                 "Id" TEXT NOT NULL PRIMARY KEY, "Revision" TEXT NOT NULL, "Name" TEXT NOT NULL, "TemplateId" TEXT NOT NULL,
