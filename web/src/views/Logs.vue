@@ -15,14 +15,14 @@
       </el-tag>
     </div>
 
-    <div class="log-box" ref="boxRef" role="region" aria-label="实时日志流" tabindex="0">
+    <div class="log-box" ref="boxRef" role="region" aria-label="实时日志流" tabindex="0" @scroll="onScroll">
       <div v-for="(l, i) in filtered" :key="i" class="log-line" :class="'lv-' + (l.level || '').toLowerCase()">
         <span class="ts">{{ fmt(l.timestamp) }}</span>
         <span class="lv">{{ l.level }}</span>
         <span class="cat">[{{ l.category }}]</span>
         <span class="msg">{{ l.message }}{{ l.exception ? '\n' + l.exception : '' }}</span>
       </div>
-      <div v-if="filtered.length === 0" class="empty">暂无日志</div>
+      <div v-if="filtered.length === 0" class="empty">{{ logs.length ? '没有符合筛选条件的日志' : '暂无日志' }}</div>
     </div>
   </el-card>
 </template>
@@ -36,6 +36,8 @@ const logs = ref([])
 const levelFilter = ref('')
 const keyword = ref('')
 const autoScroll = ref(true)
+// 与聊天记录一致的跟随策略：距底部 48px 内才算在底部，上翻后不再拽底。
+const following = ref(true)
 const connOk = computed(() => realtimeState.connected)
 const boxRef = ref(null)
 let unsubscribe = null
@@ -46,7 +48,7 @@ const clearView = () => { pending = []; logs.value = [] }
 
 const filtered = computed(() => logs.value.filter((l) => {
   if (levelFilter.value && l.level !== levelFilter.value) return false
-  if (keyword.value && !(`${l.message} ${l.category}`).toLowerCase().includes(keyword.value.toLowerCase())) return false
+  if (keyword.value && !(`${l.message} ${l.category} ${l.exception || ''}`).toLowerCase().includes(keyword.value.toLowerCase())) return false
   return true
 }))
 
@@ -89,9 +91,13 @@ onUnmounted(() => {
   clearTimeout(flushTimer)
   pending = []
 })
-watch([filtered, autoScroll], () => {
-  if (autoScroll.value) nextTick(() => { boxRef.value?.scrollTo(0, boxRef.value.scrollHeight) })
-})
+const onScroll = () => {
+  const box = boxRef.value
+  if (box) following.value = box.scrollHeight - box.scrollTop - box.clientHeight < 48
+}
+const scrollToLatest = () => nextTick(() => { boxRef.value?.scrollTo(0, boxRef.value.scrollHeight) })
+watch(filtered, () => { if (autoScroll.value && following.value) scrollToLatest() })
+watch(autoScroll, (on) => { if (on) { following.value = true; scrollToLatest() } })
 </script>
 
 <style scoped>

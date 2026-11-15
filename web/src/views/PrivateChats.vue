@@ -22,12 +22,14 @@
       </el-table-column>
       <el-table-column label="启用" width="90">
         <template #default="{ row }">
-          <el-switch v-model="row.isEnabled" @change="toggle(row)" />
+          <el-switch :model-value="row.isEnabled" :loading="isToggling(row.userId)" :disabled="isToggling(row.userId)"
+            :aria-label="`启用 ${row.nickname || row.userId}`" @change="toggle(row, 'isEnabled')" />
         </template>
       </el-table-column>
       <el-table-column label="管理员" width="90">
         <template #default="{ row }">
-          <el-switch v-model="row.isAdmin" @change="toggle(row)" />
+          <el-switch :model-value="row.isAdmin" :loading="isToggling(row.userId)" :disabled="isToggling(row.userId)"
+            :aria-label="`管理员 ${row.nickname || row.userId}`" @change="toggle(row, 'isAdmin')" />
         </template>
       </el-table-column>
       <el-table-column label="操作" width="90">
@@ -69,6 +71,9 @@ const dialog = ref(false)
 const saving = ref(false)
 const newId = ref('')
 const newAdmin = ref(false)
+// 开关不立即落库：按 userId 记录在途请求，同一行禁止并发，失败保持原值（提示由 API 层弹出）。
+const togglingIds = ref(new Set())
+const isToggling = (userId) => togglingIds.value.has(userId)
 
 const load = async () => {
   loading.value = true
@@ -78,9 +83,22 @@ const load = async () => {
   } finally { loading.value = false }
 }
 
-const toggle = async (row) => {
-  await api.put(`/groups/private-chats/${row.userId}`, { isEnabled: row.isEnabled, isAdmin: row.isAdmin })
-  ElMessage.success('已保存')
+const toggle = async (row, field) => {
+  if (isToggling(row.userId)) return
+  const next = !row[field]
+  togglingIds.value.add(row.userId)
+  try {
+    await api.put(`/groups/private-chats/${row.userId}`, {
+      isEnabled: field === 'isEnabled' ? next : row.isEnabled,
+      isAdmin: field === 'isAdmin' ? next : row.isAdmin
+    })
+    // 请求期间用户可能点「刷新」替换了列表对象：写回当前行，避免落在已脱离列表的旧引用上。
+    const current = list.value.find(item => item.userId === row.userId)
+    if (current) current[field] = next
+    ElMessage.success('已保存')
+  } catch { /* API 层已提示失败，本地保持原值等待重试 */ } finally {
+    togglingIds.value.delete(row.userId)
+  }
 }
 
 const add = async () => {

@@ -30,7 +30,7 @@
       </el-col>
       <el-col :xs="24" :lg="12">
         <el-card shadow="never">
-          <template #header><b>群 Token 排行（Top {{ groups.length }}）</b></template>
+          <template #header><b>群 Token 排行{{ groups.length ? `（Top ${groups.length}）` : '' }}</b></template>
           <el-table :data="groups" size="small" max-height="420">
             <el-table-column label="群" show-overflow-tooltip>
               <template #default="{ row }">{{ row.groupName || row.groupId }}</template>
@@ -45,7 +45,7 @@
     </el-row>
 
     <el-card shadow="never" style="margin-top: 16px">
-      <template #header><b>提问用户 Token 排行（Top {{ users.length }}）</b></template>
+      <template #header><b>提问用户 Token 排行{{ users.length ? `（Top ${users.length}）` : '' }}</b></template>
       <el-table :data="users" size="small">
         <el-table-column prop="userName" label="用户" width="180" />
         <el-table-column prop="userId" label="OpenId" show-overflow-tooltip />

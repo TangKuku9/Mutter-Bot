@@ -21,7 +21,7 @@
             <div><dt>QQ 网关</dt><dd><el-tag :type="botStatus.stale ? 'info' : status.isConnected ? 'success' : 'danger'" size="small" effect="light">{{ botStatus.stale ? '状态待更新' : status.isConnected ? '已连接' : '未连接' }}</el-tag></dd></div>
             <div><dt>上游 AI</dt><dd><el-tag :type="!runtimeLoaded || runtimeStale ? 'info' : runtime.upstream?.degraded ? 'warning' : 'success'" size="small" effect="light">{{ !runtimeLoaded ? '未获取' : runtimeStale ? '状态待更新' : runtime.upstream?.degraded ? '已降级' : '正常' }}</el-tag></dd></div>
             <div><dt>运行时长</dt><dd>{{ status.uptime || '—' }}</dd></div>
-            <div><dt>成功调用 P95</dt><dd>{{ runtimeLoaded && runtime.sampleCount > (runtime.failureCount ?? 0) ? seconds(runtime.p95Ms) : '暂无成功样本' }}</dd></div>
+            <div><dt>成功调用 P95</dt><dd>{{ !runtimeLoaded ? '—' : runtime.sampleCount > (runtime.failureCount ?? 0) ? seconds(runtime.p95Ms) : '暂无成功样本' }}</dd></div>
             <div><dt>机器人昵称</dt><dd>{{ status.botNickname || '—' }}</dd></div>
           </dl>
           <p v-if="runtimeLoaded && runtime.upstream?.degraded" class="health-warning">{{ runtime.upstream.reason || '上游 AI 服务已降级，请查看运行诊断。' }}</p>
@@ -117,6 +117,23 @@ onUnmounted(() => qqRequest.abort())
 .connection-details :deep(.el-collapse-item__wrap) { border-bottom: 0; background: transparent; }
 .connection-details :deep(.el-collapse-item__content) { padding-bottom: 0; }
 @media (max-width: 1200px) { .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* 矮视口与 RuntimePanel 的紧凑排布共用同一断点：统计卡改为单行摘要，为任务表格腾出高度。 */
+@media (max-height: 970px) {
+  .stat-grid { gap: 14px; margin-bottom: 14px; }
+  .stat-card { --el-card-padding: 12px; }
+  .stat-card :deep(.el-card__body) { display: flex; align-items: baseline; gap: 10px; }
+  .stat-label { font-size: 12px; }
+  .stat-label .el-icon { display: none; }
+  .stat-value { margin: 0; font-size: 22px; letter-spacing: -.4px; }
+  .stat-context { display: none; }
+  .stats-footnote { margin: -4px 0 14px; }
+  .service-health { --el-card-padding: 14px; }
+  .service-health :deep(.el-card__header) { padding-top: 10px; padding-bottom: 10px; }
+  .service-status-list > div { padding: 8px 0; }
+  .health-updated { margin-top: 8px; }
+  .connection-details { margin-top: 8px; }
+  .connection-details :deep(.el-collapse-item__header) { height: 40px; }
+}
 @media (max-width: 600px) {
   .stat-grid { gap: 12px; margin-bottom: 16px; }
   .stat-label { font-size: 12px; }

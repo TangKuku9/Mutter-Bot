@@ -45,7 +45,10 @@ const props = defineProps({
   connections: { type: Array, default: () => [] }, connectionId: { type: String, default: '' },
   modelName: { type: String, default: '' }, idPrefix: { type: String, default: 'ai' }, disabled: Boolean,
   // 记忆配置允许手填目录外模型；切换连接时不要把手填值清空。
-  preserveManualModel: Boolean
+  preserveManualModel: Boolean,
+  // 显式选择模型是否写入「最近使用/上次使用」偏好。默认 true 保持现行为；
+  // 预设编辑等场景传 false：选择只更新表单，不污染全局的 recent/last 偏好。
+  rememberRecent: { type: Boolean, default: true }
 })
 const emit = defineEmits(['update:connectionId', 'update:modelName', 'change'])
 const preferences = ref(readModelPreferences())
@@ -67,23 +70,28 @@ const toggleFavorite = modelId => {
   preferences.value = { ...preferences.value, favorites }
   saveModelPreferences(preferences.value)
 }
-const select = (selected, modelId, rememberRecent = true) => {
+// preference 写入模式：'recent' 写 last+recent（显式选模型，默认）；'last' 只更新 last
+// （切换连接自动选中偏好模型，不算「最近使用」）；'none' 完全不写（rememberRecent=false）
+const select = (selected, modelId, preference) => {
   emit('update:connectionId', selected.id)
   emit('update:modelName', modelId)
-  preferences.value = rememberRecent
-    ? rememberModel(preferences.value, selected.id, modelId)
-    : rememberLastModel(preferences.value, selected.id, modelId)
-  saveModelPreferences(preferences.value)
+  const mode = preference ?? (props.rememberRecent ? 'recent' : 'none')
+  if (mode !== 'none') {
+    preferences.value = mode === 'recent'
+      ? rememberModel(preferences.value, selected.id, modelId)
+      : rememberLastModel(preferences.value, selected.id, modelId)
+    saveModelPreferences(preferences.value)
+  }
   emit('change', { connection: selected, model: selected.models.find(model => model.id === modelId) })
 }
 const selectConnection = id => {
   preferences.value = readModelPreferences()
   const selected = props.connections.find(item => item.id === id)
-  // 自动选中偏好模型只更新 last，不算一次「最近使用」
+  // 自动选中偏好模型只更新 last，不算一次「最近使用」；rememberRecent=false 时同样不写偏好
   if (selected) {
     const modelId = props.preserveManualModel && props.modelName
       ? props.modelName : preferredModel(selected, preferences.value)
-    select(selected, modelId, false)
+    select(selected, modelId, props.rememberRecent ? 'last' : 'none')
   }
 }
 const selectModel = id => { if (connection.value) select(connection.value, id) }

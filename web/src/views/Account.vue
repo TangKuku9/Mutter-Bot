@@ -40,13 +40,13 @@
               </template>
             </el-table-column>
             <el-table-column prop="remoteIp" label="来源 IP" width="130" />
-            <el-table-column label="创建时间" width="160">
+            <el-table-column v-if="!narrow" label="创建时间" width="160">
               <template #default="{ row }">{{ fmt(row.createdAt) }}</template>
             </el-table-column>
             <el-table-column label="最后活跃" width="160">
               <template #default="{ row }">{{ fmt(row.lastSeenAt) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="90">
+            <el-table-column label="操作" width="90" fixed="right">
               <template #default="{ row }">
                 <el-button v-if="!row.isCurrent" size="small" type="danger" plain @click="revoke(row)">注销</el-button>
               </template>
@@ -62,6 +62,10 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
+import { useMediaQuery } from '../useMediaQuery'
+
+// 窄屏隐藏创建时间，保留最后活跃、会话身份与固定在右侧的操作列
+const narrow = useMediaQuery('(max-width: 600px)')
 
 const pwd = ref({ current: '', next: '', confirm: '' })
 const saving = ref(false)
@@ -90,6 +94,12 @@ const changePwd = async () => {
 }
 
 const revoke = async (row) => {
+  // 注销会立即让另一端的登录失效：用可聚焦的确认框，避免 popconfirm 对键盘/读屏用户不可达。
+  try {
+    await ElMessageBox.confirm('确定注销该会话？该会话需要重新登录。', '注销会话', {
+      type: 'warning', confirmButtonText: '注销', cancelButtonText: '取消'
+    })
+  } catch { return }
   await api.post('/auth/sessions/revoke', { tokenPrefix: row.tokenPrefix })
   ElMessage.success('会话已注销')
   loadSessions()
