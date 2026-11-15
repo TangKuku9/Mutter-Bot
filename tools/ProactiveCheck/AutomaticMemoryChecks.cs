@@ -436,8 +436,9 @@ internal static partial class RuntimeChecks
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var state = await db.GroupMemoryLearningStates.SingleAsync();
-            Require(state.CallsToday == 3 && state.LastProcessedRowId == source && state.LastOutcome == "skipped_after_failures",
-                "failed requests consume durable quota and poison batch eventually advances");
+            Require(state.CallsToday == 3 && state.LastProcessedRowId < source && state.LastOutcome == "upstream_unavailable"
+                && state.ConsecutiveFailures == 0 && state.TransientFailures == 3 && state.RetryThroughRowId == source,
+                "upstream failures consume durable quota but preserve the original batch instead of skipping it");
             state.CallsToday = 12; await db.SaveChangesAsync();
         }
         await NewMemoryMessageAsync(env); env.Clock.Advance(TimeSpan.FromHours(1)); await learner.RunGroupAsync("GROUP");

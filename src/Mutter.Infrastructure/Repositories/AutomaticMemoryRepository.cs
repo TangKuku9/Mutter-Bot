@@ -113,6 +113,7 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
         state.LastScheduleCheckAt = Now; // 修改定时不回放之前错过的时间。
         state.NextAttemptAt = Now; // 修改连接/模型后允许立即重试，不必等旧退避到期。
         state.ConsecutiveFailures = 0;
+        state.TransientFailures = 0; state.RetryThroughRowId = 0;
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
     }
@@ -122,6 +123,7 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
         state.LastProcessedRowId = await TailAsync(state.GroupId, ct);
         state.LastCompletedAt = state.LastScheduleCheckAt = state.NextAttemptAt = Now;
         state.ConsecutiveFailures = 0;
+        state.TransientFailures = 0; state.RetryThroughRowId = 0;
         state.LastOutcome = "baseline_set";
     }
 
@@ -135,6 +137,7 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
         state.LastCompletedAt = state.LastScheduleCheckAt = state.NextAttemptAt = now;
         state.Revision++;
         state.ConsecutiveFailures = 0;
+        state.TransientFailures = 0; state.RetryThroughRowId = 0;
         state.LastOutcome = "boundary_reset";
     }
 
@@ -246,7 +249,7 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
         AutomaticMemoryConfig Config, List<ChatMessage> Messages, List<GroupMemoryItemEntity> Existing,
         List<string> Reasons, DateTime At, Dictionary<string, string> UserHandles);
 
-    public async Task<Batch?> PrepareAsync(string groupId, bool reserve, CancellationToken ct)
+    public async Task<Batch?> PrepareAsync(string groupId, bool reserve, CancellationToken ct, long? expectedRevision = null)
     {
         var now = Now;
 
@@ -282,6 +285,7 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var state = await db.GroupMemoryLearningStates.SingleOrDefaultAsync(s => s.GroupId == groupId, ct);
         if (state is not { Enabled: true }) return null;
+        if (expectedRevision is { } revision && state.Revision != revision) return null;
         var config = AutomaticMemoryConfig.Decode(state.ConfigJson);
         var group = await db.GroupConfigs.AsNoTracking().SingleOrDefaultAsync(g => g.GroupId == groupId, ct);
         if (!config.Enabled || config.Error() is not null || group is not { IsEnabled: true }) return null;
@@ -297,10 +301,20 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
         if (state.CallsToday >= PerGroupDailyCalls) return null;
         var allowed = db.ChatMessages.AsNoTracking().Where(m => m.ChatType == 0 && m.GroupId == groupId
             && m.Id > state.LastProcessedRowId && !m.IsBotMessage);
+        // 重试固定原批次上界；后来到达的消息不能跟着旧批次的第三次坏输出一起被跳过。
+        if (state.RetryThroughRowId > state.LastProcessedRowId)
+            allowed = allowed.Where(m => m.Id <= state.RetryThroughRowId);
         // MAX/tail 与游标范围查询均使用 (GroupId, Id)；不对生产历史做全表 COUNT。
         var raw = await allowed.OrderBy(m => m.Id).Take(BatchSize).ToListAsync(ct);
         if (raw.Count == 0)
         {
+            if (state.RetryThroughRowId > state.LastProcessedRowId)
+            {
+                state.LastProcessedRowId = state.RetryThroughRowId;
+                state.ConsecutiveFailures = state.TransientFailures = 0; state.RetryThroughRowId = 0;
+                state.LastOutcome = "skipped_noise_or_old"; state.Revision++;
+                await db.SaveChangesAsync(ct);
+            }
             if (config.ScheduleEnabled && config.Schedules.Any(s => s.NextAfter(state.LastScheduleCheckAt) is { } next && next <= now))
             {
                 state.LastScheduleCheckAt = now;
@@ -314,7 +328,8 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
         if (config.CountEnabled && count >= config.Count) reasons.Add("新增记录");
         if (config.IntervalEnabled && now - state.LastCompletedAt >= TimeSpan.FromMinutes(config.IntervalMinutes)) reasons.Add("时间间隔");
         if (config.ScheduleEnabled && config.Schedules.Any(s => s.NextAfter(state.LastScheduleCheckAt) is { } next && next <= now)) reasons.Add("定时任务");
-        if (state.ConsecutiveFailures > 0) reasons.Add("失败后重试");
+        if (state.ConsecutiveFailures > 0 || state.TransientFailures > 0 || state.RetryThroughRowId > state.LastProcessedRowId)
+            reasons.Add("失败后重试");
         if (reasons.Count == 0) return null;
 
         // 输入预算按所选总结模型自身窗口计算；本地就能判定的超限不进入 3 次失败重试。
@@ -355,6 +370,7 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
         if (messages.Count == 0)
         {
             state.LastProcessedRowId = through; state.Revision++; state.LastOutcome = "skipped_noise_or_old";
+            state.ConsecutiveFailures = state.TransientFailures = 0; state.RetryThroughRowId = 0;
             await db.SaveChangesAsync(ct); await tx.CommitAsync(ct); return null;
         }
         if (reserve)
@@ -511,23 +527,40 @@ public sealed class AutomaticMemoryRepository(AppDbContext db, TimeProvider cloc
                 db.GroupMemoryItems.Remove(item);
             state.LastProcessedRowId = batch.Through; state.LastCompletedAt = now;
             state.ConsecutiveFailures = 0; state.NextAttemptAt = now;
+            state.TransientFailures = 0; state.RetryThroughRowId = 0;
         }
         else if (outcome is "input_too_large" or "connection_missing")
         {
             // 本地可判定的失败重试也不会变；退款、不占 3 次坏批次额度，也不推进游标。
             if (state.QuotaDay == Day(now) && state.CallsToday > 0) state.CallsToday--;
             state.ConsecutiveFailures = 0;
+            state.TransientFailures = 0;
             state.NextAttemptAt = now.AddHours(outcome == "connection_missing" ? 1 : 6);
         }
-        else
+        else if (outcome is "invalid_json" or "truncated")
         {
+            state.TransientFailures = 0; state.RetryThroughRowId = batch.Through;
             state.ConsecutiveFailures++;
             state.NextAttemptAt = now.AddMinutes(Math.Min(60, state.ConsecutiveFailures * 5));
             if (state.ConsecutiveFailures >= 3)
             {
                 state.LastProcessedRowId = batch.Through; state.ConsecutiveFailures = 0;
+                state.RetryThroughRowId = 0;
                 state.LastCompletedAt = now; outcome = "skipped_after_failures";
             }
+        }
+        else if (outcome == "request_rejected")
+        {
+            // 鉴权/模型/参数被拒绝不会因换一批聊天而修复；保留消息，等管理员改配或稍后重试。
+            state.ConsecutiveFailures = state.TransientFailures = 0; state.RetryThroughRowId = batch.Through;
+            state.NextAttemptAt = now.AddHours(1);
+        }
+        else
+        {
+            // 超时、限流、网络及上游故障只能证明本次没完成，不能证明输入是一批坏消息。
+            state.ConsecutiveFailures = 0; state.RetryThroughRowId = batch.Through;
+            state.TransientFailures = Math.Min(5, state.TransientFailures + 1);
+            state.NextAttemptAt = now.AddMinutes(Math.Min(60, 5 * (1 << (state.TransientFailures - 1))));
         }
         state.Revision++; state.LastOutcome = outcome;
         var runs = Read(state.RecentRunsJson, new List<Run>());

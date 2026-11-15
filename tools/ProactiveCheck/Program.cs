@@ -31,10 +31,14 @@ using Mutter.Web.Services;
 // 用法：
 //   dotnet run --project tools/ProactiveCheck -- [源库路径]
 //   dotnet run --project tools/ProactiveCheck -- --logic-only
+//   dotnet run --project tools/ProactiveCheck -- --memory-production-sim
+//   dotnet run --project tools/ProactiveCheck -- --memory-production-sim --scenarios-only
 // --logic-only 跑第 1~3 段及合成临时库运行时回归，供 CI 使用（第 4~6 段需要源库副本）。
 var logicOnly = args.Contains("--logic-only");
 if (args.Contains("--connections-only")) return await AiConnectionChecks.RunAsync() ? 0 : 1;
 if (args.Contains("--runtime-only")) return await RuntimeChecks.RunAsync() ? 0 : 1;
+if (args.Contains("--memory-only")) return await RuntimeChecks.RunAsync(memoryOnly: true) ? 0 : 1;
+if (args.Contains("--memory-production-sim")) return await RuntimeChecks.RunMemoryProductionSimulationAsync(args.Contains("--scenarios-only")) ? 0 : 1;
 var sourceDb = args.FirstOrDefault(a => !a.StartsWith("--")) ?? "mutter-bot.db";
 if (!logicOnly && !File.Exists(sourceDb))
 {
