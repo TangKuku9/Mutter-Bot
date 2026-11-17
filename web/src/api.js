@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
-const api = axios.create({ baseURL: '/api', timeout: 30000 })
+const api = axios.create({ baseURL: '/api', timeout: 30000, headers: { 'X-Mutter-Request': '1' } })
 
 // 401 → 会话过期，跳回登录页（携带当前路径便于登录后返回）
 api.interceptors.response.use(

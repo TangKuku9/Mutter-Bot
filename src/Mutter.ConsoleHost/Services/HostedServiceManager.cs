@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Mutter.ConsoleHost.Logging;
@@ -56,7 +57,8 @@ public sealed class HostedServiceManager
         {
             ContentRootPath = AppContext.BaseDirectory
         });
-        builder.WebHost.UseUrls("http://0.0.0.0:5188");
+        if (string.IsNullOrEmpty(builder.Configuration["urls"]) && !builder.Configuration.GetSection("Kestrel:Endpoints").Exists())
+            builder.WebHost.UseUrls("http://127.0.0.1:5188");
 
         // 实时日志总线
         _liveLogBus = new LiveLogBus();
@@ -71,18 +73,9 @@ public sealed class HostedServiceManager
         builder.Services.AddInfrastructureServices();
         builder.Services.AddMutterWeb();
 
-        // 管理面板会话存储（与 Mutter.Web/Program.cs 保持一致）
-        builder.Services.AddSingleton(new PanelSessionStore(TimeSpan.FromMinutes(120)));
-        builder.Services.AddSingleton<PanelLoginGuard>();
-
         _webApp = builder.Build();
         _updateApplier = _webApp.Services.GetService<UpdateApplier>();
-        _webApp.UseMiddleware<ApiAuthMiddleware>();
-        _webApp.UseCors();
-        _webApp.UseDefaultFiles();
-        _webApp.UseStaticFiles();
-        _webApp.MapControllers();
-        _webApp.MapHub<BotStatusHub>("/hub/botstatus");
+        _webApp.UseMutterWeb();
 
         using (var scope = _webApp.Services.CreateScope())
         {
@@ -92,7 +85,7 @@ public sealed class HostedServiceManager
         }
 
         await _webApp.StartAsync();
-        Console.WriteLine("[Host] Web host started on http://0.0.0.0:5188");
+        Console.WriteLine($"[Host] Web host started on {string.Join(", ", _webApp.Urls)}");
     }
 
     public async Task StopAllAsync()

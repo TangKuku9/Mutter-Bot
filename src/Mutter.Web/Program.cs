@@ -14,14 +14,8 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddCoreServices();
 builder.Services.AddInfrastructureServices();
 
-// 注册 Web 层服务（Controllers、SignalR、CORS）
+// 注册 Web 层与统一面板安全策略
 builder.Services.AddMutterWeb();
-
-// 注册管理面板会话存储（内存单例）
-var sessionTimeout = TimeSpan.FromMinutes(
-    builder.Configuration.GetValue("PanelAuth:SessionTimeoutMinutes", 120));
-builder.Services.AddSingleton(new PanelSessionStore(sessionTimeout));
-builder.Services.AddSingleton<PanelLoginGuard>();
 
 var app = builder.Build();
 
@@ -34,12 +28,9 @@ using (var scope = app.Services.CreateScope())
 }
 
 // 配置中间件管道
-app.UseMiddleware<ApiAuthMiddleware>();
-app.UseCors();
-app.UseDefaultFiles();
-app.UseStaticFiles();
-app.MapControllers();
-app.MapHub<Mutter.Web.Hubs.BotStatusHub>("/hub/botstatus");
+app.UseMutterWeb();
 
-// 监听 0.0.0.0:5188（支持 LAN 访问）
-await app.RunAsync("http://0.0.0.0:5188");
+// 尊重部署配置中的监听地址与 HTTPS 端点。
+if (string.IsNullOrEmpty(builder.Configuration["urls"]) && !builder.Configuration.GetSection("Kestrel:Endpoints").Exists())
+    app.Urls.Add("http://127.0.0.1:5188");
+await app.RunAsync();

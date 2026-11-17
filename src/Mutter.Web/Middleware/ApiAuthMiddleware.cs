@@ -1,7 +1,5 @@
-using System.Security.Cryptography;
-using System.Text;
 using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.Authorization;
 using Mutter.Web.Services;
 
 namespace Mutter.Web.Middleware;
@@ -13,32 +11,34 @@ namespace Mutter.Web.Middleware;
 /// </summary>
 public class ApiAuthMiddleware
 {
-    private const string SessionCookieName = "mutter_panel_session";
-
     private readonly RequestDelegate _next;
-    private readonly IConfiguration _config;
-    private readonly PanelSessionStore _sessions;
 
-    public ApiAuthMiddleware(RequestDelegate next, IConfiguration config, PanelSessionStore sessions)
+    public ApiAuthMiddleware(RequestDelegate next)
     {
         _next = next;
-        _config = config;
-        _sessions = sessions;
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
-        var path = context.Request.Path.Value?.ToLower() ?? "";
+        var path = context.Request.Path.Value?.ToLowerInvariant() ?? "";
+        // 所有浏览器写操作（含登录/退出/首次改密）都必须有自定义头；同源检查在前置中间件完成。
+        // 标准表单无法添加这个头，跨站脚本添加它会触发不被允许的 CORS 预检。
+        if (PanelRequestSecurity.IsApi(context.Request.Path) && !PanelRequestSecurity.IsSafeMethod(context.Request.Method)
+            && !context.User.HasClaim(PanelAuthenticationHandler.MethodClaim, "bearer")
+            && context.Request.Headers[PanelRequestSecurity.RequestHeader] != "1")
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { error = "缺少管理面板请求校验头" });
+            return;
+        }
 
         // 公开路径：登录页、登录/登出/状态接口、改密接口（无会话的初始密码首改）、品牌与站点图标。
         // 登录页在未登录时就要加载 logo，浏览器也会在没有会话时请求 favicon，因此这些公开静态资源
         // 必须放行；其余 wwwroot 资源仍走登录保护。
         var isPublicPath =
             path == "/login.html" ||
-            path == "/api/auth/login" ||
-            path == "/api/auth/logout" ||
-            path == "/api/auth/status" ||
-            path == "/api/auth/change-password" ||
+            path == "/login.js" ||
+            path == "/login-theme.js" ||
             path == "/logo-mark.svg" ||
             path == "/logo-mark-mono-white.svg" ||
             path == "/logo-lockup.svg" ||
@@ -50,35 +50,20 @@ public class ApiAuthMiddleware
             path == "/favicon-32.png" ||
             path == "/apple-touch-icon.png";
 
-        if (isPublicPath)
+        if (isPublicPath || context.GetEndpoint()?.Metadata.GetMetadata<IAllowAnonymous>() is not null)
         {
             await _next(context);
             return;
         }
 
-        // 1) 会话 Cookie 认证（浏览器）
-        var sessionToken = context.Request.Cookies[SessionCookieName];
-        var sessionValid = _sessions.IsValid(sessionToken);
-
-        // 2) Bearer Token 认证（非浏览器客户端，向后兼容）
-        var bearerValid = false;
-        var bearerToken = _config["ApiAuth:Token"];
-        if (!string.IsNullOrEmpty(bearerToken))
-        {
-            var authHeader = context.Request.Headers.Authorization.FirstOrDefault() ?? string.Empty;
-            bearerValid = CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(authHeader),
-                Encoding.UTF8.GetBytes($"Bearer {bearerToken}"));
-        }
-
-        if (sessionValid || bearerValid)
+        if (context.User.Identity?.IsAuthenticated == true)
         {
             await _next(context);
             return;
         }
 
         // 未认证：API/Hub 返回 401，其它（页面/静态资源）重定向到登录页
-        var isApiOrHub = path.StartsWith("/api/") || path.StartsWith("/hub/");
+        var isApiOrHub = PanelRequestSecurity.IsApi(context.Request.Path) || PanelRequestSecurity.IsHub(context.Request.Path);
         if (isApiOrHub)
         {
             context.Response.StatusCode = 401;

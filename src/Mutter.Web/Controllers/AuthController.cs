@@ -1,5 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Mutter.Web.Services;
@@ -11,34 +14,43 @@ namespace Mutter.Web.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/auth")]
+[RequestSizeLimit(16 * 1024)]
 public class AuthController : ControllerBase
 {
-    private const string SessionCookieName = "mutter_panel_session";
+    private string SessionCookieName => PanelRequestSecurity.CookieName(Request);
 
     private readonly IConfiguration _config;
     private readonly PanelSessionStore _sessions;
     private readonly PanelLoginGuard _loginGuard;
     private readonly PanelPasswordStore _passwords;
+    private readonly PanelBootstrapStore _bootstrap;
+    private readonly ILogger<AuthController> _logger;
 
-    public AuthController(IConfiguration config, PanelSessionStore sessions, PanelLoginGuard loginGuard, PanelPasswordStore passwords)
+    public AuthController(IConfiguration config, PanelSessionStore sessions, PanelLoginGuard loginGuard,
+        PanelPasswordStore passwords, PanelBootstrapStore bootstrap, ILogger<AuthController> logger)
     {
         _config = config;
         _sessions = sessions;
         _loginGuard = loginGuard;
         _passwords = passwords;
+        _bootstrap = bootstrap;
+        _logger = logger;
     }
 
     public class LoginRequest
     {
-        public string Username { get; set; } = "";
+        [StringLength(64)] public string Username { get; set; } = "";
+        [StringLength(PanelRequestSecurity.MaximumPasswordLength)]
         public string Password { get; set; } = "";
     }
 
     public class ChangePasswordRequest
     {
-        public string CurrentPassword { get; set; } = "";
+        [StringLength(PanelRequestSecurity.MaximumPasswordLength)] public string CurrentPassword { get; set; } = "";
+        [StringLength(PanelRequestSecurity.MaximumPasswordLength, MinimumLength = PanelRequestSecurity.MinimumPasswordLength)]
         public string NewPassword { get; set; } = "";
-        public string ConfirmPassword { get; set; } = "";
+        [StringLength(PanelRequestSecurity.MaximumPasswordLength)] public string ConfirmPassword { get; set; } = "";
+        [StringLength(32)] public string BootstrapToken { get; set; } = "";
     }
 
     public class RevokeSessionRequest
@@ -46,66 +58,77 @@ public class AuthController : ControllerBase
         public string TokenPrefix { get; set; } = "";
     }
 
-    /// <summary>随安装包发布的已知初始口令；命中任意一个即视为未初始化，强制先改密。</summary>
-    private static readonly string[] DefaultPasswords = ["CHANGE_ME_STRONG_PASSWORD", "admin"];
-
-    private static bool IsUsingDefaultPassword(string? stored) =>
-        DefaultPasswords.Any(p =>
-            string.Equals(stored, p, StringComparison.Ordinal) ||
-            PanelPasswordHasher.Verify(stored, p));
-
     /// <summary>登录，校验账号密码后下发会话 Cookie。</summary>
     [HttpPost("login")]
+    [AllowAnonymous]
     public IActionResult Login([FromBody] LoginRequest req)
     {
+        // 无效表单不应占用全局哈希预算，否则空请求就能耗尽合法登录名额。
+        if (string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
+            return BadRequest(new { error = "请输入账号和密码" });
         var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 
-        // 登录失败限流：锁定期间直接拒绝
-        var locked = _loginGuard.GetLockedRemaining(ip);
-        if (locked is not null)
-            return Unauthorized(new { error = $"失败次数过多，请 {(int)locked.Value.TotalMinutes +1} 分钟后再试" });
+        if (!_loginGuard.TryBeginAttempt(ip, out var attempt, out var retry)) return TooManyAttempts(retry);
+        using var lease = attempt;
 
         var expectedUser = _config["PanelAuth:Username"];
         var storedPass = _config["PanelAuth:Password"];
         if (string.IsNullOrWhiteSpace(expectedUser) || string.IsNullOrWhiteSpace(storedPass))
             return StatusCode(500, new { error = "面板账号未配置，请检查 appsettings.json 的 PanelAuth 配置" });
 
-        if (string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
-            return BadRequest(new { error = "请输入账号和密码" });
-
-        if (!string.Equals(req.Username, expectedUser, StringComparison.Ordinal) ||
-            !PanelPasswordHasher.Verify(storedPass, req.Password))
+        var passwordValid = PanelPasswordHasher.Verify(storedPass, req.Password);
+        if (!string.Equals(req.Username, expectedUser, StringComparison.Ordinal) || !passwordValid)
         {
             _loginGuard.RecordFailure(ip);
             return Unauthorized(new { error = "账号或密码错误" });
         }
 
-        _loginGuard.RecordSuccess(ip);
-
         // 初始密码未修改：不下发会话，必须先走强制改密流程
-        if (IsUsingDefaultPassword(storedPass))
+        if (PanelRequestSecurity.DefaultPasswords.Contains(req.Password, StringComparer.Ordinal))
+        {
+            if (!PanelRequestSecurity.IsDirectLocalRequest(HttpContext))
+            {
+                _loginGuard.RecordFailure(ip);
+                return Unauthorized(new { error = "账号或密码错误" });
+            }
             return StatusCode(StatusCodes.Status403Forbidden, new
             {
                 mustChangePassword = true,
                 error = "当前密码为初始默认密码，请先修改密码后再登录"
             });
+        }
+        if (req.Password.Length < PanelRequestSecurity.MinimumPasswordLength)
+        {
+            if (!PanelRequestSecurity.IsDirectLocalRequest(HttpContext))
+            {
+                _loginGuard.RecordFailure(ip);
+                return Unauthorized(new { error = "账号或密码错误" });
+            }
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                mustChangePassword = true,
+                error = "旧口令需要更新，请通过本机维护入口和初始化码设置新密码"
+            });
+        }
 
         // 明文或旧格式哈希在登录成功后透明升级到新格式
         if (!PanelPasswordHasher.IsHashed(storedPass) || PanelPasswordHasher.NeedsRehash(storedPass))
         {
             try { _passwords.Save(PanelPasswordHasher.Hash(req.Password)); }
-            catch { /* 写文件失败不阻塞登录，下次再试 */ }
+            catch (Exception ex) { _logger.LogWarning(ex, "面板旧口令哈希升级未能保存"); }
         }
 
+        _loginGuard.RecordSuccess(ip);
+        _sessions.SynchronizeCredentials(expectedUser, _config["PanelAuth:Password"] ?? "", _config["ApiAuth:Token"] ?? "");
         var token = _sessions.CreateSession(ip);
-        var timeoutMinutes = _config.GetValue("PanelAuth:SessionTimeoutMinutes", 120);
+        var timeoutMinutes = Math.Clamp(_config.GetValue("PanelAuth:SessionTimeoutMinutes", 120), 5, 720);
 
         Response.Cookies.Append(SessionCookieName, token, new CookieOptions
         {
             HttpOnly = true,
             IsEssential = true,
-            SameSite = SameSiteMode.Lax,
-            Secure = _config.GetValue("PanelAuth:RequireSecureCookie", false),
+            SameSite = SameSiteMode.Strict,
+            Secure = Request.IsHttps || _config.GetValue("PanelAuth:RequireSecureCookie", false),
             Path = "/",
             Expires = DateTimeOffset.UtcNow.AddMinutes(timeoutMinutes)
         });
@@ -115,16 +138,18 @@ public class AuthController : ControllerBase
 
     /// <summary>注销当前会话。</summary>
     [HttpPost("logout")]
+    [AllowAnonymous]
     public IActionResult Logout()
     {
         var token = Request.Cookies[SessionCookieName];
         _sessions.Remove(token);
-        Response.Cookies.Delete(SessionCookieName, new CookieOptions { Path = "/" });
+        Response.Cookies.Delete(SessionCookieName, new CookieOptions { Path = "/", Secure = Request.IsHttps, HttpOnly = true, SameSite = SameSiteMode.Strict });
         return Ok();
     }
 
     /// <summary>查询当前会话状态。</summary>
     [HttpGet("status")]
+    [AllowAnonymous]
     public IActionResult Status()
     {
         var token = Request.Cookies[SessionCookieName];
@@ -135,8 +160,9 @@ public class AuthController : ControllerBase
         return Ok(new { authenticated = false });
     }
 
-    /// <summary>修改密码：校验后写回实际密码配置文件（哈希存储），并清除会话。初始密码允许无会话首改。</summary>
+    /// <summary>修改密码并撤销会话；仅直接本机连接允许持已知初始口令进行无会话初始化。</summary>
     [HttpPost("change-password")]
+    [AllowAnonymous]
     public IActionResult ChangePassword([FromBody] ChangePasswordRequest req)
     {
         var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
@@ -147,35 +173,29 @@ public class AuthController : ControllerBase
         if (string.IsNullOrWhiteSpace(storedPass))
             return StatusCode(500, new { error = "面板账号未配置，请检查 appsettings.json 的 PanelAuth 配置" });
 
-        // 无会话只放行「初始密码首改」；该路径同样受登录失败限流保护
-        if (!hasSession)
-        {
-            if (!IsUsingDefaultPassword(storedPass))
-                return Unauthorized(new { error = "会话已过期，请重新登录" });
-
-            var locked = _loginGuard.GetLockedRemaining(ip);
-            if (locked is not null)
-                return Unauthorized(new { error = $"失败次数过多，请 {(int)locked.Value.TotalMinutes +1} 分钟后再试" });
-        }
+        if (!hasSession && (!PanelRequestSecurity.IsDirectLocalRequest(HttpContext)
+            || !_bootstrap.TryValidate(req.BootstrapToken)))
+            return Unauthorized(new { error = "请先登录；首次设置请通过本机或 SSH 端口转发，填写服务器维护目录中的初始化码" });
+        if (!_loginGuard.TryBeginAttempt(ip, out var attempt, out var retry)) return TooManyAttempts(retry);
+        using var lease = attempt;
 
         // 校验当前密码
         if (!PanelPasswordHasher.Verify(storedPass, req.CurrentPassword))
         {
-            if (!hasSession)
-                _loginGuard.RecordFailure(ip);
+            _loginGuard.RecordFailure(ip);
             return BadRequest(new { error = "当前密码错误" });
         }
 
-        if (string.IsNullOrWhiteSpace(req.NewPassword) || req.NewPassword.Length < 8)
-            return BadRequest(new { error = "新密码至少 8 位" });
+        if (string.IsNullOrWhiteSpace(req.NewPassword) || req.NewPassword.Length is < PanelRequestSecurity.MinimumPasswordLength or > PanelRequestSecurity.MaximumPasswordLength)
+            return BadRequest(new { error = "新密码须为 15 至 128 位，建议使用随机口令或长口令短语" });
 
         if (req.NewPassword != req.ConfirmPassword)
             return BadRequest(new { error = "两次输入的新密码不一致" });
 
-        if (PanelPasswordHasher.Verify(storedPass, req.NewPassword))
+        if (string.Equals(req.CurrentPassword, req.NewPassword, StringComparison.Ordinal))
             return BadRequest(new { error = "新密码不能与当前密码相同" });
 
-        if (DefaultPasswords.Contains(req.NewPassword, StringComparer.Ordinal))
+        if (PanelRequestSecurity.DefaultPasswords.Contains(req.NewPassword, StringComparer.Ordinal))
             return BadRequest(new { error = "新密码不能使用初始默认密码" });
 
         // 更新 appsettings.json（哈希格式）
@@ -185,12 +205,17 @@ public class AuthController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { error = $"写入配置失败：{ex.Message}" });
+            _logger.LogError(ex, "面板密码保存失败");
+            return StatusCode(500, new { error = "密码保存失败，请检查服务器配置与日志" });
         }
 
-        // 清除所有会话，强制重新登录
+        // 清除所有会话，强制重新登录。若令牌文件暂时不可写，口令仍已安全更换，
+        // 不再接受默认口令登录；重启即可重新生成本机维护码。
+        try { _bootstrap.Consume(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "初始化码文件未能删除"); }
         _sessions.ClearAll();
-        Response.Cookies.Delete(SessionCookieName, new CookieOptions { Path = "/" });
+        _loginGuard.RecordSuccess(ip);
+        Response.Cookies.Delete(SessionCookieName, new CookieOptions { Path = "/", Secure = Request.IsHttps, HttpOnly = true, SameSite = SameSiteMode.Strict });
 
         return Ok(new { message = hasSession ? "密码修改成功，请重新登录" : "初始密码修改成功，请使用新密码登录" });
     }
@@ -228,6 +253,11 @@ public class AuthController : ControllerBase
         return removed ? Ok(new { message = "会话已注销" }) : NotFound(new { error = "会话不存在或已过期" });
     }
 
+    private ObjectResult TooManyAttempts(TimeSpan retry)
+    {
+        Response.Headers.RetryAfter = Math.Max(1, (int)Math.Ceiling(retry.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
+        return StatusCode(StatusCodes.Status429TooManyRequests, new { error = "认证请求过于频繁，请稍后重试" });
+    }
 }
 
 /// <summary>
@@ -286,6 +316,7 @@ public static class PanelPasswordHasher
 
             var salt = Convert.FromBase64String(saltPart);
             var expected = Convert.FromHexString(hashPart);
+            if (salt.Length is < 8 or > 64 || expected.Length != 32) return false;
             var actual = Derive(password, salt, iterations);
             return CryptographicOperations.FixedTimeEquals(expected, actual);
         }
@@ -301,7 +332,6 @@ public static class PanelPasswordHasher
 
     private static byte[] Derive(string password, byte[] salt, int iterations)
     {
-        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256);
-        return pbkdf2.GetBytes(32);
+        return Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, 32);
     }
 }

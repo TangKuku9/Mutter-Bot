@@ -8,7 +8,7 @@ using Mutter.Web.Models;
 
 namespace Mutter.Web.Services;
 
-/// <summary>分页、查找和精确的投递关联都在数据库端完成；历史数据保持原样。</summary>
+/// <summary>按稳定快照读取索引候选，只为当前页加载正文和精确的投递关联。</summary>
 public sealed class ChatTimelineReader(AppDbContext db)
 {
     public static readonly string[] Sources = ["", "observe", "at", "bot", "proactive", "decision"];
@@ -29,13 +29,15 @@ public sealed class ChatTimelineReader(AppDbContext db)
     public async Task<ChatTimelinePageDto> ReadAsync(string? groupId, string? source, string? search,
         int page, int pageSize, string? snapshot, CancellationToken ct = default)
     {
+        pageSize = Math.Clamp(pageSize, 1, 100);
         var (messageCap, decisionCap) = await ResolveCapsAsync(snapshot, ct);
-        var timeline = BuildTimeline(groupId, source, search, messageCap, decisionCap);
-        var total = await timeline.CountAsync(ct);
+        var (messages, logs) = BuildSources(groupId, source, search, messageCap, decisionCap);
+        var total = await CountSourcesAsync(messages, logs, source, ct);
         var maxPage = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
         page = Math.Clamp(page, 1, maxPage);
-        var keys = await timeline.OrderByDescending(k => k.Time).ThenByDescending(k => k.Kind).ThenByDescending(k => k.Id)
-            .Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        var take = (int)Math.Min((long)page * pageSize, int.MaxValue);
+        var candidates = await ReadKeysAsync(messages, logs, source, take, ct);
+        var keys = candidates.Skip((page - 1) * pageSize).ToList();
         var items = await MaterializeAsync(keys, decisionCap, ct);
         return new ChatTimelinePageDto
         {
@@ -50,7 +52,7 @@ public sealed class ChatTimelineReader(AppDbContext db)
 
     /// <summary>
     /// 轻量首屏：只取最新一页，不扫描全量统计总数。多取一条仅用于判断是否还有更早记录。
-    /// 消息、留痕、去重和排序仍与精确分页共用同一套查询。
+    /// 两类记录分别沿时间索引取至多一页候选，再在内存合并，避免对整群 UNION 排序。
     /// </summary>
     public async Task<ChatTimelinePageDto> ReadLatestAsync(string? groupId, string? source, int pageSize,
         CancellationToken ct = default)
@@ -58,9 +60,8 @@ public sealed class ChatTimelineReader(AppDbContext db)
         // 控制器之外也可能直接调用；自行钳制，避免 pageSize<=0 返回空页还带 hasMore。
         pageSize = Math.Clamp(pageSize, 1, 100);
         var (messageCap, decisionCap) = await ResolveCapsAsync(null, ct);
-        var timeline = BuildTimeline(groupId, source, null, messageCap, decisionCap);
-        var keys = await timeline.OrderByDescending(k => k.Time).ThenByDescending(k => k.Kind).ThenByDescending(k => k.Id)
-            .Take(pageSize + 1).ToListAsync(ct);
+        var (messages, logs) = BuildSources(groupId, source, null, messageCap, decisionCap);
+        var keys = await ReadKeysAsync(messages, logs, source, pageSize + 1, ct);
         var hasMore = keys.Count > pageSize;
         if (hasMore) keys.RemoveRange(pageSize, keys.Count - pageSize);
         var items = await MaterializeAsync(keys, decisionCap, ct);
@@ -75,17 +76,47 @@ public sealed class ChatTimelineReader(AppDbContext db)
         };
     }
 
+    private static async Task<List<TimelineKey>> ReadKeysAsync(IQueryable<ChatMessage> messages,
+        IQueryable<ProactiveChatLogEntity> logs, string? source, int take, CancellationToken ct)
+    {
+        // 同一来源的 Kind 恒定，不把它放进 SQL ORDER BY：SQLite 会因此对整个时间范围补排序。
+        // 合并后的前 N 条必定包含于各来源的前 N 条，首屏候选数最多 2*(pageSize+1)。
+        var messageKeys = source == "decision" ? [] : await messages
+            .OrderByDescending(m => m.CreatedAt).ThenByDescending(m => m.Id).Take(take)
+            .Select(m => new TimelineKey { Kind = 0, Id = m.Id, Time = m.CreatedAt }).ToListAsync(ct);
+        if (messageKeys.Count == take)
+        {
+            // 消息已足够填满候选集，更早的决策不可能进入本页。先截时间范围再去重，
+            // 避免大量已关联的旧决策为了凑满 Take 而回扫整段历史；同刻决策仍须保留。
+            var oldestCandidate = messageKeys[^1].Time;
+            logs = logs.Where(l => l.EvaluatedAt >= oldestCandidate);
+        }
+        var logKeys = !string.IsNullOrEmpty(source) && source != "decision" ? [] : await logs
+            .OrderByDescending(l => l.EvaluatedAt).ThenByDescending(l => l.Id).Take(take)
+            .Select(l => new TimelineKey { Kind = 1, Id = l.Id, Time = l.EvaluatedAt }).ToListAsync(ct);
+        return messageKeys.Concat(logKeys).OrderByDescending(k => k.Time)
+            .ThenByDescending(k => k.Kind).ThenByDescending(k => k.Id).Take(take).ToList();
+    }
+
     /// <summary>在消息已经显示后独立统计精确总数，不阻塞切换。</summary>
     public async Task<ChatTimelineCountDto> CountAsync(string? groupId, string? source, string? search,
         string? snapshot, CancellationToken ct = default)
     {
         var (messageCap, decisionCap) = await ResolveCapsAsync(snapshot, ct);
-        var timeline = BuildTimeline(groupId, source, search, messageCap, decisionCap);
+        var (messages, logs) = BuildSources(groupId, source, search, messageCap, decisionCap);
         return new ChatTimelineCountDto
         {
-            TotalCount = await timeline.CountAsync(ct),
+            TotalCount = await CountSourcesAsync(messages, logs, source, ct),
             Snapshot = FormatSnapshot(messageCap, decisionCap)
         };
+    }
+
+    private static async Task<int> CountSourcesAsync(IQueryable<ChatMessage> messages,
+        IQueryable<ProactiveChatLogEntity> logs, string? source, CancellationToken ct)
+    {
+        var messageCount = source == "decision" ? 0 : await messages.CountAsync(ct);
+        var logCount = !string.IsNullOrEmpty(source) && source != "decision" ? 0 : await logs.CountAsync(ct);
+        return checked(messageCount + logCount);
     }
 
     private async Task<(long MessageCap, long DecisionCap)> ResolveCapsAsync(string? snapshot, CancellationToken ct)
@@ -98,8 +129,8 @@ public sealed class ChatTimelineReader(AppDbContext db)
         return (messageCap, decisionCap);
     }
 
-    private IQueryable<TimelineKey> BuildTimeline(string? groupId, string? source, string? search,
-        long messageCap, long decisionCap)
+    private (IQueryable<ChatMessage> Messages, IQueryable<ProactiveChatLogEntity> Logs) BuildSources(
+        string? groupId, string? source, string? search, long messageCap, long decisionCap)
     {
         var messages = db.ChatMessages.AsNoTracking().Where(m => m.Id <= messageCap);
         var logs = db.ProactiveChatLogs.AsNoTracking().Where(l => l.Id <= decisionCap);
@@ -141,17 +172,19 @@ public sealed class ChatTimelineReader(AppDbContext db)
                     && r.IsProactive && r.State == DeliveryStates.Sent
                     && messages.Any(m => m.IsBotMessage && m.IsProactive && m.MessageId != ""
                         && m.GroupId == l.GroupId && m.MessageId == r.Id))));
-        var timeline = messages.Select(m => new TimelineKey { Kind = 0, Id = m.Id, Time = m.CreatedAt })
-            .Concat(logs.Select(l => new TimelineKey { Kind = 1, Id = l.Id, Time = l.EvaluatedAt }));
-        return timeline;
+        return (messages, logs);
     }
 
     private async Task<List<ChatTimelineItemDto>> MaterializeAsync(List<TimelineKey> keys, long decisionCap,
         CancellationToken ct)
     {
+        if (keys.Count == 0) return [];
         var messageIds = keys.Where(k => k.Kind == 0).Select(k => k.Id).ToArray();
         var logIds = keys.Where(k => k.Kind == 1).Select(k => k.Id).ToArray();
-        var rows = await db.ChatMessages.AsNoTracking().Where(m => messageIds.Contains(m.Id)).ToDictionaryAsync(m => m.Id, ct);
+        // 列表只投影可见字段；不读取 RawSegmentsJson、token 记账及决策窗口等大字段。
+        var rows = await db.ChatMessages.AsNoTracking().Where(m => messageIds.Contains(m.Id))
+            .Select(m => new { m.Id, m.CreatedAt, m.ChatType, m.GroupId, m.UserId, m.UserName, m.PlainText,
+                m.HasImage, m.HasAtBot, m.IsBotMessage, m.IsProactive }).ToDictionaryAsync(m => m.Id, ct);
         var events = await db.ProactiveChatLogs.AsNoTracking().Where(l => logIds.Contains(l.Id))
             .Select(l => new { l.Id, l.GroupId, l.EvaluatedAt, l.Outcome, l.Topic, l.Reason, l.Detail }).ToDictionaryAsync(l => l.Id, ct);
         var groupIds = rows.Values.Select(m => m.GroupId).Concat(events.Values.Select(l => l.GroupId))
@@ -160,9 +193,10 @@ public sealed class ChatTimelineReader(AppDbContext db)
             ? new Dictionary<string, string?>()
             : await db.KnownGroups.AsNoTracking().Where(g => groupIds.Contains(g.GroupOpenId))
                 .ToDictionaryAsync(g => g.GroupOpenId, g => g.Name, ct);
-        var links = messageIds.Length == 0
+        var proactiveIds = rows.Values.Where(m => m.IsBotMessage && m.IsProactive).Select(m => m.Id).ToArray();
+        var links = proactiveIds.Length == 0
             ? new List<DecisionLink>()
-            : await Links(messageIds, decisionCap).Distinct().ToListAsync(ct);
+            : await Links(proactiveIds, decisionCap).Distinct().ToListAsync(ct);
         var uniqueLinks = links.GroupBy(l => l.MessageId).Where(g => g.Select(l => l.DecisionId).Distinct().Count() == 1)
             .ToDictionary(g => g.Key, g => g.First().DecisionId);
         var items = new List<ChatTimelineItemDto>(keys.Count);
@@ -203,7 +237,9 @@ public sealed class ChatTimelineReader(AppDbContext db)
                      select new DecisionLink { MessageId = m.Id, DecisionId = l.Id };
         var mapped = from m in messages
                      join r in db.OutgoingReplies on m.MessageId equals r.Id
-                     join l in logs on new { r.GroupId, SentId = r.PlatformMessageId } equals new { GroupId = (string?)l.GroupId, SentId = l.SentMessageId }
+                     // logs 已排除空 SentMessageId，NULL 回执映射为 "" 后仍不匹配，且不会生成
+                     // nullable == nullable 的 OR，两侧都能用精确发送 ID 索引而非整群扫描。
+                     join l in logs on new { r.GroupId, SentId = r.PlatformMessageId ?? "" } equals new { GroupId = (string?)l.GroupId, SentId = l.SentMessageId! }
                      where m.GroupId == r.GroupId && r.IsProactive && r.State == DeliveryStates.Sent
                      select new DecisionLink { MessageId = m.Id, DecisionId = l.Id };
         return direct.Concat(mapped);

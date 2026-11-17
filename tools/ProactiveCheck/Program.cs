@@ -31,12 +31,15 @@ using Mutter.Web.Services;
 // 用法：
 //   dotnet run --project tools/ProactiveCheck -- [源库路径]
 //   dotnet run --project tools/ProactiveCheck -- --logic-only
+//   dotnet run --project tools/ProactiveCheck -- --chat-history-only
 //   dotnet run --project tools/ProactiveCheck -- --memory-production-sim
 //   dotnet run --project tools/ProactiveCheck -- --memory-production-sim --scenarios-only
 // --logic-only 跑第 1~3 段及合成临时库运行时回归，供 CI 使用（第 4~6 段需要源库副本）。
 var logicOnly = args.Contains("--logic-only");
 if (args.Contains("--connections-only")) return await AiConnectionChecks.RunAsync() ? 0 : 1;
 if (args.Contains("--runtime-only")) return await RuntimeChecks.RunAsync() ? 0 : 1;
+if (args.Contains("--chat-history-only")) return await RuntimeChecks.RunAsync(chatHistoryOnly: true) ? 0 : 1;
+if (args.Contains("--panel-security-only")) return await PanelSecurityChecks.RunAsync() ? 0 : 1;
 if (args.Contains("--memory-only")) return await RuntimeChecks.RunAsync(memoryOnly: true) ? 0 : 1;
 if (args.Contains("--memory-production-sim")) return await RuntimeChecks.RunMemoryProductionSimulationAsync(args.Contains("--scenarios-only")) ? 0 : 1;
 var sourceDb = args.FirstOrDefault(a => !a.StartsWith("--")) ?? "mutter-bot.db";
@@ -1380,14 +1383,15 @@ Check(!PanelPasswordHasher.Verify("sha256$not-base64!$zz", "s3cret-pass"), "畸�
 Check(PanelPasswordHasher.NeedsRehash(panelHash) is false, "新格式不需要重哈希");
 // 旧格式（无迭代数段，10 万次）：升级前部署的存量哈希必须继续可校验
 var legacySalt = Convert.FromBase64String("AAAAAAAAAAAAAAAAAAAAAA==");
-using var legacyPbkdf2 = new System.Security.Cryptography.Rfc2898DeriveBytes(
-    "s3cret-pass", legacySalt, 100_000, System.Security.Cryptography.HashAlgorithmName.SHA256);
+var legacyPbkdf2 = System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(
+    "s3cret-pass", legacySalt, 100_000, System.Security.Cryptography.HashAlgorithmName.SHA256, 32);
 var legacyHash = $"sha256${Convert.ToBase64String(legacySalt)}$" +
-    Convert.ToHexString(legacyPbkdf2.GetBytes(32)).ToLowerInvariant();
+    Convert.ToHexString(legacyPbkdf2).ToLowerInvariant();
 Check(PanelPasswordHasher.Verify(legacyHash, "s3cret-pass"), "旧格式哈希（无迭代数段）仍可校验通过");
 Check(!PanelPasswordHasher.Verify(legacyHash, "wrong-pass"), "旧格式哈希校验错误口令失败");
 Check(PanelPasswordHasher.NeedsRehash(legacyHash), "旧格式哈希标记为需要重哈希");
 PanelPasswordStoreChecks.Run(Check);
+if (!await PanelSecurityChecks.RunAsync()) ok = false;
 
 Console.WriteLine("== 3h. 分层更新、清单与签名（纯逻辑） ==");
 var defaultUpdate = new UpdateSettings();
