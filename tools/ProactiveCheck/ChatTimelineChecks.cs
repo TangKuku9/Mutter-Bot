@@ -33,8 +33,34 @@ internal static partial class RuntimeChecks
         await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"ProactiveChatLogs\" DROP COLUMN \"DetailVersion\"");
         await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"ProactiveChatLogs\" DROP COLUMN \"WindowSnapshotJson\"");
         await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"ProactiveChatLogs\" DROP COLUMN \"AiEvaluated\"");
+        // 模拟升级前尚无时间线索引的已有库，验证运行时补索引而不依赖 EnsureCreated。
+        var timelineIndexes = db.Model.GetEntityTypes().SelectMany(e => e.GetIndexes())
+            .Select(i => i.GetDatabaseName()!).Where(name => name.Contains("_Timeline", StringComparison.Ordinal)).ToArray();
+        Require(timelineIndexes.Length == 11, "the model declares global/per-group timeline indexes and the exact-link covering index");
+        await db.Database.OpenConnectionAsync();
+        foreach (var name in timelineIndexes)
+        {
+            // 标识符来自已声明的 EF 模型，按 SQLite 标识符规则转义后执行 DDL。
+            await using var drop = db.Database.GetDbConnection().CreateCommand();
+            drop.CommandText = "DROP INDEX IF EXISTS \"" + name.Replace("\"", "\"\"") + "\"";
+            await drop.ExecuteNonQueryAsync();
+        }
         await db.EnsureSchemaUpgradedAsync();
         await db.EnsureSchemaUpgradedAsync();
+        var upgradedIndexes = await db.Database.SqlQueryRaw<string>("""
+            SELECT "name" AS "Value" FROM "sqlite_master" WHERE "type" = 'index' AND "name" LIKE '%_Timeline%'
+            """).ToListAsync();
+        Require(timelineIndexes.Order().SequenceEqual(upgradedIndexes.Order()),
+            "old databases gain the same indexes as fresh databases and repeated upgrades remain idempotent");
+        foreach (var index in db.Model.GetEntityTypes().SelectMany(e => e.GetIndexes())
+            .Where(i => timelineIndexes.Contains(i.GetDatabaseName())))
+        {
+            var columns = await db.Database.SqlQuery<string>($"""
+                SELECT "name" AS "Value" FROM pragma_index_info({index.GetDatabaseName()}) ORDER BY "seqno"
+                """).ToListAsync();
+            Require(columns.SequenceEqual(index.Properties.Select(p => p.Name)),
+                $"upgraded index '{index.GetDatabaseName()}' has the same covering columns as a fresh database");
+        }
         db.ChangeTracker.Clear();
         Require((await db.ProactiveChatLogs.SingleAsync(l => l.Id == oldId)).AiEvaluated is null,
             "schema upgrade leaves old evaluation phases unknown rather than writing false");
@@ -184,5 +210,52 @@ internal static partial class RuntimeChecks
 
         Require(!ChatTimelineReader.TrySnapshot("1:-1", out _, out _) && !ChatTimelineReader.TrySnapshot("bad", out _, out _), "invalid pagination snapshots rejected");
         Require(await db.ChatMessages.AnyAsync(m => m.MessageId == "legacy-row" && m.PlainText == "合成旧数据"), "existing database content remains unchanged");
+
+        // ID 顺序故意不同于时间顺序，并在一微秒内混排两种记录；覆盖候选时间截断的同刻边界。
+        var boundaryMessages = new List<ChatMessage>();
+        var boundaryLogs = new List<ProactiveChatLogEntity>();
+        for (var i = 0; i < 65; i++) boundaryMessages.Add(new ChatMessage
+        {
+            MessageId = $"boundary-{i}", GroupId = "BOUNDARY", CreatedAt = time.AddTicks(i % 7),
+            IsBotMessage = i % 3 == 0, IsProactive = i % 6 == 0, HasAtBot = i % 3 == 1
+        });
+        for (var i = 0; i < 70; i++) boundaryLogs.Add(new ProactiveChatLogEntity
+        {
+            GroupId = "BOUNDARY", EvaluatedAt = time.AddTicks(i % 7),
+            SentMessageId = i % 6 == 0 ? $"boundary-{i % 60}" : null
+        });
+        db.ChatMessages.AddRange(boundaryMessages);
+        db.ProactiveChatLogs.AddRange(boundaryLogs);
+        await db.SaveChangesAsync();
+        foreach (var size in new[] { 1, 50, 100 })
+        foreach (var filter in ChatTimelineReader.Sources)
+        {
+            var bounded = await reader.ReadLatestAsync("BOUNDARY", filter, size);
+            var reference = await reader.ReadAsync("BOUNDARY", filter, null, 1, size, bounded.Snapshot);
+            var expectedMessages = boundaryMessages.Where(m => filter switch
+            {
+                "observe" => !m.IsBotMessage && !m.HasAtBot,
+                "at" => !m.IsBotMessage && m.HasAtBot,
+                "bot" => m.IsBotMessage && !m.IsProactive,
+                "proactive" => m.IsBotMessage && m.IsProactive,
+                "decision" => false,
+                _ => true
+            }).Select(m => (Kind: 0, m.Id, Time: m.CreatedAt));
+            var expectedLogs = boundaryLogs.Where(l => filter == "decision" || filter == ""
+                && !boundaryMessages.Any(m => m.IsBotMessage && m.IsProactive && m.MessageId == l.SentMessageId))
+                .Select(l => (Kind: 1, l.Id, Time: l.EvaluatedAt));
+            var expected = expectedMessages.Concat(expectedLogs).OrderByDescending(k => k.Time)
+                .ThenByDescending(k => k.Kind).ThenByDescending(k => k.Id).ToArray();
+            Require(bounded.Items.Select(i => $"{i.Kind}:{i.Id}").SequenceEqual(expected.Take(size)
+                .Select(k => $"{(k.Kind == 0 ? "message" : "decision")}:{k.Id}"))
+                && reference.TotalCount == expected.Length && bounded.HasMore == (expected.Length > size),
+                $"source '{filter}' size {size} agrees with the independently sorted fixture");
+            Require(bounded.HasMore == reference.HasMore && bounded.Items.Select(i => $"{i.Kind}:{i.Id}:{i.DecisionId}")
+                .SequenceEqual(reference.Items.Select(i => $"{i.Kind}:{i.Id}:{i.DecisionId}")),
+                $"bounded source '{filter}' size {size} preserves tick/kind/ID ties, links, and hasMore");
+        }
+        var empty = await reader.ReadLatestAsync("NO-RECORDS", null, 50);
+        Require(empty.Items.Count == 0 && !empty.HasMore && empty.TotalCount is null,
+            "a group with no saved records still returns a valid empty first page");
     }
 }

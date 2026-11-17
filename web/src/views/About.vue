@@ -18,7 +18,7 @@
         </div>
       </div>
       <p class="hero-desc">
-        基于 .NET 9 与 QQ 官方机器人 API 构建的群聊助手。支持 @ 回复、私聊与多模态图文理解，
+        基于 .NET 10 与 QQ 官方机器人 API 构建的群聊助手。支持 @ 回复、私聊与多模态图文理解，
         还能先观察群聊氛围，再决定要不要接话。
       </p>
       <div class="hero-tags">
@@ -345,7 +345,7 @@ const quickStart = [
 ]
 
 const stack = [
-  { name: '.NET 9', desc: '宿主与 ASP.NET Core API' },
+  { name: '.NET 10', desc: '宿主与 ASP.NET Core API' },
   { name: 'Vue 3', desc: '管理面板前端框架' },
   { name: 'Element Plus', desc: '面板组件库' },
   { name: 'Vite 6', desc: '前端构建与开发服务' },

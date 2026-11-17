@@ -9,7 +9,7 @@
               <el-input v-model="pwd.current" type="password" show-password />
             </el-form-item>
             <el-form-item label="新密码">
-              <el-input v-model="pwd.next" type="password" show-password placeholder="至少 8 位" />
+              <el-input v-model="pwd.next" type="password" show-password placeholder="15 至 128 位" maxlength="128" />
             </el-form-item>
             <el-form-item label="确认新密码">
               <el-input v-model="pwd.confirm" type="password" show-password />
@@ -80,6 +80,7 @@ const loadSessions = async () => {
 
 const changePwd = async () => {
   if (!pwd.value.current || !pwd.value.next) return ElMessage.warning('请填写完整')
+  if (pwd.value.next.length < 15 || pwd.value.next.length > 128) return ElMessage.warning('新密码须为 15 至 128 位')
   if (pwd.value.next !== pwd.value.confirm) return ElMessage.warning('两次输入的新密码不一致')
   saving.value = true
   try {

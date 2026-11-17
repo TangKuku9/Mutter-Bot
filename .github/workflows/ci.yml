@@ -19,10 +19,15 @@ jobs:
 
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: '10.0.404'
 
       - name: Restore
         run: dotnet restore Mutter.sln
+
+      - name: 已知依赖漏洞门禁
+        run: |
+          dotnet list Mutter.sln package --vulnerable --include-transitive --format json > nuget-audit.json
+          python3 tools/check_dependency_audit.py nuget-audit.json
 
       # 「0 warning / 0 error」由仓库根的 Directory.Build.props 强制（TreatWarningsAsErrors），
       # 本地与 CI 行为一致，因此这里不需要再传命令行参数。
@@ -49,6 +54,10 @@ jobs:
       - name: Install
         working-directory: web
         run: npm ci
+
+      - name: 已知依赖漏洞门禁
+        working-directory: web
+        run: npm audit --audit-level=low
 
       # 版本号唯一来源是 Directory.Build.props；package.json 必须同步，否则发版口径会漂移。
       - name: 版本一致性

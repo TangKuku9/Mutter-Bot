@@ -14,7 +14,7 @@ concurrency:
 env:
   # 固定 SDK/运行时 patch：应用层包只在运行时版本一致时可用；runner 自动升级会让
   # 每次发布都悄悄变成“必须下完整包”。升级运行时应当是一次显式提交。
-  DOTNET_VERSION: '9.0.316'
+  DOTNET_VERSION: '10.0.404'
   NODE_VERSION: '22'
 
 jobs:
@@ -43,6 +43,10 @@ jobs:
       - name: 安装
         working-directory: web
         run: npm ci
+
+      - name: 已知依赖漏洞门禁
+        working-directory: web
+        run: npm audit --audit-level=low
 
       # tag push 不会触发 CI，发布流水线必须自己跑面板逻辑测试与浏览器回归，
       # 否则“tag 打得出去、面板坏了”只会在用户安装后才被发现。
@@ -103,6 +107,20 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: 已知依赖漏洞门禁
+        shell: bash
+        run: |
+          dotnet restore Mutter.sln
+          dotnet list Mutter.sln package --vulnerable --include-transitive --format json > nuget-audit.json
+          python_cmd=python3
+          if [ "$RUNNER_OS" = "Windows" ]; then python_cmd=python; fi
+          "$python_cmd" tools/check_dependency_audit.py nuget-audit.json
+
+      # tag push 不触发 CI：发布流水线必须自己跑后端逻辑/运行时回归，
+      # 与 ci.yml 的 --logic-only 同口径，防止“tag 打得出去、后端坏了”。
+      - name: 后端逻辑与运行时自检
+        run: dotnet run --project tools/ProactiveCheck -c Release -- --logic-only
+
       - uses: actions/download-artifact@v8
         with:
           name: panel-wwwroot
@@ -129,10 +147,13 @@ jobs:
             mkdir -p "stage/${pkg}"
             cp -a "out/${kind}/." "stage/${pkg}/"
             cp LICENSE README.md "stage/${pkg}/"
-            # 只允许保留占位 appsettings.json；任何本地环境覆盖文件都不能进包。
-            rm -f "stage/${pkg}/appsettings.Development.json" "stage/${pkg}/appsettings.Production.json" "stage/${pkg}/appsettings.example.json"
+            # 只允许保留占位 appsettings.json；用通配删除一切本地环境覆盖文件，
+            # 未来新增 appsettings.Staging.json 等也不会进包。
+            find "stage/${pkg}" -maxdepth 1 -name 'appsettings*.json' ! -name 'appsettings.json' -delete
+            mkdir -p "stage/${pkg}/docs"
+            cp docs/public-panel-security.md "stage/${pkg}/docs/"
             if [ "${{ matrix.rid }}" = "linux-x64" ]; then
-              cp deploy/install.sh deploy/mutter-bot.service "stage/${pkg}/"
+              cp deploy/install.sh deploy/mutter-bot.service deploy/nginx-mutter.conf.example "stage/${pkg}/"
               chmod +x "stage/${pkg}/mutter-bot" "stage/${pkg}/install.sh"
             fi
 
@@ -140,6 +161,13 @@ jobs:
             if ! grep -q '"YOUR_APP_ID"' "stage/${pkg}/appsettings.json" \
                || ! grep -q '"YOUR_CLIENT_SECRET"' "stage/${pkg}/appsettings.json"; then
               echo "拒绝打包：appsettings.json 不是占位符配置"
+              exit 1
+            fi
+            # stage 根目录只允许存在一个配置文件：占位 appsettings.json。
+            config_count=$(find "stage/${pkg}" -maxdepth 1 -name 'appsettings*.json' | wc -l)
+            if [ "$config_count" -ne 1 ]; then
+              echo "拒绝打包：stage 根目录应只有占位 appsettings.json，实际 ${config_count} 个 appsettings*.json"
+              find "stage/${pkg}" -maxdepth 1 -name 'appsettings*.json' -print
               exit 1
             fi
             if find "stage/${pkg}" \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) | grep -q .; then
@@ -258,8 +286,9 @@ jobs:
           | Windows x64 | \`mutter-bot-v${version}-win-x64-self-contained.zip\` | \`mutter-bot-v${version}-win-x64-framework-dependent.zip\` |
           | Linux x64 | \`mutter-bot-v${version}-linux-x64-self-contained.tar.gz\` | \`mutter-bot-v${version}-linux-x64-framework-dependent.tar.gz\` |
 
-          - **self-contained**：内置 .NET 9 运行时，解压即用。
-          - **framework-dependent**：需预装 ASP.NET Core 9 Runtime。
+          - **self-contained**：内置 .NET 10 LTS 运行时，解压即用。
+          - **framework-dependent**：需预装 ASP.NET Core Runtime 10.0.15 或更新的 10.0 补丁。
+          - 公网面板需要 HTTPS；首次改密通过本机或 SSH 转发完成，详见包内 \`docs/public-panel-security.md\`。
           - 面板内更新优先下载 \`*-app.zip\` 应用层包（约 5-6MB）；运行时版本变化时自动改用完整包。
           - \`update.json\` 是更新清单，\`update.json.sig\` 是可选签名；旧版本仍按完整包更新。
           - Windows 解压后编辑同目录 \`appsettings.json\`，运行 \`mutter-bot.exe\`（默认 TUI）或 \`mutter-bot.exe --headless\`。

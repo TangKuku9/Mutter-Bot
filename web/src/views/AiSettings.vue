@@ -1182,7 +1182,7 @@ const probeWebSearch = async () => {
   try {
     const res = await fetch('/api/config/ai/probe-websearch/stream', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Mutter-Request': '1' },
       body: JSON.stringify({
         providerConnectionId: form.value.providerConnectionId,
         apiBaseUrl: form.value.apiBaseUrl,

@@ -8,7 +8,7 @@
 <p align="center"><em>会看气氛的 QQ 群聊智能助手</em></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/.NET-9.0-512BD4?logo=dotnet" alt=".NET 9" />
+  <img src="https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet" alt=".NET 10 LTS" />
   <img src="https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vuedotjs" alt="Vue 3" />
   <img src="https://img.shields.io/badge/Vite-6.0-646CFF?logo=vite" alt="Vite" />
   <img src="https://img.shields.io/badge/SQLite-EF%20Core-003B57?logo=sqlite" alt="SQLite" />
@@ -17,7 +17,7 @@
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome" /></a>
 </p>
 
-Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gateway 接入）构建的群聊智能助手与会话服务。自带富交互终端控制台（TUI）、Web 管理控制面板、多模态图文识别，以及创新的**群聊择机主动发言（Proactive）机制**。
+Mutter 是一个基于 **.NET 10 LTS** 与 **QQ 官方机器人 API**（WebSocket Gateway 接入）构建的群聊智能助手与会话服务。自带富交互终端控制台（TUI）、Web 管理控制面板、多模态图文识别，以及创新的**群聊择机主动发言（Proactive）机制**。
 
 > ⚠️ **声明**：本项目仅供学习交流与个人研究使用，运行与二次开发请严格遵守 [QQ 机器人平台规则](https://bot.q.qq.com/) 与相关法律法规。
 
@@ -116,7 +116,7 @@ Mutter 是一个基于 **.NET 9** 与 **QQ 官方机器人 API**（WebSocket Gat
 └────────────────────────────────────────────────────────┘
 ```
 
-- **语言框架**：C# 13 / .NET 9.0
+- **语言框架**：C# 14 / .NET 10 LTS
 - **持久化层**：SQLite + Entity Framework Core（启动时自动幂等升级表结构，不走 EF 迁移）
 - **通信接口**：QQ 官方机器人 WebSocket 网关 + OpenAPI Client
 - **管理前端**：Vue 3 + Vite 6 + Element Plus + SignalR Client
@@ -150,7 +150,7 @@ Mutter-Bot/
 | Windows x64 | `mutter-bot-vYYMMDD-win-x64-self-contained.zip` | `mutter-bot-vYYMMDD-win-x64-framework-dependent.zip` |
 | Linux x64 | `mutter-bot-vYYMMDD-linux-x64-self-contained.tar.gz` | `mutter-bot-vYYMMDD-linux-x64-framework-dependent.tar.gz` |
 
-- **self-contained**：内置 .NET 9 运行时，解压即用；**framework-dependent**：体积更小，需预装 [ASP.NET Core 9 Runtime](https://dotnet.microsoft.com/download/dotnet/9.0)。
+- **self-contained**：内置 .NET 10 LTS 运行时，解压即用；**framework-dependent**：体积更小，需预装 [ASP.NET Core Runtime 10.0.15 或更新补丁](https://dotnet.microsoft.com/download/dotnet/10.0)。
 - **Windows**：解压后编辑同目录的 `appsettings.json`（填入 `Mutter:AppId`、`Mutter:ClientSecret` 与面板口令），运行 `mutter-bot.exe` 进入 TUI；后台运行用 `mutter-bot.exe --headless`。
 - **Linux**：解压后进入目录执行 `sudo ./install.sh .`（压缩包已内置 `install.sh` 与 systemd 模板），首次安装后编辑 `/opt/mutter-bot/appsettings.json` 并执行 `sudo systemctl restart mutter-bot`。
 - Linux 自包含包仍依赖系统 ICU，精简发行版请先安装 `libicu`。
@@ -194,12 +194,14 @@ Mutter-Bot/
 
 ---
 
+公网部署请先阅读 [安全审计与部署基线](docs/public-panel-security.md)：需要 HTTPS，首次改密只能在本机或 SSH 转发中完成；所有访问者均可从公网连接 HTTPS 入口。
+
 ## 快速起步 (Quick Start)
 
 ### 1. 准备环境与凭据
 
-- 安装 **[.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)** (`dotnet --version` 验证)。
-- 安装 **[Node.js](https://nodejs.org/)** (`v20.x` 或更高版本)。
+- 安装 **[.NET 10 LTS SDK](https://dotnet.microsoft.com/download/dotnet/10.0)** (`dotnet --version` 验证)。
+- 安装受支持的 **[Node.js](https://nodejs.org/)** LTS（CI 使用 22.x）。
 - 前往 [QQ 开放平台](https://bot.q.qq.com/) 创建机器人，取得 `AppId` 和 `ClientSecret`，并开通群全量消息、@ 机器人等相应权限。
 
 ### 2. 配置说明
@@ -305,8 +307,9 @@ sudo ./deploy/install.sh ./publish
 ```
 
 > `dotnet publish` 会优先使用本地 `appsettings.json`；本地没有该文件时自动用 `appsettings.example.json` 生成占位配置。从源码发布前请确认本地文件是占位符，否则真实凭据会进入发布目录；部署后再到服务器上填写真实值。
-> 使用 `--self-contained false` 发布时，服务器需预先安装 **ASP.NET Core 9 Runtime**（不需要 SDK）。
-> 首次部署后编辑 `/opt/mutter-bot/appsettings.json` 填入真实的 `Mutter:AppId`、`Mutter:ClientSecret` 与面板口令，再执行 `sudo systemctl restart mutter-bot`。该文件位于服务器、不在 Git 仓库中，可以安全写入真实凭据。
+> 安装脚本会排除发布目录中的 `appsettings.Production.json` / `appsettings.Development.json` 等环境覆盖文件，并备份保留服务器上已有的全部 `appsettings*.json`，不会用开发机配置覆盖线上配置；面板口令请在服务器的 `appsettings.json` 中设置。
+> 使用 `--self-contained false` 发布时，服务器需预先安装 **ASP.NET Core Runtime 10.0.15 或更新补丁**（不需要 SDK）。
+> 首次部署后编辑 `/opt/mutter-bot/appsettings.json` 填入真实的 `Mutter:AppId`、`Mutter:ClientSecret` 与面板口令，再执行 `sudo systemctl restart mutter-bot`。首次改密所需的初始化码位于 `/opt/mutter-bot/logs/panel-bootstrap.token`（30 分钟有效，改密后失效）。
 
 部署脚本会自动：
 - 创建运行用户 `mutter-bot` 与安装目录 `/opt/mutter-bot`；
@@ -321,12 +324,12 @@ sudo systemctl status mutter-bot
 sudo journalctl -u mutter-bot -f
 ```
 
-> 💡 **Linux 运行提示**：若在部分精简版 Linux 系统（如 Alpine 或最小化 Ubuntu）上运行报错，请确保安装了 ICU 基础库：`apt-get install -y libicu-dev`。
+> 💡 **Linux 运行提示**：若在最小化 Ubuntu 上运行报错，请安装 ICU：`apt-get install -y libicu-dev`。本项目发布的是 `linux-x64`（glibc）产物；Alpine 需要 glibc 兼容环境，并用 `apk add icu-libs` 安装 ICU。
 
 ### 面板安全部署建议
 
-- **首次登录强制改密**：安装包自带的初始口令（`CHANGE_ME_STRONG_PASSWORD`）是公开信息。用它登录面板时不会进入管理界面，而是强制先修改密码；初始口令被修改前无法获得任何面板会话。请在安装完成后第一时间完成首次登录与改密。
-- **公网部署必须走 TLS**：面板默认以 HTTP 明文监听，公网暴露会导致登录口令与会话 Cookie 被嗅探。请只监听 `127.0.0.1` 或用防火墙限制来源，公网访问务必通过 Nginx/Caddy 等反向代理终止 TLS。
+- **首次登录强制改密**：安装包自带的初始口令（`CHANGE_ME_STRONG_PASSWORD`）是公开信息。首次设置需通过本机或 SSH 端口转发登录，并填写服务器 `logs/panel-bootstrap.token` 中的初始化码（30 分钟有效，重启更换，改密后失效）完成改密；初始口令被修改前无法获得任何面板会话，公网请求也拿不到初始化码。
+- **公网部署必须走 TLS**：程序默认只监听 `127.0.0.1:5188`，公网访问务必通过 Nginx/Caddy 等反向代理终止 TLS（Nginx 示例见 `deploy/nginx-mutter.conf.example`，含同机反代必须设置的 Host/转发头）。公网明文请求会被面板以 426 拒绝。
 - **`PanelAuth:RequireSecureCookie`**：设为 `true` 后会话 Cookie 附加 `Secure` 标记（仅经 HTTPS 传输）。启用 TLS 反代后建议开启。
 - 登录接口对同一 IP 连续 5 次失败锁定 15 分钟；面板口令以 PBKDF2（SHA-256、60 万次迭代、随机盐）哈希存储。
 

@@ -21,6 +21,17 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/mutter-bot/logs /opt/mutter-bot
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077
+LimitCORE=0
 
 # 环境变量
 Environment=DOTNET_ROOT=/usr/share/dotnet
@@ -29,6 +40,8 @@ Environment=DOTNET_ROOT=/usr/share/dotnet
 # 否则百分比等格式化会退化为 "12 %" 这类变体，与代码中固定的 zh-CN 不一致。
 Environment=TZ=Asia/Shanghai
 Environment=ASPNETCORE_ENVIRONMENT=Production
+# 公网由 HTTPS 反向代理接入，应用端口只在本机监听。
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5188
 
 [Install]
 WantedBy=multi-user.target

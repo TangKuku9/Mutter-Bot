@@ -1,9 +1,9 @@
 # 贡献指南
 
-感谢你愿意为 Mutter-Bot 出力！Mutter 是一个基于 **.NET 9** 与现代 Web 技术的 QQ 机器人与智能会话服务。
+感谢你愿意为 Mutter-Bot 出力！Mutter 是一个基于 **.NET 10 LTS** 与现代 Web 技术的 QQ 机器人与智能会话服务。
 
 在参与代码贡献前，建议具备以下技术基础：
-- 熟悉 **C# / .NET 9**，理解依赖注入（DI）、异步编程与 ASP.NET Core Web API / SignalR 机制。
+- 熟悉 **C# / .NET 10 LTS**，理解依赖注入（DI）、异步编程与 ASP.NET Core Web API / SignalR 机制。
 - 熟悉 **Vue 3** + **Vite** 前端开发（用于管理面板交互）。
 - 了解 **Entity Framework Core** 与 SQLite 的基本操作及迁移机制。
 - 了解 [QQ 机器人官方开放平台](https://bot.q.qq.com/wiki/) 的基础通信协议（WebSocket Gateway、Intents 事件与频控规范）。
@@ -49,13 +49,13 @@
 
 ### 1.1 工具依赖
 
-- **[.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)**（`net9.0`；依赖采用浮动版本号：`Microsoft.Extensions.*` 为 `10.0.*`，`EntityFrameworkCore.*` / `Microsoft.Data.Sqlite` 仍为 `9.0.*`——库版本线独立于框架版本）
-- **[Node.js](https://nodejs.org/)**（`^18.0.0 || ^20.0.0 || >=22.0.0`，推荐使用 LTS 20.x，Vite 6 编译前端面板所需）
+- **[.NET 10 LTS SDK](https://dotnet.microsoft.com/download/dotnet/10.0)**（`net10.0`；依赖采用浮动版本号：`Microsoft.Extensions.*` 为 `10.0.*`，`EntityFrameworkCore.*` / `Microsoft.Data.Sqlite` 同为 `10.0.*`——库版本线独立于框架版本）
+- **[Node.js](https://nodejs.org/)**（`^18.0.0 || ^20.0.0 || >=22.0.0`，推荐使用受支持的 LTS 22.x，Vite 6 编译前端面板所需；CI 固定使用 Node 22）
 - **[Git](https://git-scm.com/)**
 
 ### 1.2 推荐 IDE 与插件
 
-- **Visual Studio 2022**（17.12+）或 **JetBrains Rider** / **Visual Studio Code**
+- 支持 .NET 10 的 **Visual Studio** 或 **JetBrains Rider** / **Visual Studio Code**
 - 若使用 **VS Code**，建议安装以下插件：
   - [C# Dev Kit](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csdevkit) / [C#](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csharp)：提供 C# 语言高亮、补全与调试支持。
   - [Vue Language Features (Volar)](https://marketplace.visualstudio.com/items?itemName=Vue.volar)：为 `web/` 目录下的 Vue 3 组件提供支持。
@@ -90,7 +90,7 @@ cp src/Mutter.Web/appsettings.example.json src/Mutter.Web/appsettings.json
   ```bash
   dotnet run --project src/Mutter.Web
   ```
-  默认监听 `http://127.0.0.1:5188`。
+  默认监听 `http://127.0.0.1:5188`（`dotnet run` 使用 launchSettings 时常见为 `http://localhost:5194`，以控制台输出为准）。
 
 ### 1.5 启动管理面板前端 (Dev Server)
 
@@ -102,7 +102,7 @@ npm install
 npm run dev
 ```
 
-启动后访问提示的本地地址（通常为 `http://localhost:5173`），Vite 已配置反向代理，会自动将 `/api` 和 `/hub` 请求转发给后端的 `http://127.0.0.1:5188`。
+启动后访问提示的本地地址（Vite 配置为 `http://localhost:5199`），Vite 已配置反向代理，会自动将 `/api` 和 `/hub` 请求转发给后端的 `http://127.0.0.1:5188`。
 
 > 💡 **构建产物说明**：生产构建产物 `src/Mutter.Web/wwwroot/` 被 `.gitignore` 忽略，**严禁将构建产物提交入库**。
 
@@ -320,7 +320,7 @@ npm run build
 
 每个向本仓库发起的 PR 及推送均会自动执行 GitHub Actions [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：
 1. **构建与自检 (.NET)**：在 Linux 环境下验证 `dotnet restore` + `dotnet build`（含警告即错误）+ `ProactiveCheck --logic-only`。
-2. **面板前端构建**：在 Node 20 环境下执行 `npm ci && npm test && npm run build`，并校验 `.NET` 与前端版本号一致。
+2. **面板前端构建**：在 Node 22 环境下执行 `npm ci && npm test && npm run build`，并校验 `.NET` 与前端版本号一致。
 3. **Release**：推送 `v*` 标签时执行 [`.github/workflows/release.yml`](.github/workflows/release.yml)，流程见 7.6。
 
 ### 7.6 版本号与 Release（维护者）
