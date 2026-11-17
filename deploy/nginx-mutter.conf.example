@@ -1,0 +1,86 @@
+# 放入 nginx.conf 的 http {} 内（常见发行版的 conf.d/*.conf 已位于其中）。
+# 将 panel.example.com 和证书路径替换为自己的值；访问者不受来源 IP 白名单限制。
+#
+# 前置检查：
+#   1. nginx -v 确认版本 >= 1.19.4（下方 ssl_reject_handshake 需要）；
+#      更旧版本请删除默认 TLS server 块，或改用占位证书 + return 444。
+#   2. 若发行版自带默认站点（Debian/Ubuntu 的 sites-enabled/default 常已声明
+#      listen 80 default_server），先禁用该站点或去掉其 default_server，
+#      否则 nginx -t 会报 duplicate default server。
+#   3. 同机反代必须保留下方 Host / X-Forwarded-* 设置：后端只信任
+#      127.0.0.1/::1 且要求转发头完整；省略它们会让面板拒绝该代理流量。
+map $http_upgrade $mutter_connection_upgrade {
+    default upgrade;
+    '' close;
+}
+limit_req_zone $binary_remote_addr zone=mutter_requests:2m rate=30r/s;
+limit_req_zone $binary_remote_addr zone=mutter_auth:1m rate=5r/m;
+limit_conn_zone $binary_remote_addr zone=mutter_sockets:1m;
+
+server {
+    listen 80 default_server;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 80;
+    server_name panel.example.com;
+    if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+    return 308 https://panel.example.com$request_uri;
+}
+
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+
+server {
+    listen 443 ssl;
+    server_name panel.example.com;
+    ssl_certificate /etc/letsencrypt/live/panel.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/panel.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    server_tokens off;
+    client_max_body_size 1m;
+    client_header_timeout 10s;
+    client_body_timeout 15s;
+    keepalive_timeout 30s;
+    limit_req_status 429;
+    limit_conn_status 429;
+    limit_req zone=mutter_requests burst=60 nodelay;
+
+    # 上游只监听回环。覆盖客户端自带的转发头，不使用任意来源的真实 IP 声明。
+    proxy_pass_request_headers on;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host "";
+    proxy_http_version 1.1;
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 30s;
+    proxy_read_timeout 90s;
+
+    location ~* ^/api/auth/(login|change-password)/?$ {
+        client_max_body_size 16k;
+        limit_req zone=mutter_auth burst=5 nodelay;
+        proxy_pass http://127.0.0.1:5188;
+    }
+
+    location /hub/ {
+        limit_conn mutter_sockets 4;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host "";
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $mutter_connection_upgrade;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:5188;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:5188;
+    }
+}

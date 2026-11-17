@@ -91,6 +91,32 @@ public class AppDbContext : DbContext
             e.HasIndex(x => new { x.ChatType, x.GroupId, x.CreatedAt });
             e.HasIndex(x => new { x.ChatType, x.UserId, x.CreatedAt });
             e.HasIndex(x => x.MessageId).IsUnique().HasFilter("\"MessageId\" <> ''");
+            // 留痕去重只需发送标识及消息分类，不应逐条回表读取原始消息大字段。
+            e.HasIndex(x => new { x.MessageId, x.GroupId, x.ChatType, x.Id, x.IsBotMessage, x.IsProactive })
+                .HasDatabaseName("IX_ChatMessages_Timeline_Link")
+                .HasFilter("\"IsBotMessage\" AND \"IsProactive\" AND \"MessageId\" <> ''");
+            // 来源筛选与时间排序一起走覆盖索引，避免 SQLite 为了 Id 快照改扫整个群。
+            // 这组来源部分索引只收录对应消息类型，每条消息至多进入全局、单群各一份。
+            foreach (var (name, filter) in new[]
+            {
+                ("Observe", "\"ChatType\" = 0 AND NOT \"IsBotMessage\" AND NOT \"HasAtBot\""),
+                ("At", "\"ChatType\" = 0 AND NOT \"IsBotMessage\" AND \"HasAtBot\""),
+                ("Bot", "\"IsBotMessage\" AND NOT \"IsProactive\""),
+                ("Proactive", "\"IsBotMessage\" AND \"IsProactive\"")
+            })
+            {
+                // SQLite 不把 WHERE 布尔列视作等值约束，故把来源放入部分索引条件，
+                // 排序键前只保留真正的等值列；否则仍会退化成全群临时排序。
+                if (name is "Observe" or "At")
+                    e.HasIndex(x => new { x.ChatType, x.CreatedAt, x.Id, x.IsBotMessage, x.HasAtBot, x.IsProactive },
+                        $"IX_ChatMessages_Timeline_{name}").HasFilter(filter);
+                else
+                    e.HasIndex(x => new { x.CreatedAt, x.Id, x.ChatType, x.IsBotMessage, x.HasAtBot, x.IsProactive },
+                        $"IX_ChatMessages_Timeline_{name}").HasFilter(filter);
+                e.HasIndex(x => new { x.ChatType, x.GroupId, x.CreatedAt, x.Id, x.IsBotMessage, x.HasAtBot, x.IsProactive },
+                    $"IX_ChatMessages_Timeline_Group{name}")
+                    .HasFilter(filter);
+            }
         });
 
         modelBuilder.Entity<GroupInfo>(e =>
@@ -158,6 +184,10 @@ public class AppDbContext : DbContext
             e.HasIndex(x => x.EvaluatedAt);
             e.HasIndex(x => new { x.GroupId, x.EvaluatedAt });
             e.HasIndex(x => new { x.SentMessageId, x.GroupId });
+            e.HasIndex(x => new { x.EvaluatedAt, x.Id, x.GroupId, x.SentMessageId })
+                .HasDatabaseName("IX_ProactiveChatLogs_Timeline");
+            e.HasIndex(x => new { x.GroupId, x.EvaluatedAt, x.Id, x.SentMessageId })
+                .HasDatabaseName("IX_ProactiveChatLogs_Timeline_Group");
         });
 
         modelBuilder.Entity<GroupMemoryEntity>(e =>
@@ -772,9 +802,37 @@ public class AppDbContext : DbContext
         {
         }
 
+        await EnsureChatTimelineIndexesAsync(ct);
         await BackfillFacePlaceholdersAsync(ct);
         await Repositories.AiConnectionStore.MigrateLegacyAsync(this, _logger, ct);
     }
+
+    /// <summary>新旧库使用相同索引；只增索引，不改写历史记录，可重复执行。</summary>
+    private Task EnsureChatTimelineIndexesAsync(CancellationToken ct) => Database.ExecuteSqlRawAsync("""
+        CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Timeline_Link"
+            ON "ChatMessages" ("MessageId", "GroupId", "ChatType", "Id", "IsBotMessage", "IsProactive")
+            WHERE "IsBotMessage" AND "IsProactive" AND "MessageId" <> '';
+        CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Timeline_Bot"
+            ON "ChatMessages" ("CreatedAt", "Id", "ChatType", "IsBotMessage", "HasAtBot", "IsProactive") WHERE "IsBotMessage" AND NOT "IsProactive";
+        CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Timeline_GroupBot"
+            ON "ChatMessages" ("ChatType", "GroupId", "CreatedAt", "Id", "IsBotMessage", "HasAtBot", "IsProactive") WHERE "IsBotMessage" AND NOT "IsProactive";
+        CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Timeline_Proactive"
+            ON "ChatMessages" ("CreatedAt", "Id", "ChatType", "IsBotMessage", "HasAtBot", "IsProactive") WHERE "IsBotMessage" AND "IsProactive";
+        CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Timeline_GroupProactive"
+            ON "ChatMessages" ("ChatType", "GroupId", "CreatedAt", "Id", "IsBotMessage", "HasAtBot", "IsProactive") WHERE "IsBotMessage" AND "IsProactive";
+        CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Timeline_Observe"
+            ON "ChatMessages" ("ChatType", "CreatedAt", "Id", "IsBotMessage", "HasAtBot", "IsProactive") WHERE "ChatType" = 0 AND NOT "IsBotMessage" AND NOT "HasAtBot";
+        CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Timeline_GroupObserve"
+            ON "ChatMessages" ("ChatType", "GroupId", "CreatedAt", "Id", "IsBotMessage", "HasAtBot", "IsProactive") WHERE "ChatType" = 0 AND NOT "IsBotMessage" AND NOT "HasAtBot";
+        CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Timeline_At"
+            ON "ChatMessages" ("ChatType", "CreatedAt", "Id", "IsBotMessage", "HasAtBot", "IsProactive") WHERE "ChatType" = 0 AND NOT "IsBotMessage" AND "HasAtBot";
+        CREATE INDEX IF NOT EXISTS "IX_ChatMessages_Timeline_GroupAt"
+            ON "ChatMessages" ("ChatType", "GroupId", "CreatedAt", "Id", "IsBotMessage", "HasAtBot", "IsProactive") WHERE "ChatType" = 0 AND NOT "IsBotMessage" AND "HasAtBot";
+        CREATE INDEX IF NOT EXISTS "IX_ProactiveChatLogs_Timeline"
+            ON "ProactiveChatLogs" ("EvaluatedAt", "Id", "GroupId", "SentMessageId");
+        CREATE INDEX IF NOT EXISTS "IX_ProactiveChatLogs_Timeline_Group"
+            ON "ProactiveChatLogs" ("GroupId", "EvaluatedAt", "Id", "SentMessageId");
+        """, ct);
 
     /// <summary>新增表和预算列，保留所有既有业务表与数据。</summary>
     private async Task EnsureRuntimeSchemaAsync(CancellationToken ct)

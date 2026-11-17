@@ -28,7 +28,7 @@ using Mutter.Web.Services;
 /// <summary>只使用合成标识符、临时 SQLite 和假 HTTP，不读取部署数据或访问外部服务。</summary>
 internal static partial class RuntimeChecks
 {
-    public static async Task<bool> RunAsync(bool memoryOnly = false)
+    public static async Task<bool> RunAsync(bool memoryOnly = false, bool chatHistoryOnly = false)
     {
         var ok = true;
         foreach (var (name, run) in new (string, Func<Task>)[]
@@ -62,6 +62,7 @@ internal static partial class RuntimeChecks
             ("旧模型升级幂等与数据保留", SchemaAsync),
             ("聊天历史查找、稳定分页、精确决策关联与旧库兼容", ChatTimelineAsync),
             ("10 万消息下的时间线去重规模", TimelineScaleAsync),
+            ("单群 10 万消息的首屏开销与查询计划", ChatTimelineHotGroupAsync),
             ("实际调用账本、用户归属、失败和历史用量", UsageLedgerAsync),
             ("统计 SQL 聚合、缓存与大记录集", StatisticsPerformanceAsync),
             ("图片缓存容量、下载并发与取消隔离", ImageLimitsAsync),
@@ -95,6 +96,8 @@ internal static partial class RuntimeChecks
         })
         {
             if (memoryOnly && !run.Method.Name.StartsWith("AutomaticMemory", StringComparison.Ordinal)) continue;
+            if (chatHistoryOnly && run.Method.Name is not (nameof(ChatTimelineAsync) or nameof(TimelineScaleAsync)
+                or nameof(ChatTimelineHotGroupAsync))) continue;
             var timeout = run.Method.Name == nameof(AutomaticMemoryBudgetAsync) ? 60 : 30;
             try { await run().WaitAsync(TimeSpan.FromSeconds(timeout)); Console.WriteLine($"PASS  {name}"); }
             catch (Exception ex) { ok = false; Console.WriteLine($"FAIL  {name}: {ex}"); }

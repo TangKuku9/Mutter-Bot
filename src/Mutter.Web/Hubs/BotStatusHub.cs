@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
+using System.Security.Claims;
+using Mutter.Web.Services;
 
 namespace Mutter.Web.Hubs;
 
@@ -6,20 +8,24 @@ public class BotStatusHub : Hub
 {
     private readonly ILogger<BotStatusHub> _logger;
     private readonly LiveLogBus _liveLogBus;
+    private readonly PanelSessionStore _sessions;
 
-    public BotStatusHub(ILogger<BotStatusHub> logger, LiveLogBus liveLogBus)
+    public BotStatusHub(ILogger<BotStatusHub> logger, LiveLogBus liveLogBus, PanelSessionStore sessions)
     {
         _logger = logger;
         _liveLogBus = liveLogBus;
+        _sessions = sessions;
     }
 
     public async Task SubscribeGroup(string groupId)
     {
+        if (string.IsNullOrWhiteSpace(groupId) || groupId.Length > 256) throw new HubException("无效的群标识");
         await Groups.AddToGroupAsync(Context.ConnectionId, $"group-{groupId}");
     }
 
     public async Task UnsubscribeGroup(string groupId)
     {
+        if (string.IsNullOrWhiteSpace(groupId) || groupId.Length > 256) throw new HubException("无效的群标识");
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, $"group-{groupId}");
     }
 
@@ -55,12 +61,21 @@ public class BotStatusHub : Hub
 
     public override Task OnConnectedAsync()
     {
+        var token = Context.User?.FindFirstValue(ClaimTypes.Sid);
+        if (!_sessions.TryValidate(token, out var session, renew: false))
+        {
+            Context.Abort();
+            return Task.CompletedTask;
+        }
+        Context.Items["sessionRevocation"] = session.Revocation.Register(Context.Abort);
         _logger.LogInformation("Client connected: {ConnectionId}", Context.ConnectionId);
         return base.OnConnectedAsync();
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
+        if (Context.Items.Remove("sessionRevocation", out var registration) && registration is IDisposable disposable)
+            disposable.Dispose();
         _logger.LogInformation("Client disconnected: {ConnectionId}", Context.ConnectionId);
 
         // 取消日志订阅，避免内存泄漏

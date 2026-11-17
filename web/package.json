@@ -1,6 +1,6 @@
 {
   "name": "mutter-panel",
-  "version": "261115.1",
+  "version": "261117",
   "private": true,
   "type": "module",
   "description": "Mutter 管理面板前端源码工程",
@@ -27,6 +27,6 @@
     "@resvg/resvg-js": "2.6.2",
     "@vitejs/plugin-vue": "^5.2.1",
     "unplugin-vue-components": "^28.8.0",
-    "vite": "^6.4.4"
+    "vite": "^6.4.6"
   }
 }

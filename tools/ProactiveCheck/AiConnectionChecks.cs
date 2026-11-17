@@ -45,7 +45,8 @@ internal static class AiConnectionChecks
             var migrated = await db.AiProviderConnections.ToListAsync();
             var ids = migrated.Select(c => c.Id).Order().ToArray();
             await db.EnsureSchemaUpgradedAsync();
-            Require(ids.SequenceEqual(await db.AiProviderConnections.OrderBy(c => c.Id).Select(c => c.Id).ToArrayAsync()), "migration must be idempotent");
+            var repeatedIds = await db.AiProviderConnections.OrderBy(c => c.Id).Select(c => c.Id).ToArrayAsync();
+            Require(ids.SequenceEqual(repeatedIds), "migration must be idempotent");
             Require(migrated.Count == 2 && migrated.Select(c => c.ApiKey).Distinct().Count() == 2, "same endpoint with different credentials remains separate");
             var currentConnectionId = (await db.AiConfigs.AsNoTracking().FirstAsync()).ProviderConnectionId;
             Require(migrated.Single(c => c.Id == currentConnectionId).ApiKey == "account-a-secret",

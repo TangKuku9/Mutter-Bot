@@ -12,44 +12,7 @@
   <link rel="icon" href="/favicon.ico" sizes="any" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 
-  <script>
-    /*
-     * 主题引导：优先使用面板里显式保存的深色设置（localStorage），
-     * 没有保存过时跟随系统 prefers-color-scheme，并在系统主题变化时实时切换。
-     * 同时保留对 html.dark 类名的支持（与主面板 panelSettings 行为一致）。
-     */
-    (function () {
-      var root = document.documentElement;
-      var savedDark = null;
-      try {
-        var raw = localStorage.getItem('mutter-panel-settings');
-        if (raw) {
-          var saved = JSON.parse(raw);
-          if (typeof saved.darkMode === 'boolean') savedDark = saved.darkMode;
-        }
-      } catch (e) { /* 本地存储不可用时忽略 */ }
-
-      var mql = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
-      var hadDarkClass = root.classList.contains('dark');
-
-      function applyTheme(dark) {
-        root.classList.toggle('dark', dark);
-        root.classList.toggle('light', !dark);
-        var meta = document.querySelector('meta[name="theme-color"]');
-        if (meta) meta.setAttribute('content', dark ? '#070b14' : '#f5f6fb');
-      }
-
-      applyTheme(savedDark !== null ? savedDark : (hadDarkClass || !!(mql && mql.matches)));
-
-      if (mql) {
-        var onChange = function (event) {
-          if (savedDark === null) applyTheme(event.matches);
-        };
-        if (mql.addEventListener) mql.addEventListener('change', onChange);
-        else if (mql.addListener) mql.addListener(onChange);
-      }
-    })();
-  </script>
+  <script src="/login-theme.js?v=__APP_VERSION__"></script>
 
   <style>
     /* ============================================================
@@ -982,10 +945,10 @@
               <path d="M12 9.4v4.2" />
               <path d="M12 16.6h.01" />
             </svg>
-            <span>当前密码为安装包初始默认密码，首次使用必须先修改。请设置至少 8 位的新密码，修改后使用新密码登录。</span>
+            <span>当前密码为安装默认口令或需要更新的旧口令。请从服务器维护目录 <code>logs/panel-bootstrap.token</code> 读取 30 分钟内有效的初始化码，并设置至少 15 位的新密码。</span>
           </div>
 
-          <form id="loginForm" novalidate>
+          <form id="loginForm" method="post" action="/login.html" novalidate>
             <div class="field">
               <label for="username">账号</label>
               <div class="control">
@@ -994,7 +957,7 @@
                   <path d="M4 20c0-3.3 3.6-6 8-6s8 2.7 8 6" />
                 </svg>
                 <input
-                  id="username"
+                  id="username" maxlength="64"
                   name="username"
                   type="text"
                   placeholder="请输入管理员账号"
@@ -1022,7 +985,7 @@
                   <path d="M12 14.2v2.1" />
                 </svg>
                 <input
-                  id="password"
+                  id="password" maxlength="128"
                   name="password"
                   type="password"
                   placeholder="请输入密码"
@@ -1057,7 +1020,7 @@
             </button>
           </form>
 
-          <form id="changeForm" novalidate style="display: none">
+          <form id="changeForm" method="post" action="/login.html" novalidate style="display: none">
             <div class="field">
               <label for="currentPassword">当前密码</label>
               <div class="control">
@@ -1067,7 +1030,7 @@
                   <path d="M12 14.2v2.1" />
                 </svg>
                 <input
-                  id="currentPassword"
+                  id="currentPassword" maxlength="128"
                   name="currentPassword"
                   type="password"
                   placeholder="请输入当前密码"
@@ -1079,9 +1042,26 @@
             </div>
 
             <div class="field">
+              <label for="bootstrapToken">初始化码</label>
+              <div class="control">
+                <input
+                  id="bootstrapToken" maxlength="32"
+                  name="bootstrapToken"
+                  type="text"
+                  placeholder="服务器 logs/panel-bootstrap.token"
+                  autocomplete="off"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  aria-required="true"
+                  required
+                />
+              </div>
+            </div>
+
+            <div class="field">
               <div class="label-row">
                 <label for="newPassword">新密码</label>
-                <span class="hint">至少 8 位</span>
+                <span class="hint">至少 15 位</span>
               </div>
               <div class="control">
                 <svg class="control-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -1089,7 +1069,7 @@
                   <path d="M16.4 7.6h.01" />
                 </svg>
                 <input
-                  id="newPassword"
+                  id="newPassword" maxlength="128"
                   name="newPassword"
                   type="password"
                   placeholder="请输入新密码"
@@ -1109,7 +1089,7 @@
                   <path d="m9.1 11.9 2 2 4-4" />
                 </svg>
                 <input
-                  id="confirmPassword"
+                  id="confirmPassword" maxlength="128"
                   name="confirmPassword"
                   type="password"
                   placeholder="请再次输入新密码"
@@ -1146,254 +1126,6 @@
     </main>
   </div>
 
-  <script>
-    (function () {
-      'use strict';
-
-      var params = new URLSearchParams(window.location.search);
-      var returnUrl = params.get('return') || '/';
-
-      // 仅允许相对路径，防止开放重定向
-      if (returnUrl.charAt(0) !== '/' || returnUrl.charAt(1) === '/') {
-        returnUrl = '/';
-      }
-
-      var form = document.getElementById('loginForm');
-      var changeForm = document.getElementById('changeForm');
-      var noticeBox = document.getElementById('notice');
-      var alertBox = document.getElementById('alert');
-      var alertText = document.getElementById('alertText');
-      var submitBtn = document.getElementById('submitBtn');
-      var submitLabel = document.getElementById('submitLabel');
-      var changeBtn = document.getElementById('changeBtn');
-      var changeLabel = document.getElementById('changeLabel');
-      var formTitle = document.getElementById('formTitle');
-      var formSub = document.getElementById('formSub');
-      var usernameInput = document.getElementById('username');
-      var passwordInput = document.getElementById('password');
-      var currentPasswordInput = document.getElementById('currentPassword');
-      var newPasswordInput = document.getElementById('newPassword');
-      var confirmPasswordInput = document.getElementById('confirmPassword');
-      var toggleBtn = document.getElementById('togglePassword');
-      var iconEye = document.getElementById('iconEye');
-      var iconEyeOff = document.getElementById('iconEyeOff');
-
-      var submitting = false;
-      var changing = false;
-
-      function setInvalid(input, invalid) {
-        if (invalid) input.setAttribute('aria-invalid', 'true');
-        else input.removeAttribute('aria-invalid');
-      }
-
-      function showAlert(message, success) {
-        alertText.textContent = message;
-        alertBox.hidden = false;
-        alertBox.classList.toggle('is-success', !!success);
-        alertBox.classList.remove('shake');
-        if (success) return;
-        // 强制重排，让同一条错误再次出现时也能重新抖动
-        void alertBox.offsetWidth;
-        alertBox.classList.add('shake');
-      }
-
-      function clearAlert() {
-        if (alertBox.hidden) return;
-        alertBox.hidden = true;
-        alertBox.classList.remove('shake');
-        alertBox.classList.remove('is-success');
-        alertText.textContent = '';
-        [usernameInput, passwordInput, currentPasswordInput, newPasswordInput, confirmPasswordInput]
-          .forEach(function (input) { setInvalid(input, false); });
-      }
-
-      function setLoading(loading) {
-        submitting = loading;
-        submitBtn.disabled = loading;
-        submitBtn.classList.toggle('is-loading', loading);
-        submitBtn.setAttribute('aria-busy', loading ? 'true' : 'false');
-        submitLabel.textContent = loading ? '登录中…' : '登 录';
-        usernameInput.readOnly = loading;
-        passwordInput.readOnly = loading;
-      }
-
-      function setChangeLoading(loading) {
-        changing = loading;
-        changeBtn.disabled = loading;
-        changeBtn.classList.toggle('is-loading', loading);
-        changeBtn.setAttribute('aria-busy', loading ? 'true' : 'false');
-        changeLabel.textContent = loading ? '提交中…' : '修改密码';
-        currentPasswordInput.readOnly = loading;
-        newPasswordInput.readOnly = loading;
-        confirmPasswordInput.readOnly = loading;
-      }
-
-      // 初始默认密码命中：切换到强制改密表单
-      function showChangeForm(currentPassword) {
-        setLoading(false);
-        clearAlert();
-        form.style.display = 'none';
-        changeForm.style.display = '';
-        noticeBox.classList.add('show');
-        formTitle.textContent = '设置新密码';
-        formSub.textContent = '初始密码不能继续使用，请先设置一个新的管理员密码。';
-        currentPasswordInput.value = currentPassword || '';
-        newPasswordInput.value = '';
-        confirmPasswordInput.value = '';
-        newPasswordInput.focus();
-      }
-
-      function showLoginForm() {
-        changeForm.style.display = 'none';
-        noticeBox.classList.remove('show');
-        form.style.display = '';
-        formTitle.textContent = '欢迎回来';
-        formSub.textContent = '登录以继续管理你的 Mutter 机器人。';
-        passwordInput.value = '';
-        passwordInput.focus();
-      }
-
-      toggleBtn.addEventListener('click', function () {
-        var visible = passwordInput.type === 'password';
-        passwordInput.type = visible ? 'text' : 'password';
-        toggleBtn.setAttribute('aria-pressed', visible ? 'true' : 'false');
-        toggleBtn.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码');
-        iconEye.hidden = visible;
-        iconEyeOff.hidden = !visible;
-        passwordInput.focus({ preventScroll: true });
-        var end = passwordInput.value.length;
-        try { passwordInput.setSelectionRange(end, end); } catch (e) { /* 忽略 */ }
-      });
-
-      [usernameInput, passwordInput, currentPasswordInput, newPasswordInput, confirmPasswordInput]
-        .forEach(function (input) {
-          input.addEventListener('input', function () {
-            if (!alertBox.hidden) clearAlert();
-            setInvalid(input, false);
-          });
-        });
-
-      form.addEventListener('submit', function (event) {
-        event.preventDefault();
-        if (submitting) return;
-
-        clearAlert();
-
-        var username = usernameInput.value.trim();
-        var password = passwordInput.value;
-
-        if (!username || !password) {
-          showAlert('请输入账号和密码');
-          if (!username) {
-            setInvalid(usernameInput, true);
-            usernameInput.focus();
-          } else {
-            setInvalid(passwordInput, true);
-            passwordInput.focus();
-          }
-          return;
-        }
-
-        setLoading(true);
-
-        fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: JSON.stringify({ username: username, password: password })
-        })
-          .then(function (response) {
-            return response.json()
-              .catch(function () { return null; })
-              .then(function (data) {
-                return { ok: response.ok, data: data };
-              });
-          })
-          .then(function (result) {
-            if (result.ok) {
-              window.location.href = returnUrl;
-              return;
-            }
-            if (result.data && result.data.mustChangePassword) {
-              showChangeForm(password);
-              return;
-            }
-            throw new Error((result.data && result.data.error) || '登录失败');
-          })
-          .catch(function (error) {
-            var message = error && error.message ? error.message : '登录失败，请重试';
-            if (error instanceof TypeError) message = '无法连接服务器，请检查网络后重试';
-            showAlert(message);
-            setLoading(false);
-            passwordInput.focus({ preventScroll: true });
-            var end = passwordInput.value.length;
-            try { passwordInput.setSelectionRange(end, end); } catch (e) { /* 忽略 */ }
-          });
-      });
-
-      changeForm.addEventListener('submit', function (event) {
-        event.preventDefault();
-        if (changing) return;
-
-        clearAlert();
-
-        var currentPassword = currentPasswordInput.value;
-        var newPassword = newPasswordInput.value;
-        var confirmPassword = confirmPasswordInput.value;
-
-        if (!currentPassword || !newPassword || !confirmPassword) {
-          showAlert('请填写完整的修改密码信息');
-          return;
-        }
-        if (newPassword.length < 8) {
-          showAlert('新密码至少 8 位');
-          setInvalid(newPasswordInput, true);
-          newPasswordInput.focus();
-          return;
-        }
-        if (newPassword !== confirmPassword) {
-          showAlert('两次输入的新密码不一致');
-          setInvalid(confirmPasswordInput, true);
-          confirmPasswordInput.focus();
-          return;
-        }
-
-        setChangeLoading(true);
-
-        fetch('/api/auth/change-password', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: JSON.stringify({
-            currentPassword: currentPassword,
-            newPassword: newPassword,
-            confirmPassword: confirmPassword
-          })
-        })
-          .then(function (response) {
-            return response.json()
-              .catch(function () { return null; })
-              .then(function (data) {
-                if (!response.ok) {
-                  throw new Error((data && data.error) || '修改密码失败');
-                }
-                return data;
-              });
-          })
-          .then(function (data) {
-            setChangeLoading(false);
-            showLoginForm();
-            showAlert((data && data.message) || '密码修改成功，请使用新密码登录', true);
-          })
-          .catch(function (error) {
-            var message = error && error.message ? error.message : '修改密码失败，请重试';
-            if (error instanceof TypeError) message = '无法连接服务器，请检查网络后重试';
-            showAlert(message);
-            setChangeLoading(false);
-            currentPasswordInput.focus();
-          });
-      });
-    })();
-  </script>
+  <script type="module" src="/login.js?v=__APP_VERSION__"></script>
 </body>
 </html>

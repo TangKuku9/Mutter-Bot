@@ -262,7 +262,7 @@ public sealed class MainTuiApp
     {
         MessageBox.Query("关于",
             "Mutter\n\n" +
-            "基于 .NET 9 + Terminal.Gui\n" +
+            "基于 .NET 10 + Terminal.Gui\n" +
             "QQ 官方 API + WebSocket Gateway\n\n" +
             "Web 面板: http://localhost:5188",
             "确定");
