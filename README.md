@@ -17,6 +17,14 @@
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome" /></a>
 </p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/dashboard-dark.webp" />
+    <img src="docs/images/readme/dashboard-light.webp" alt="Mutter 管理面板运行概览：累计消息、模型请求、任务队列与服务健康" width="100%" />
+  </picture>
+</p>
+<p align="center"><sub>运行概览 · 消息、模型调用、队列与服务健康一屏掌握</sub></p>
+
 Mutter 是一个基于 **.NET 10 LTS** 与 **QQ 官方机器人 API**（WebSocket Gateway 接入）构建的群聊智能助手与会话服务。自带富交互终端控制台（TUI）、Web 管理控制面板、多模态图文识别，以及创新的**群聊择机主动发言（Proactive）机制**。
 
 > ⚠️ **声明**：本项目仅供学习交流与个人研究使用，运行与二次开发请严格遵守 [QQ 机器人平台规则](https://bot.q.qq.com/) 与相关法律法规。
@@ -25,6 +33,7 @@ Mutter 是一个基于 **.NET 10 LTS** 与 **QQ 官方机器人 API**（WebSocke
 
 ## 目录
 
+- [界面一览](#界面一览)
 - [分支说明](#分支说明)
 - [核心特性](#核心特性)
 - [技术栈与架构](#技术栈与架构)
@@ -40,6 +49,51 @@ Mutter 是一个基于 **.NET 10 LTS** 与 **QQ 官方机器人 API**（WebSocke
 - [自检工具与质量保证](#自检工具与质量保证)
 - [贡献与安全](#贡献与安全)
 - [品牌资产](#品牌资产)
+
+---
+
+## 界面一览
+
+> 截图取自 Mutter 的真实管理面板，使用合成演示数据；不含生产群名、用户或密钥。
+
+<!-- 生成脚本：web/scripts/panel-screenshots.mjs（npm run shots:readme）。 -->
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/readme/chat.webp" alt="聊天记录：消息、@、Bot 应答与择机接话按时间合并" width="100%" loading="lazy" />
+      <p><b>聊天记录</b><br /><sub>消息、@、Bot 应答与择机接话按时间合并；决策理由就地展开。</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/readme/ai-probe-tile.webp" alt="联网搜索探测报告：逐项验证请求形状、带图能力与检索证据" width="100%" loading="lazy" />
+      <p><b>联网搜索检测</b><br /><sub>逐一实测请求形状，只认网页结果或结构化引用；带图还要答对随机颜色。</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/readme/ai-settings.webp" alt="AI 设置：服务商连接、模型目录、人设与上下文预算" width="100%" loading="lazy" />
+      <p><b>AI 设置</b><br /><sub>服务商连接、模型目录、人设、上下文预算与联网检索集中管理。</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/readme/memory.webp" alt="群记忆：自动学习条件、记忆条目与来源" width="100%" loading="lazy" />
+      <p><b>群记忆</b><br /><sub>按新增、间隔或定时学习群内稳定偏好；条目与来源可查。</sub></p>
+    </td>
+  </tr>
+</table>
+
+### 择机发言与决策留痕
+
+先观察再决定。静默时段、冷却、单群与全局配额共同把关；每一次接话与不接话都有记录。
+
+<p align="center">
+  <img src="docs/images/readme/proactive-overview.webp" alt="择机发言概览：今日接话、今日决策、参与群聊与静默时段" width="100%" loading="lazy" />
+</p>
+<p align="center"><sub>今日接话 14 次、AI 实际评估 41 次；待评估窗口、静默时段与群记忆注入次数一目了然。</sub></p>
+
+<p align="center">
+  <img src="docs/images/readme/proactive-logs.webp" alt="决策留痕：结论、依据、附图、群记忆、联网状态、模型与 Token" width="100%" loading="lazy" />
+</p>
+<p align="center"><sub>决策留痕保留结论与依据；附图、群记忆、联网状态、模型和 Token 都随记录可查。</sub></p>
 
 ---
 

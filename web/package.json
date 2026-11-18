@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test": "node --test tests/*.test.mjs",
     "brand:generate": "node scripts/generate-brand.mjs",
+    "shots:readme": "node scripts/panel-screenshots.mjs",
     "pretest:ui": "npm run build",
     "test:ui": "playwright test"
   },
