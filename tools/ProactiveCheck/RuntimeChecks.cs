@@ -46,6 +46,7 @@ internal static partial class RuntimeChecks
             ("多模态搜索、配置快照和取消", ModelMultimodalAsync),
             ("最终请求预算与超长当前消息", BudgetAsync),
             ("投递未知、成功历史与用量去重", DeliveryAsync),
+            ("AI 回复来源链接的 Markdown 排版与安全降级", AiReplyMarkdownAsync),
             ("发送成功后记账失败及重启恢复配额", ReceiptFailureAsync),
             ("主动消息分钟/日配额持久化", ActiveQuotaAsync),
             ("模型运行期间关闭开关/群参与/进入静默", FinalPolicyAsync),
@@ -576,6 +577,55 @@ internal static partial class RuntimeChecks
         }
     }
 
+    private static async Task AiReplyMarkdownAsync()
+    {
+        var original = "查到两处 [来源甲](https://example.com/a?x=1)。 ([example.org](https://example.org/b))";
+        var message = AiReplyMarkdownFormatter.Format(original, "synthetic-message", 2);
+        Require(message.MsgType == 2 && message.PlainText == original && message.MsgSeq == 2,
+            "rich message keeps the original text and passive sequence");
+        Require(message.MarkdownText == "查到两处。\n\n来源：[来源甲](https://example.com/a?x=1) · [example.org](https://example.org/b)",
+            "source links move to a short footer without leaving citation wrappers");
+        Require(!AiReplyMarkdownFormatter.Format("普通闲聊，没有链接").UseMarkdown, "ordinary chat stays plain");
+        Require(!AiReplyMarkdownFormatter.Format("非法链接 [x](javascript:alert(1))").UseMarkdown, "unsafe scheme stays plain");
+        Require(AiReplyMarkdownFormatter.Format("结论喵。来源：([source](https://example.com/src))").MarkdownText
+            == "结论喵。\n\n来源：[source](https://example.com/src)", "empty citation label does not remain in body");
+        Require(AiReplyMarkdownFormatter.Format("看 https://example.com/a 和 https://example.com/a。").MarkdownText!
+            .EndsWith("来源：[example.com](https://example.com/a)"), "bare duplicate links are deduplicated");
+        Require(!AiReplyMarkdownFormatter.Format(string.Join(" ", Enumerable.Range(0, 6)
+            .Select(i => $"[s{i}](https://example.com/{i})"))).UseMarkdown,
+            "more sources than the display limit stays plain instead of silently dropping one");
+
+        await using var env = await TestEnvironment.CreateAsync();
+        var dispatcher = env.Services.GetRequiredService<ReplyDispatcher>();
+        var reply = Reply();
+        reply.Content = original;
+        var sent = await dispatcher.SendAsync(reply, false);
+        Require(sent.Sent && env.Api.PassiveCalls == 0 && env.Api.PassiveRichCalls == 1
+            && env.Api.RichMessages[^1].MarkdownText == message.MarkdownText,
+            "link reply uses passive QQ Markdown with its original text as fallback");
+
+        env.Api.Rich = m => m.UseMarkdown
+            ? throw new QqApiException(40034011, "synthetic markdown denied")
+            : Task.FromResult<string?>("synthetic-plain");
+        reply = Reply();
+        reply.Content = "另一个来源 [source](https://example.com/c)";
+        var fallback = await dispatcher.SendAsync(reply, false);
+        Require(fallback.Sent && env.Api.PassiveCalls == 1 && env.Api.PassiveRichCalls == 2
+            && env.Api.RichMessages[^1].PlainText == reply.Content,
+            "explicit Markdown rejection falls back to the original plain text exactly once");
+        Require(env.Services.GetRequiredService<RichUiCapability>().Snapshot().MarkdownState == "Denied",
+            "a rejected Markdown capability is remembered");
+
+        env.Services.GetRequiredService<RichUiCapability>().ResetForDiagnostics();
+        env.Api.Rich = _ => throw new HttpRequestException("synthetic lost markdown receipt");
+        reply = Reply();
+        reply.Content = "不确定回执 [source](https://example.com/d)";
+        var unknown = await dispatcher.SendAsync(reply, true);
+        Require(unknown.State == DeliveryStates.Unknown && env.Api.ActiveCalls == 0
+            && env.Api.PassiveRichCalls == 3,
+            "an uncertain Markdown receipt must never be replayed");
+    }
+
     private static async Task ReceiptFailureAsync()
     {
         await using var env = await TestEnvironment.CreateAsync();
@@ -583,7 +633,7 @@ internal static partial class RuntimeChecks
         var failedStore = new ReceiptFailingStore(real);
         var dispatcher = new ReplyDispatcher(env.Api, env.Services.GetRequiredService<IActiveMessageService>(),
             env.Services.GetRequiredService<ReplySeqTracker>(), failedStore, env.Services.GetRequiredService<IServiceScopeFactory>(),
-            env.Clock, NullLogger<ReplyDispatcher>.Instance);
+            env.Clock, env.Services.GetRequiredService<RichUiCapability>(), NullLogger<ReplyDispatcher>.Instance);
         var result = await dispatcher.SendAsync(Reply(proactive: true), true);
         Require(result.Sent && env.Api.PassiveCalls == 1, "receipt failure must not reverse platform success");
         var restarted = new OutgoingReplyStore(env.Services.GetRequiredService<IServiceScopeFactory>(), env.Clock);
@@ -874,6 +924,11 @@ internal static partial class RuntimeChecks
             {
                 var services = new ServiceCollection().AddLogging();
                 services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
+                services.Configure<MutterOptions>(o =>
+                {
+                    o.RichUi.Enabled = true;
+                    o.RichUi.GroupAllowList = ["GROUP"];
+                });
                 services.AddCoreServices().AddInfrastructureServices();
                 services.AddSingleton<TimeProvider>(env.Clock);
                 services.AddSingleton<IQqBotApiService>(env.Api);
@@ -954,6 +1009,9 @@ internal static partial class RuntimeChecks
         public int PassiveCalls { get; private set; }
         public int ActiveCalls { get; private set; }
         public Func<string, Task<string?>>? Passive { get; set; }
+        public Func<OutboundMessage, Task<string?>>? Rich { get; set; }
+        public List<OutboundMessage> RichMessages { get; } = [];
+        public int PassiveRichCalls { get; private set; }
         public Task InitializeAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<string?> SendGroupMessageAsync(string groupOpenId, string content, string? msgId = null, int? msgSeq = null, CancellationToken ct = default)
         {
@@ -963,7 +1021,10 @@ internal static partial class RuntimeChecks
             SendGroupMessageAsync(userOpenId, content, msgId, msgSeq, ct);
         public Task<string?> SendGroupRichAsync(string groupOpenId, OutboundMessage msg, CancellationToken ct = default)
         {
-            ActiveCalls++; return Task.FromResult<string?>("synthetic-active");
+            RichMessages.Add(msg);
+            if (msg.IsActive) ActiveCalls++;
+            else PassiveRichCalls++;
+            return Rich?.Invoke(msg) ?? Task.FromResult<string?>("synthetic-active");
         }
         public Task<string?> SendPrivateRichAsync(string userOpenId, OutboundMessage msg, CancellationToken ct = default) => SendGroupRichAsync(userOpenId, msg, ct);
         public Task<bool> DeleteGroupMessageAsync(string groupOpenId, string messageId, CancellationToken ct = default) => Task.FromResult(true);

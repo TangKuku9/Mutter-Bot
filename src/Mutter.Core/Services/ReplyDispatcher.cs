@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
+using Mutter.Core.Models.QQOfficial;
 using Mutter.Core.Proactive;
 
 namespace Mutter.Core.Services;
@@ -14,7 +15,7 @@ namespace Mutter.Core.Services;
 public sealed class ReplyDispatcher(
     IQqBotApiService api, IActiveMessageService active, ReplySeqTracker sequences,
     IOutgoingReplyStore store, IServiceScopeFactory scopes, TimeProvider clock,
-    ILogger<ReplyDispatcher> logger)
+    RichUiCapability richUi, ILogger<ReplyDispatcher> logger)
 {
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recent = new();
 
@@ -89,14 +90,43 @@ public sealed class ReplyDispatcher(
             RuntimeActivity.Current?.Mark("sending");
             if (reply.ReplyToMessageId is not null)
             {
+                var seq = sequences.Next(reply.ReplyToMessageId) ?? 0;
+                var markdown = TryCreateMarkdown(reply, reply.ReplyToMessageId, seq);
+                sendStarted = true;
                 try
                 {
-                    var seq = sequences.Next(reply.ReplyToMessageId);
-                    sendStarted = true;
-                    var id = reply.GroupId is not null
-                        ? await api.SendGroupMessageAsync(reply.GroupId, reply.Content, reply.ReplyToMessageId, seq, ct)
-                        : await api.SendPrivateMessageAsync(reply.PeerUserId!, reply.Content, reply.ReplyToMessageId, seq, ct);
+                    var id = markdown is null
+                        ? await SendPlainPassiveAsync(reply, reply.ReplyToMessageId, seq, ct)
+                        : await SendRichPassiveAsync(reply, markdown, ct);
+                    if (markdown is not null)
+                    {
+                        richUi.MarkOk(RichUiCapability.CapMarkdown);
+                        richUi.CountMarkdownSent();
+                    }
                     return new DeliveryResult(DeliveryStates.Sent, id, "passive");
+                }
+                catch (QqApiException ex) when (markdown is not null && QqApiErrorCodes.IsMarkdownDenied(ex.ErrCode))
+                {
+                    // 平台已明确拒绝 Markdown；重发纯文本是明确的降级，不是回执不明时的盲重试。
+                    richUi.ReportDenied(RichUiCapability.CapMarkdown, ex.ErrCode);
+                    richUi.CountPlainFallback();
+                    richUi.CountDegradeRetry();
+                    logger.LogWarning("Markdown 回复被拒，降级纯文本 id={Id} code={Code}", reply.Id, ex.ErrCode);
+                    var retrySeq = sequences.Next(reply.ReplyToMessageId) ?? 0;
+                    try
+                    {
+                        var id = await SendPlainPassiveAsync(reply, reply.ReplyToMessageId, retrySeq, ct);
+                        return new DeliveryResult(DeliveryStates.Sent, id, "passive");
+                    }
+                    catch (QqApiException plainEx)
+                    {
+                        if (plainEx.ErrCode is >= 500 and <= 599)
+                            return new DeliveryResult(DeliveryStates.Unknown, Detail: plainEx.Message);
+                        // 纯文本也被平台明确拒收：恢复原有被动失败→主动通道策略，不能误记未知。
+                        sendStarted = false;
+                        logger.LogWarning("Passive fallback rejected id={Id} code={Code}", reply.Id, plainEx.ErrCode);
+                        if (!allowActive) return new DeliveryResult(DeliveryStates.Failed, Detail: ProactiveOutcomes.FailedNoChannel);
+                    }
                 }
                 catch (QqApiException ex)
                 {
@@ -111,8 +141,11 @@ public sealed class ReplyDispatcher(
             if (!allowActive) return new DeliveryResult(DeliveryStates.Failed, Detail: ProactiveOutcomes.FailedNoChannel);
             ct.ThrowIfCancellationRequested();
             sendStarted = true;
+            var activeMarkdown = reply.GroupId is not null ? TryCreateMarkdown(reply, null, null) : null;
             var activeResult = reply.GroupId is not null
-                ? await active.SendGroupActiveAsync(reply.GroupId, reply.Content, ct)
+                ? activeMarkdown is not null
+                    ? await active.SendGroupActiveRichAsync(reply.GroupId, activeMarkdown, ct)
+                    : await active.SendGroupActiveAsync(reply.GroupId, reply.Content, ct)
                 : await active.SendPrivateActiveAsync(reply.PeerUserId!, reply.Content, ct);
             return activeResult.Success
                 ? new DeliveryResult(DeliveryStates.Sent, activeResult.MessageId, "active")
@@ -132,4 +165,22 @@ public sealed class ReplyDispatcher(
             return new DeliveryResult(DeliveryStates.Unknown, Detail: ex.Message);
         }
     }
+
+    private OutboundMessage? TryCreateMarkdown(OutgoingReply reply, string? msgId, int? msgSeq)
+    {
+        if (!richUi.UseMarkdown(reply.GroupId)) return null;
+        var formatted = AiReplyMarkdownFormatter.Format(reply.Content, msgId, msgSeq);
+        return formatted.MarkdownText is { Length: > 0 } markdown
+            && markdown.Length <= richUi.Options.MaxMarkdownChars ? formatted : null;
+    }
+
+    private Task<string?> SendPlainPassiveAsync(OutgoingReply reply, string? msgId, int? msgSeq, CancellationToken ct) =>
+        reply.GroupId is not null
+            ? api.SendGroupMessageAsync(reply.GroupId, reply.Content, msgId, msgSeq, ct)
+            : api.SendPrivateMessageAsync(reply.PeerUserId!, reply.Content, msgId, msgSeq, ct);
+
+    private Task<string?> SendRichPassiveAsync(OutgoingReply reply, OutboundMessage message, CancellationToken ct) =>
+        reply.GroupId is not null
+            ? api.SendGroupRichAsync(reply.GroupId, message, ct)
+            : api.SendPrivateRichAsync(reply.PeerUserId!, message, ct);
 }
