@@ -289,9 +289,13 @@ test('内建搜索报告立即更新当前目标的验证状态，不改脏标�
   assert.equal(component.builtinImageCapable.value, false)
   done('not_tested')
   assert.equal(component.builtinImageCapable.value, null)
+  component.form.value.webSearchImageCapable = true
+  done('image_unconfirmed')
+  assert.equal(component.builtinImageCapable.value, true, '图片识别不确定时沿用明确的已保存证据')
+  component.form.value.webSearchImageCapable = null
   done('verified', 'rejected')
   assert.equal(component.builtinProbeResult.value.status, 'rejected')
-  assert.equal(component.builtinTextLabel.value, '文字未通过')
+  assert.equal(component.builtinTextLabel.value, '文字联网被上游拒绝')
   assert.equal(component.builtinImageCapable.value, null)
   component.handleProbeEvent({ type: 'done', report: { reachable: true, results: [] } })
   assert.equal(component.builtinTextLabel.value, '本次报告未含该策略')
@@ -300,6 +304,30 @@ test('内建搜索报告立即更新当前目标的验证状态，不改脏标�
   assert.equal(component.isDirty.value, true)
   component.form.value.modelName = 'base-model'
   assert.equal(component.builtinTargetStale.value, false)
+})
+
+test('检测绑定发起时的连接版本，过期报告不能选用', async t => {
+  const { component, writes } = await createPage(t)
+  component.form.value.apiBaseUrl = 'https://model.example.test/v1'
+  component.form.value.providerConnectionVersion = 'version-a'
+  let finish
+  const pending = new Promise(resolve => { finish = resolve })
+  const fetchProbe = t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    assert.equal(JSON.parse(options.body).providerConnectionVersion, 'version-a')
+    assert.equal(JSON.parse(options.body).stopOnVerified, true)
+    return pending
+  })
+  const probing = component.probeWebSearch()
+  component.form.value.providerConnectionVersion = 'version-b'
+  const row = { status: 'verified', shape: 'enable_search', imageStatus: 'verified' }
+  finish(new Response(JSON.stringify({ type: 'done', report: { reachable: true, results: [row] } }) + '\n'))
+  await probing
+  assert.equal(fetchProbe.mock.calls.length, 1)
+  assert.equal(component.probeTargetChanged.value, true)
+  assert.equal(component.currentBuiltinProbe.value, null)
+  await component.applyProbe(row)
+  assert.equal(writes.length, 0)
+  assert.equal(component.form.value.webSearchShape, '')
 })
 
 test('网络设置读取失败不提交默认 false，恢复后显示真实状态', async t => {

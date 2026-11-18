@@ -350,7 +350,7 @@
             title="联网搜索已关闭。通道参数可先配置，开启总开关并保存后生效。"
           />
           <div class="ai-search-probe">
-            <el-button :loading="probing" :disabled="formBusy" @click="probeWebSearch">检测联网搜索</el-button>
+            <el-button :loading="probing" :disabled="formBusy" @click="probeWebSearch()">检测联网搜索</el-button>
             <small>
               用当前表单的地址与模型实测「模型内建搜索」；独立搜索服务优先，内建策略仅在关闭独立搜索或开启失败兜底时生效。
             </small>
@@ -499,8 +499,8 @@
                   builtinImageCapable === true
                     ? '带图已验证'
                     : builtinImageCapable === false
-                      ? '带图不支持'
-                      : '带图未测'
+                      ? '带图请求被拒'
+                      : '带图未确认'
                 }}
               </small>
             </div>
@@ -729,24 +729,23 @@
       @close="cancelProbe"
     >
       <el-alert
-        v-if="probeReport && !probeReport.reachable"
-        type="error"
+        v-if="probeReport?.error"
+        :type="probeReport.reachable && !probeReport.authFailed ? 'warning' : 'error'"
         :closable="false"
         show-icon
-        :title="probeReport.error || '上游不可达'"
+        :title="probeReport.error"
         style="margin-bottom: 12px"
       />
       <el-alert
-        v-else-if="probeReport && probeReport.authFailed"
-        type="error"
+        v-if="probeReport && probeTargetChanged"
+        type="warning"
         :closable="false"
         show-icon
-        :title="probeReport.error || '鉴权失败'"
+        title="连接、模型或凭据已变化，请重新检测"
         style="margin-bottom: 12px"
       />
 
-      <template v-else-if="probePhase === 'running'">
-        <div class="probe-summary">正在逐个形状实测当前填写的地址与模型，请稍候……</div>
+      <template v-if="probePhase === 'running'">
         <div class="probe-progress">
           <div v-if="probeProgress.length === 0" class="probe-progress-item">
             <el-icon class="is-loading"><Loading /></el-icon>
@@ -766,11 +765,9 @@
         </div>
       </template>
 
-      <template v-else-if="probeReport">
+      <template v-else-if="probeReport?.results?.length">
         <div class="probe-summary">
-          以「现在北京时间几点？」实测当前填写的地址与模型（基线 {{ probeReport.basePromptTokens ?? '?' }} prompt tokens）：
-          <b>{{ verifiedCount }}</b>
-          种形状已验证、{{ ignoredCount }} 种被静默忽略。 对已验证的形状点右侧「选用」，即时写进配置并打开联网搜索。
+          <b>{{ verifiedCount }}</b> 个文字联网策略已验证，{{ noEvidenceCount }} 个证据不足。
         </div>
         <el-table :data="probeReport.results" size="small">
           <el-table-column label="请求形状" min-width="190">
@@ -802,7 +799,7 @@
               <el-button v-if="form.webSearchShape === row.shape" size="small" type="success" plain disabled>已选用</el-button>
               <el-tooltip v-else :disabled="row.status === 'verified'" content="该形状未通过实测，不能选用" placement="top">
                 <span>
-                  <el-button size="small" type="primary" :disabled="row.status !== 'verified'" @click="applyProbe(row)">
+                  <el-button size="small" type="primary" :disabled="row.status !== 'verified' || probeTargetChanged || formBusy" @click="applyProbe(row)">
                     选用
                   </el-button>
                 </span>
@@ -811,18 +808,15 @@
           </el-table-column>
         </el-table>
         <div class="probe-footnote">
-          「已验证」= 响应携带检索证据字段，或带搜索比基线多出大量 prompt token（搜索结果被注入），
-          或回答给出了与当前北京时间吻合的时刻而基线给不出（部分中转会抹掉前两种证据）。 「被静默忽略」= 请求 2xx
-          但无任何检索证据——这正是开关打开却毫无效果的情形。
-          「选用」会把形状写入配置并打开联网搜索；独立搜索服务优先，内建策略仅在关闭独立搜索或开启失败兜底时生效；
-          换地址或模型后旧策略会自动清空，需要重新检测。
-          「带图」列需要文字联网先通过才会测试；「看不到图」表示上游接受了请求但静默丢弃了图片。
+          上游返回有效的网页结果或结构化引用时，文字联网通过验证。带图联网还需要答对随机图片。
+          「选用」会保存策略并开启联网搜索。
         </div>
       </template>
 
-      <el-alert v-else type="info" :closable="false" show-icon title="尚未收到探测结果" />
+      <el-alert v-else-if="!probeReport?.error" type="info" :closable="false" show-icon title="尚未收到探测结果" />
 
       <template #footer>
+        <el-button v-if="canRunFullProbe" :disabled="formBusy" @click="probeWebSearch(true)">完整检测</el-button>
         <el-button @click="probeDialog = false">关闭</el-button>
       </template>
     </el-dialog>
@@ -1047,29 +1041,38 @@ const baselineConfig = computed(() => {
   try { return JSON.parse(baseline.value) } catch { return null }
 })
 // 探测结论属于当时表单中的连接与模型，不修改服务端配置或保存基线。
+const readProbeTarget = (config = form.value) => ({
+  providerConnectionId: config.providerConnectionId || '',
+  providerConnectionVersion: config.providerConnectionVersion || '',
+  apiBaseUrl: config.apiBaseUrl || '',
+  apiKey: config.providerConnectionId ? '' : config.apiKey || '',
+  modelName: config.modelName || ''
+})
+const matchesProbeTarget = (target) =>
+  Object.entries(readProbeTarget()).every(([key, value]) => target[key] === value)
 const builtinProbe = ref(null)
 const currentBuiltinProbe = computed(() => {
   const probe = builtinProbe.value
-  if (!probe) return null
-  return probe.apiBaseUrl === form.value.apiBaseUrl && probe.modelName === form.value.modelName ? probe : null
+  return probe && matchesProbeTarget(probe.target) ? probe : null
 })
 const builtinProbeResult = computed(() => currentBuiltinProbe.value?.report.results?.find(row => row.shape === form.value.webSearchShape) || null)
 const builtinImageCapable = computed(() => {
   const row = builtinProbeResult.value
-  if (row?.status === 'verified' && ['verified', 'image_rejected', 'no_evidence', 'rejected'].includes(row.imageStatus)) return row.imageStatus === 'verified'
+  if (row?.status === 'verified' && ['verified', 'image_rejected'].includes(row.imageStatus)) return row.imageStatus === 'verified'
   return form.value.webSearchImageCapable ?? null
 })
 const builtinTextLabel = computed(() => {
   if (builtinTargetStale.value) return '参数已变更，需重新检测'
   if (!currentBuiltinProbe.value) return '文字已验证'
   if (!builtinProbeResult.value) return '本次报告未含该策略'
-  return builtinProbeResult.value.status === 'verified' ? '文字已验证' : '文字未通过'
+  const status = builtinProbeResult.value.status
+  return status === 'verified' ? '文字已验证' : `文字联网${verdictLabel(status)}`
 })
 const builtinTargetStale = computed(() => {
   const b = baselineConfig.value
   if (!b) return false
   if (currentBuiltinProbe.value) return false
-  return form.value.apiBaseUrl !== b.apiBaseUrl || form.value.modelName !== b.modelName
+  return !matchesProbeTarget(readProbeTarget(b))
 })
 const esTargetStale = computed(() => {
   const b = baselineConfig.value
@@ -1086,34 +1089,31 @@ const probeDialog = ref(false)
 const probeReport = ref(null)
 const probePhase = ref('running') // running | done
 const probeProgress = ref([])
+const probeTarget = ref(null)
 let probeAbort = null
 const verifiedCount = computed(() => (probeReport.value?.results || []).filter((r) => r.status === 'verified').length)
-const ignoredCount = computed(() => (probeReport.value?.results || []).filter((r) => r.status === 'no_evidence').length)
+const noEvidenceCount = computed(() => (probeReport.value?.results || []).filter((r) => r.status === 'no_evidence').length)
+const probeTargetChanged = computed(() => !!probeTarget.value && !matchesProbeTarget(probeTarget.value))
+const canRunFullProbe = computed(() => probePhase.value === 'done' && !probeTargetChanged.value
+  && probeTarget.value?.stopOnVerified && verifiedCount.value > 0
+  && probeReport.value?.results?.some(row => row.status === 'not_tested'))
 const verdictLabel = (s) => ({
-  verified: '已验证', no_evidence: '被静默忽略', rejected: '被上游拒绝',
+  verified: '已验证', no_evidence: '证据不足', rejected: '被上游拒绝',
   auth_failed: '鉴权失败', unreachable: '不可达', upstream_error: '上游错误',
-  no_native_endpoint: '无原生端点'
+  no_native_endpoint: '无原生端点', not_tested: '未测', timeout: '超时',
+  rate_limited: '限流或额度不足', quota_exceeded: '额度不足', invalid_response: '无效响应'
 }[s] || s)
 const verdictType = (s) => ({
   verified: 'success', no_evidence: 'warning', rejected: 'info',
   auth_failed: 'danger', unreachable: 'danger', upstream_error: 'danger',
-  no_native_endpoint: 'info'
+  no_native_endpoint: 'info', timeout: 'warning', invalid_response: 'warning',
+  rate_limited: 'warning', quota_exceeded: 'warning'
 }[s] || 'info')
-const evidenceLabel = (e) => ({
-  grounding_metadata: '检索元数据',
-  prompt_token_delta: 'Prompt token 差分',
-  content_time: '当前时间比对'
-}[e] || e)
+const evidenceLabel = (e) => e === 'grounding_metadata' ? '上游检索证据' : e
 const imageVerdictLabel = (s) => ({
-  verified: '已验证', image_rejected: '看不到图', no_evidence: '无检索证据',
-  rejected: '被拒绝', unreachable: '不可达', upstream_error: '上游错误',
-  no_native_endpoint: '无原生端点', not_tested: '未测'
-}[s] || s)
-const imageVerdictType = (s) => ({
-  verified: 'success', image_rejected: 'warning', no_evidence: 'warning',
-  rejected: 'info', unreachable: 'danger', upstream_error: 'danger',
-  no_native_endpoint: 'info', not_tested: 'info'
-}[s] || 'info')
+  image_rejected: '图文请求被拒', image_unconfirmed: '图片未确认'
+}[s] || verdictLabel(s))
+const imageVerdictType = (s) => ['image_rejected', 'image_unconfirmed'].includes(s) ? 'warning' : verdictType(s)
 const shapeLabel = (s) => ({
   enable_search: 'enable_search（通义/百炼）',
   web_search_tool: 'web_search 工具（智谱）',
@@ -1133,7 +1133,7 @@ const shapeShortLabel = (s) => ({
 }[s] || s)
 const fmt = (s) => (s ? new Date(s + (s.endsWith('Z') ? '' : 'Z')).toLocaleString('zh-CN', { hour12: false }) : '-')
 
-const handleProbeEvent = (ev) => {
+const handleProbeEvent = (ev, target = readProbeTarget()) => {
   if (ev.type === 'start') {
     probeProgress.value = (ev.cases || []).map((c) => ({ ...c, done: false, status: '' }))
     return
@@ -1150,7 +1150,7 @@ const handleProbeEvent = (ev) => {
   }
   if (ev.type === 'done') {
     probeReport.value = ev.report
-    builtinProbe.value = { apiBaseUrl: form.value.apiBaseUrl, modelName: form.value.modelName, report: ev.report }
+    builtinProbe.value = { target, report: ev.report }
     probePhase.value = 'done'
     return
   }
@@ -1165,14 +1165,20 @@ const handleProbeEvent = (ev) => {
   }
 }
 
-const probeWebSearch = async () => {
+const probeWebSearch = async (fullScan = false) => {
   if (!form.value.apiBaseUrl || !form.value.modelName) {
     ElMessage.warning('探测前先填写 API 地址与模型名')
     return
   }
   probeAbort?.abort()
   const aborter = new AbortController()
+  const target = {
+    ...readProbeTarget(),
+    preferredShape: form.value.webSearchShape,
+    stopOnVerified: !fullScan
+  }
   probeAbort = aborter
+  probeTarget.value = target
   probing.value = true
   probeDialog.value = true
   probeReport.value = null
@@ -1183,12 +1189,7 @@ const probeWebSearch = async () => {
     const res = await fetch('/api/config/ai/probe-websearch/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Mutter-Request': '1' },
-      body: JSON.stringify({
-        providerConnectionId: form.value.providerConnectionId,
-        apiBaseUrl: form.value.apiBaseUrl,
-        apiKey: form.value.apiKey,
-        modelName: form.value.modelName
-      }),
+      body: JSON.stringify(target),
       credentials: 'same-origin',
       signal: aborter.signal
     })
@@ -1197,8 +1198,8 @@ const probeWebSearch = async () => {
       return
     }
     if (!res.ok) {
-      const text = await res.text()
-      throw new Error(text || `HTTP ${res.status}`)
+      const details = await res.json().catch(() => null)
+      throw new Error(details?.error || `HTTP ${res.status}`)
     }
     if (!res.body) throw new Error('当前浏览器不支持流式响应')
 
@@ -1207,22 +1208,24 @@ const probeWebSearch = async () => {
     let buffer = ''
     while (true) {
       const { value, done } = await reader.read()
+      if (probeAbort !== aborter) return
       if (done) break
       buffer += decoder.decode(value, { stream: true })
       let idx
       while ((idx = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, idx).trim()
         buffer = buffer.slice(idx + 1)
-        if (line) handleProbeEvent(JSON.parse(line))
+        if (line) handleProbeEvent(JSON.parse(line), target)
       }
     }
-    if (buffer.trim()) handleProbeEvent(JSON.parse(buffer.trim()))
+    buffer += decoder.decode()
+    if (buffer.trim()) handleProbeEvent(JSON.parse(buffer.trim()), target)
     if (probePhase.value === 'running') {
       probeReport.value = { reachable: false, error: '探测流意外结束，未收到完整报告', results: [] }
       probePhase.value = 'done'
     }
   } catch (err) {
-    if (err.name === 'AbortError') return
+    if (err.name === 'AbortError' || probeAbort !== aborter) return
     probeReport.value = { reachable: false, error: `探测请求失败：${err.message || err}`, results: [] }
     probePhase.value = 'done'
   } finally {
@@ -1240,7 +1243,7 @@ const cancelProbe = () => {
 }
 
 const applyProbe = async (row) => {
-  if (row.status !== 'verified') return
+  if (row.status !== 'verified' || probeTargetChanged.value || formBusy.value) return
   // 先记住旧值：保存失败时回滚，按钮恢复「选用」，避免「已选用」假象（实际未保存）
   const previous = {
     endpoint: form.value.webSearchEndpoint,
@@ -1253,9 +1256,9 @@ const applyProbe = async (row) => {
   form.value.webSearchEnabled = true
   const imageNote = row.imageStatus === 'verified'
     ? '，带图联网已验证'
-    : row.imageStatus === 'not_tested' || !row.imageStatus
-      ? '，带图联网未测'
-      : '，但带图联网未通过'
+    : row.imageStatus === 'image_rejected'
+      ? '，带图请求被上游拒绝'
+      : '，带图联网待确认'
   let ok = false
   try {
     ok = await save(`已选用「${shapeLabel(row.shape)}」${imageNote}；联网搜索已开启`)

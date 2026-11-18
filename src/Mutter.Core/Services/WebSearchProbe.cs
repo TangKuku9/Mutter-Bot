@@ -1,95 +1,66 @@
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.Extensions.Logging;
-using Mutter.Core.Interfaces;
 using Mutter.Core.Models.Config;
 
 namespace Mutter.Core.Services;
 
-/// <summary>一次探测的判定结果。只有拿到正向证据才说"已验证"，其余宁可报"无证据"。</summary>
+/// <summary>一次探测的判定结果。</summary>
 public record WebSearchProbeVerdict(
     string Status,
     string? GroundingField = null,
     string? Note = null,
-    int? PromptTokensDelta = null,
     string? Evidence = null);
 
 /// <summary>一个探测用例：形状 + 所走端点。OpenAI 兼容形状打 /chat/completions，Gemini 形状打原生 :generateContent。</summary>
 public sealed record WebSearchProbeCase(string Shape, string Description, string Endpoint);
 
 /// <summary>
-/// 联网搜索探测的核心逻辑：对给定形状构造请求体、解析响应证据。
-/// 抽成静态纯函数是为了能被 ProactiveCheck 直接断言，不用起真实 HTTP。
+/// 联网搜索请求形状和上游证据判定。探测与正式请求共用形状定义。
 /// </summary>
 public static class WebSearchProbe
 {
-    /// <summary>
-    /// 探测用 prompt：要求可机读的时间格式。除了看元数据和 token 差，还要能从回答里认出
-    /// "当前北京时间"——部分中转会把 groundingMetadata 与 token 增量一起抹掉，
-    /// 只有回答内容能证明检索真的发生。
-    /// </summary>
-    public const string ProbeQuestion = "现在北京时间几点？请按「YYYY-MM-DD HH:mm」格式只回答日期和时间，不要解释。";
-
-    /// <summary>
-    /// 图文组合探测：先要求说出图片左右两半的颜色（证明图片真的被模型看到），
-    /// 再问当前时间（证明搜索真的发生）。只问时间无法区分“图片被静默丢弃”。
-    /// </summary>
-    public const string ImageProbeQuestion =
-        "先看图片：图片左半部分和右半部分各是什么颜色？再用「YYYY-MM-DD HH:mm」格式回答现在北京时间几点，不要解释。";
-
-    /// <summary>64×64、左红右蓝的 PNG。小到足以塞进任何请求体，又足够让模型辨认颜色。</summary>
-    public const string ImageProbePngBase64 =
-        "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAT0lEQVR42u3PsQkAAAzDsPz/dHpCp2wCzwalybTxvgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA+Dq47PDiz8p6GQAAAABJRU5ErkJggg==";
-
-    /// <summary>
-    /// 探测请求的输出上限。64 对带思考的 Gemini 3.x / o 系列不够：思考 token 会吃满额度，
-    /// 最终答复变成空串（finishReason=MAX_TOKENS），看起来像"没检索"，其实是没答完。
-    /// </summary>
+    public const string ProbeQuestion =
+        "请使用联网搜索查找最近七天发布的一篇科技新闻，简短给出新闻标题并标注来源。检索不可用时写 NO_SEARCH。";
+    // 思考模型的输出额度也可能用于推理。
     public const int ProbeMaxOutputTokens = 512;
 
-    /// <summary>
-    /// 已知携带"确实检索过"证据的响应字段（递归匹配）。各家叫法不同，命中任一即视为已验证。
-    /// </summary>
-    public static readonly string[] GroundingFieldNames =
-    [
-        "groundingMetadata", "grounding_metadata", "webSearchQueries", "web_search_queries",
-        "search_result", "searchResults", "search_results", "search_info", "searchInfo",
-        "references", "annotations", "web_search", "citations"
-    ];
-
-    /// <summary>
-    /// 探测用例矩阵。全量逐个跑、不命中即停：中转站可能同时接受多种形状但只有一种真生效。
-    /// OpenAI 兼容形状覆盖常见厂商；gemini_native 单独走原生端点——部分地址（含 Google 官方
-    /// /v1beta/openai 兼容层）的联网检索只在原生端点上生效，兼容层会静默丢弃或拒绝。
-    /// </summary>
     public static readonly WebSearchProbeCase[] Cases =
     [
         new("enable_search", "OpenAI 兼容：顶层 enable_search:true（通义/百炼）", "openai"),
         new("web_search_tool", "OpenAI 兼容：tools 声明 web_search（智谱 GLM）", "openai"),
         new("google_search_tool", "OpenAI 兼容：tools 声明 function google_search", "openai"),
-        new("web_search_options", "OpenAI 兼容：顶层 web_search_options（OpenAI Responses 风格）", "openai"),
+        new("web_search_options", "OpenAI 兼容：顶层 web_search_options（搜索模型）", "openai"),
         new("builtin_web_search", "OpenAI 兼容：tools 内联 google_search（Gemini 兼容层直传）", "openai"),
         new("gemini_native", "Gemini 原生 :generateContent + tools:[{google_search}]（declarative tool）", "gemini")
     ];
 
-    /// <summary>按 OpenAI 兼容形状构造请求体；未知形状（基线 "__baseline__"）不附任何搜索参数。</summary>
-    public static Dictionary<string, object> BuildRequestBody(string shape, string model, string question)
+    /// <summary>已绑定连接只试正式请求会使用的协议。形状提示只影响测试顺序。</summary>
+    public static WebSearchProbeCase[] OrderedCases(string apiBaseUrl, string protocol, string templateId, string preferredShape)
     {
-        var body = new Dictionary<string, object>
+        var likelyShape = templateId switch
         {
-            ["model"] = model,
-            ["max_tokens"] = ProbeMaxOutputTokens,
-            ["messages"] = new List<object> { new Dictionary<string, object> { ["role"] = "user", ["content"] = question } }
+            "qwen" => "enable_search",
+            "zhipu" => "web_search_tool",
+            "openai" => "web_search_options",
+            _ => AiProviderPreset.InferWebSearchMode(apiBaseUrl)
         };
-        ApplyShapeToBody(body, shape);
-        return body;
+        if (Uri.TryCreate(apiBaseUrl, UriKind.Absolute, out var uri))
+        {
+            if (protocol.Length == 0 && uri.Host == "generativelanguage.googleapis.com")
+                protocol = "gemini";
+            if (uri.Host == "api.openai.com")
+                likelyShape = "web_search_options";
+        }
+
+        return Cases
+            .Where(c => protocol is not ("openai" or "gemini") || c.Endpoint == protocol)
+            .OrderBy(c => c.Shape == preferredShape ? 0 : c.Shape == likelyShape ? 1 : 2)
+            .ToArray();
     }
 
     /// <summary>
-    /// 把搜索形状写进请求体。探测与运行时共用这一份定义，避免"探测用一种、正式请求用另一种"。
-    /// 未知形状（含基线）不附加任何参数。
+    /// 把搜索形状写进 OpenAI 兼容请求体。
     /// </summary>
     public static void ApplyShapeToBody(Dictionary<string, object> body, string shape)
     {
@@ -111,88 +82,6 @@ public static class WebSearchProbe
                 body["tools"] = new List<object> { new Dictionary<string, object> { ["google_search"] = new Dictionary<string, object>() } };
                 break;
         }
-    }
-
-    /// <summary>Gemini 原生 :generateContent 请求体；withTool=false 即原生侧基线。</summary>
-    public static Dictionary<string, object> BuildGeminiBody(bool withTool, string question)
-    {
-        var body = new Dictionary<string, object>
-        {
-            ["contents"] = new List<object>
-            {
-                new Dictionary<string, object>
-                {
-                    ["role"] = "user",
-                    ["parts"] = new List<object> { new Dictionary<string, object> { ["text"] = question } }
-                }
-            },
-            ["generationConfig"] = new Dictionary<string, object> { ["maxOutputTokens"] = ProbeMaxOutputTokens }
-        };
-        if (withTool)
-            body["tools"] = new List<object> { new Dictionary<string, object> { ["google_search"] = new Dictionary<string, object>() } };
-        return body;
-    }
-
-    /// <summary>OpenAI 兼容的图文探测请求体：文本 + data URI 图片 + 搜索形状。</summary>
-    public static Dictionary<string, object> BuildOpenAiImageBody(string shape, string model)
-    {
-        var body = new Dictionary<string, object>
-        {
-            ["model"] = model,
-            ["max_tokens"] = ProbeMaxOutputTokens,
-            ["messages"] = new List<object>
-            {
-                new Dictionary<string, object>
-                {
-                    ["role"] = "user",
-                    ["content"] = new List<object>
-                    {
-                        new Dictionary<string, object> { ["type"] = "text", ["text"] = ImageProbeQuestion },
-                        new Dictionary<string, object>
-                        {
-                            ["type"] = "image_url",
-                            ["image_url"] = new Dictionary<string, object>
-                            {
-                                ["url"] = $"data:image/png;base64,{ImageProbePngBase64}"
-                            }
-                        }
-                    }
-                }
-            }
-        };
-        ApplyShapeToBody(body, shape);
-        return body;
-    }
-
-    /// <summary>Gemini 原生的图文探测请求体：inline_data 图片 + 可选 google_search。</summary>
-    public static Dictionary<string, object> BuildGeminiImageBody(bool withTool)
-    {
-        var body = new Dictionary<string, object>
-        {
-            ["contents"] = new List<object>
-            {
-                new Dictionary<string, object>
-                {
-                    ["role"] = "user",
-                    ["parts"] = new List<object>
-                    {
-                        new Dictionary<string, object> { ["text"] = ImageProbeQuestion },
-                        new Dictionary<string, object>
-                        {
-                            ["inline_data"] = new Dictionary<string, object>
-                            {
-                                ["mime_type"] = "image/png",
-                                ["data"] = ImageProbePngBase64
-                            }
-                        }
-                    }
-                }
-            },
-            ["generationConfig"] = new Dictionary<string, object> { ["maxOutputTokens"] = ProbeMaxOutputTokens }
-        };
-        if (withTool)
-            body["tools"] = new List<object> { new Dictionary<string, object> { ["google_search"] = new Dictionary<string, object>() } };
-        return body;
     }
 
     /// <summary>
@@ -241,43 +130,6 @@ public static class WebSearchProbe
     }
 
     /// <summary>
-    /// 递归扫描响应 JSON 找 grounding 证据字段。返回首个命中的字段名，找不到为 null。
-    /// </summary>
-    public static string? FindGroundingField(JsonElement element)
-    {
-        if (element.ValueKind != JsonValueKind.Object) return null;
-        foreach (var prop in element.EnumerateObject())
-        {
-            if (GroundingFieldNames.Any(n => string.Equals(prop.Name, n, StringComparison.OrdinalIgnoreCase)) &&
-                prop.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array
-                    ? !IsEmptyContainer(prop.Value)
-                    : false)
-            {
-                return prop.Name;
-            }
-            if (prop.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
-            {
-                var hit = FindGroundingField(prop.Value);
-                if (hit is not null) return hit;
-            }
-        }
-        return null;
-    }
-
-    /// <summary>读请求侧 token：OpenAI 兼容是 usage.prompt_tokens，Gemini 原生是 usageMetadata.promptTokenCount。</summary>
-    public static int? ReadPromptTokens(JsonElement root)
-    {
-        if (root.ValueKind != JsonValueKind.Object) return null;
-        if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object &&
-            usage.TryGetProperty("prompt_tokens", out var pt) && pt.ValueKind == JsonValueKind.Number)
-            return pt.GetInt32();
-        if (root.TryGetProperty("usageMetadata", out var um) && um.ValueKind == JsonValueKind.Object &&
-            um.TryGetProperty("promptTokenCount", out var pc) && pc.ValueKind == JsonValueKind.Number)
-            return pc.GetInt32();
-        return null;
-    }
-
-    /// <summary>
     /// 读出响应里的正文。OpenAI 兼容取 choices[0].message.content，Gemini 原生取
     /// candidates[0].content.parts[].text 并跳过 thought 部分。
     /// </summary>
@@ -300,12 +152,7 @@ public static class WebSearchProbe
 
                 if (content.ValueKind == JsonValueKind.Array)
                 {
-                    var sb = new StringBuilder();
-                    foreach (var part in content.EnumerateArray())
-                        if (part.ValueKind == JsonValueKind.Object &&
-                            part.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
-                            sb.Append(t.GetString());
-                    return sb.ToString();
+                    return ReadMessageContent(content);
                 }
             }
         }
@@ -322,15 +169,7 @@ public static class WebSearchProbe
                     parts.ValueKind != JsonValueKind.Array)
                     continue;
 
-                foreach (var part in parts.EnumerateArray())
-                {
-                    if (part.ValueKind != JsonValueKind.Object) continue;
-                    // 思考段不是给用户的答复，且常夹带"我无法获取实时时间"之类的自述
-                    if (part.TryGetProperty("thought", out var thought) && thought.ValueKind == JsonValueKind.True)
-                        continue;
-                    if (part.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
-                        sb.Append(t.GetString());
-                }
+                sb.Append(ReadTextParts(parts, skipThought: true));
             }
             return sb.ToString();
         }
@@ -338,379 +177,149 @@ public static class WebSearchProbe
         return string.Empty;
     }
 
-    private static readonly Regex FullDateTimePattern = new(
-        @"(20\d{2})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})\s*日?[^\d]{0,8}(\d{1,2})\s*[:：]\s*(\d{1,2})",
-        RegexOptions.Compiled);
+    private static string ReadMessageContent(JsonElement content) =>
+        content.ValueKind == JsonValueKind.String ? content.GetString() ?? string.Empty : ReadTextParts(content);
 
-    private static readonly Regex TimeOnlyPattern = new(
-        @"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)",
-        RegexOptions.Compiled);
-
-    private static readonly Regex RefusalPattern = new(
-        @"无法(获取|提供|获得|得知)|不能(获取|提供|获得)|没有实时|不具备实时|虚拟时间",
-        RegexOptions.Compiled);
-
-    /// <summary>
-    /// 回答里是否给出了"此刻的北京时间"。用于会同时抹掉 groundingMetadata 与 token
-    /// 增量一起抹掉的中转：基线答不出、候选答得出，就是检索发生过的行为证据。
-    /// 必须与基线做差分——端点自己带时钟时两边都能答对，不能算检索。
-    /// </summary>
-    public static bool ContainsCurrentBeijingTime(string? text, DateTimeOffset? now = null)
+    private static string ReadTextParts(JsonElement parts, bool skipThought = false)
     {
-        if (string.IsNullOrWhiteSpace(text) || RefusalPattern.IsMatch(text)) return false;
-
-        var bj = (now ?? DateTimeOffset.UtcNow).ToOffset(TimeSpan.FromHours(8));
-
-        var full = FullDateTimePattern.Matches(text);
-        if (full.Count > 0)
+        if (parts.ValueKind != JsonValueKind.Array) return string.Empty;
+        var text = new StringBuilder();
+        foreach (var part in parts.EnumerateArray())
         {
-            foreach (Match m in full)
-            {
-                if (!int.TryParse(m.Groups[1].Value, out var y) ||
-                    !int.TryParse(m.Groups[2].Value, out var mo) ||
-                    !int.TryParse(m.Groups[3].Value, out var d) ||
-                    !int.TryParse(m.Groups[4].Value, out var h) ||
-                    !int.TryParse(m.Groups[5].Value, out var mi)) continue;
-                if (mo is < 1 or > 12 || d < 1 || h is < 0 or > 23 || mi is < 0 or > 59) continue;
-                try
-                {
-                    var dt = new DateTime(y, mo, d, h, mi, 0);
-                    if (dt.Date == bj.Date && WithinMinutes(dt.TimeOfDay, bj.TimeOfDay, ToleranceMinutes))
-                        return true;
-                }
-                catch (ArgumentOutOfRangeException) { /* 非法日期，跳过 */ }
-            }
-            // 有完整日期时只认完整日期，避免把错误日期里的时间部分单独当成证据
-            return false;
+            if (skipThought && Property(part, "thought").ValueKind == JsonValueKind.True) continue;
+            text.Append(StringProperty(part, "text"));
         }
-
-        foreach (Match m in TimeOnlyPattern.Matches(text))
-        {
-            if (!int.TryParse(m.Groups[1].Value, out var h) ||
-                !int.TryParse(m.Groups[2].Value, out var mi)) continue;
-            if (h is < 0 or > 23 || mi is < 0 or > 59) continue;
-            if (WithinMinutes(new TimeSpan(h, mi, 0), bj.TimeOfDay, ToleranceMinutes))
-                return true;
-        }
-        return false;
+        return text.ToString();
     }
 
-    private const int ToleranceMinutes = 20;
-
-    private static bool WithinMinutes(TimeSpan a, TimeSpan b, int tolerance)
-    {
-        var diff = Math.Abs((a - b).TotalMinutes);
-        return Math.Min(diff, 1440 - diff) <= tolerance;
-    }
-
-    /// <summary>把一次探测的原始证据归约为判定。</summary>
     public static WebSearchProbeVerdict Verdict(
-        string shape, int? httpStatus, JsonElement? responseRoot, int? promptTokensDelta,
-        string? baselineText = null, string? responseText = null, DateTimeOffset? now = null)
+        ProbeSendResult response, string endpoint, WebSearchImageChallenge? image = null)
     {
-        if (httpStatus is null)
-            return new WebSearchProbeVerdict("unreachable", Note: "请求未得到响应");
-
-        if (httpStatus is 401 or 403)
-            return new WebSearchProbeVerdict("auth_failed", Note: "Key 无效或无权限（该结论与搜索无关）");
-
-        if (httpStatus is >= 400 and < 500)
-            return new WebSearchProbeVerdict("rejected", Note: $"上游以 {httpStatus} 拒绝了该形状");
-
-        if (httpStatus >= 500)
-            return new WebSearchProbeVerdict("upstream_error", Note: $"上游服务端错误 {httpStatus}");
-
-        // 2xx：只有两种可能——真检索了，或被静默忽略
-        if (responseRoot is { } root)
+        var failure = response.Status switch
         {
-            var field = FindGroundingField(root);
-            if (field is not null)
-                return new WebSearchProbeVerdict("verified", field, "响应携带检索证据字段", promptTokensDelta, "grounding_metadata");
+            null when response.TimedOut => new WebSearchProbeVerdict("timeout", Note: response.Error),
+            null => new WebSearchProbeVerdict("unreachable", Note: response.Error ?? "请求未得到响应"),
+            401 or 403 => new WebSearchProbeVerdict("auth_failed", Note: $"上游拒绝鉴权或访问（HTTP {response.Status}）"),
+            402 => new WebSearchProbeVerdict("quota_exceeded", Note: "上游要求付费或补充额度（HTTP 402）"),
+            429 => new WebSearchProbeVerdict("rate_limited", Note: "上游限流或额度不足（HTTP 429）"),
+            408 or 504 => new WebSearchProbeVerdict("timeout", Note: $"上游超时（HTTP {response.Status}）"),
+            404 when endpoint == "gemini" =>
+                new WebSearchProbeVerdict("no_native_endpoint", Note: "该地址和模型未找到 Gemini 原生接口（HTTP 404）"),
+            >= 500 => new WebSearchProbeVerdict("upstream_error", Note: $"上游服务错误（HTTP {response.Status}）"),
+            >= 400 => new WebSearchProbeVerdict("rejected", Note: $"上游拒绝该请求（HTTP {response.Status}）"),
+            < 200 or >= 300 =>
+                new WebSearchProbeVerdict("invalid_response", Note: $"上游返回了非预期状态（HTTP {response.Status}）"),
+            _ => null
+        };
+        if (failure is not null) return failure;
 
-            if (promptTokensDelta is >= 50)
-                return new WebSearchProbeVerdict("verified", null,
-                    $"无元数据字段，但带搜索比不带多 {promptTokensDelta} 个 prompt token——搜索结果被注入了上下文",
-                    promptTokensDelta, "prompt_token_delta");
+        var root = response.Root ?? default;
+        if (root.ValueKind != JsonValueKind.Object)
+            return new("invalid_response", Note: "上游未返回有效的 JSON 对象");
+        if (Property(root, "error").ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))
+            return new("upstream_error", Note: "上游响应中包含错误");
 
-            // 第三类证据：内容差分。部分中转把元数据和 token 增量全抹掉，只有回答本身能证明检索发生。
-            if (ContainsCurrentBeijingTime(responseText, now))
+        var isGemini = endpoint == "gemini";
+        var reply = FirstItem(Property(root, isGemini ? "candidates" : "choices"));
+        if (reply.ValueKind != JsonValueKind.Object)
+            return new("invalid_response", Note: "上游响应缺少模型答复");
+
+        var message = Property(reply, "message");
+        var field = FindGroundingField(root, reply, message);
+        var evidence = field is null ? null : "grounding_metadata";
+
+        if (image is not null)
+        {
+            var text = isGemini
+                ? ReadTextParts(Property(Property(reply, "content"), "parts"), skipThought: true)
+                : ReadMessageContent(Property(message, "content"));
+            if (!image.Matches(text))
+                return new("image_unconfirmed", field, "答复未正确识别本次图片的颜色顺序", evidence);
+        }
+
+        if (field is not null)
+            return new("verified", field,
+                image is null ? "上游返回了有效的网页检索结果或引用" : "图片答对，且上游返回了网页检索证据",
+                evidence);
+
+        var note = HasItems(Property(message, "tool_calls")) ||
+                   ArrayHas(Property(Property(reply, "content"), "parts"),
+                       part => Property(part, "functionCall").ValueKind == JsonValueKind.Object)
+            ? "模型发出了等待客户端执行的工具调用，响应中没有检索结果"
+            : NoEvidenceNote(root, reply);
+        return new("no_evidence", Note: image is null ? note : $"图片已识别。{note}");
+    }
+
+    private static string NoEvidenceNote(JsonElement root, JsonElement reply)
+    {
+        var usage = Property(root, "usage");
+        var searchCount = Property(Property(Property(usage, "x_tools"), "search"), "count");
+        // 百炼 Chat Completions 在意图识别阶段就会设置 count。
+        if (searchCount.ValueKind == JsonValueKind.Number && searchCount.TryGetInt32(out var count) && count > 0)
+            return "上游报告了检索意图，暂未提供可核验的检索结果";
+
+        if (StringProperty(reply, "finish_reason") == "length" ||
+            StringProperty(reply, "finishReason") == "MAX_TOKENS")
+            return "模型输出达到长度上限，未收到有效检索证据";
+
+        return "上游接受了请求，暂未提供可核验的检索结果";
+    }
+
+    private static string? FindGroundingField(JsonElement root, JsonElement reply, JsonElement message)
+    {
+        // 只读协议约定的响应位置，忽略输入回显、工具参数、正文和其他无关数据。
+        foreach (var container in new[] { reply, message, root })
+        {
+            foreach (var field in new[] { "groundingMetadata", "grounding_metadata" })
             {
-                if (!ContainsCurrentBeijingTime(baselineText, now))
-                    return new WebSearchProbeVerdict("verified", null,
-                        "回答给出了与当前北京时间吻合的时刻，而基线给不出——检索已生效",
-                        promptTokensDelta, "content_time");
-
-                return new WebSearchProbeVerdict("no_evidence", null,
-                    "回答给出了当前时间，但基线也能给出——端点本身可能带时钟，不能证明检索生效",
-                    promptTokensDelta);
-            }
-
-            return new WebSearchProbeVerdict("no_evidence", null,
-                promptTokensDelta is int d
-                    ? $"2xx 但无检索证据，token 差 {d}——形状被静默忽略的可能性大"
-                    : "2xx 但无检索证据，且响应缺 usage 字段，无法做 token 差分",
-                promptTokensDelta);
-        }
-
-        return new WebSearchProbeVerdict("no_evidence", Note: "2xx 但响应不是可解析的 JSON");
-    }
-
-    /// <summary>模型是否真的读到了左红右蓝的探测图。只答时间不能证明图片没被静默丢弃。</summary>
-    public static bool ImageProbeSawImage(string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return false;
-        var lower = text.ToLowerInvariant();
-        return (lower.Contains('红') || lower.Contains("red"))
-            && (lower.Contains('蓝') || lower.Contains("blue"));
-    }
-
-    /// <summary>
-    /// 图文组合的判定：先看图片是否被识别，再复用文本探测的三类搜索证据。
-    /// 图片没识别出来时，即使 2xx 也只能报“看不到图”，不能报已验证。
-    /// </summary>
-    public static WebSearchProbeVerdict ImageVerdict(
-        string shape, int? httpStatus, JsonElement? responseRoot, int? promptTokensDelta,
-        string? baselineText = null, string? responseText = null, DateTimeOffset? now = null)
-    {
-        var searchVerdict = Verdict(shape, httpStatus, responseRoot, promptTokensDelta,
-            baselineText, responseText, now);
-
-        if (searchVerdict.Status is "unreachable" or "auth_failed" or "rejected" or "upstream_error")
-            return searchVerdict;
-
-        if (!ImageProbeSawImage(responseText))
-            return new WebSearchProbeVerdict("image_rejected", null,
-                "请求成功但模型没有读出图片里的颜色——上游可能静默丢弃了图片",
-                promptTokensDelta);
-
-        return searchVerdict.Status == "verified"
-            ? searchVerdict with { Note = "图片已识别；" + searchVerdict.Note }
-            : searchVerdict with { Note = "图片已识别，但搜索无证据：" + searchVerdict.Note };
-    }
-
-    private static bool IsEmptyContainer(JsonElement e) => e.ValueKind switch
-    {
-        JsonValueKind.Object => !e.EnumerateObject().Any(),
-        JsonValueKind.Array => !e.EnumerateArray().Any(),
-        _ => true
-    };
-}
-
-/// <summary>单次探测请求的结果。</summary>
-public sealed record ProbeSendResult(int? Status, JsonElement? Root, string? Error);
-
-/// <summary>
-/// 探测端点的运行时壳：真实发 HTTP。逻辑部分全部委托给 <see cref="WebSearchProbe"/>。
-/// </summary>
-public class WebSearchProbeRunner(HttpClient httpClient, ILogger<WebSearchProbeRunner> logger,
-    IAiCallStore? callStore = null, TimeProvider? clock = null,
-    IReadOnlyDictionary<string, string>? requestHeaders = null,
-    string driverTemplateId = "", int? requestTimeoutSeconds = null)
-{
-    public WebSearchProbeRunner WithHeaders(IReadOnlyDictionary<string, string> headers) =>
-        new(httpClient, logger, callStore, clock, headers, driverTemplateId, requestTimeoutSeconds);
-
-    /// <summary>探测必须和正式请求使用同一套模板参数与请求头，否则“探测通过、线上失败”；超时另有 45 秒上限。</summary>
-    public WebSearchProbeRunner WithConnection(
-        IReadOnlyDictionary<string, string> headers, string templateId, int? timeoutSeconds) =>
-        new(httpClient, logger, callStore, clock, headers, templateId, timeoutSeconds);
-
-    private AiConfig ProbeConfig(string apiBaseUrl, string model) => new()
-    {
-        ApiBaseUrl = apiBaseUrl, ModelName = model,
-        ProviderTemplateId = driverTemplateId, ConnectionTimeoutSeconds = requestTimeoutSeconds
-    };
-
-    /// <summary>空 Key 不发任何认证头（本地无认证代理）；Gemini 非官方 Key 同时带 Bearer 兼容中转。</summary>
-    private static void ApplyApiKey(HttpRequestMessage request, string apiKey, bool gemini)
-    {
-        if (apiKey.Length == 0) return;
-        if (!gemini)
-        {
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-            return;
-        }
-        request.Headers.Add("x-goog-api-key", apiKey);
-        if (!apiKey.StartsWith("AIza", StringComparison.Ordinal))
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-    }
-
-    private void ApplyHeaders(HttpRequestMessage request)
-    {
-        foreach (var (name, value) in requestHeaders ?? new Dictionary<string, string>())
-        {
-            request.Headers.Remove(name);
-            request.Headers.TryAddWithoutValidation(name, value);
-        }
-    }
-    /// <summary>单形状请求超时：探测矩阵要连打多次，连接上的更长超时也截到 45 秒。
-    /// 慢模型可能在探测里超时、线上却可用；这里优先保证面板能及时给出结论。</summary>
-    private TimeSpan RequestTimeout => requestTimeoutSeconds is int seconds
-        ? TimeSpan.FromSeconds(Math.Clamp(seconds, 5, 45))
-        : PerRequestTimeout;
-
-    private static readonly TimeSpan PerRequestTimeout = TimeSpan.FromSeconds(20);
-
-    /// <summary>shape 为 null 表示该端点的基线请求（不带任何搜索参数）。</summary>
-    public async Task<ProbeSendResult> SendAsync(
-        string apiBaseUrl, string apiKey, string endpoint, string? shape, string model, CancellationToken ct = default)
-    {
-        return endpoint == "gemini"
-            ? await SendGeminiAsync(apiBaseUrl, apiKey, withTool: shape is not null, model, ct)
-            : await SendOpenAiAsync(apiBaseUrl, apiKey, shape ?? "__baseline__", model, ct);
-    }
-
-    /// <summary>带内置图片的探测：shape 为 null 表示图文基线（不带搜索）。</summary>
-    public async Task<ProbeSendResult> SendImageAsync(
-        string apiBaseUrl, string apiKey, string endpoint, string? shape, string model, CancellationToken ct = default)
-    {
-        return endpoint == "gemini"
-            ? await SendGeminiImageAsync(apiBaseUrl, apiKey, withTool: shape is not null, model, ct)
-            : await SendOpenAiImageAsync(apiBaseUrl, apiKey, shape ?? "__baseline__", model, ct);
-    }
-
-    private async Task<ProbeSendResult> SendOpenAiImageAsync(
-        string apiBaseUrl, string apiKey, string shape, string model, CancellationToken ct)
-    {
-        var body = WebSearchProbe.BuildOpenAiImageBody(shape, model);
-        AiModelRequestCompatibility.Apply(body, ProbeConfig(apiBaseUrl, model));
-        var url = $"{apiBaseUrl.TrimEnd('/')}/chat/completions";
-        try
-        {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(RequestTimeout);
-            using var request = new HttpRequestMessage(HttpMethod.Post, url);
-            ApplyApiKey(request, apiKey, gemini: false);
-            request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
-            ApplyHeaders(request);
-            using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "openai", cts.Token, callStore, logger, clock, "probe", "probe");
-            var raw = await response.Content.ReadAsStringAsync(cts.Token);
-            JsonElement? root = null;
-            try { root = JsonDocument.Parse(raw).RootElement.Clone(); } catch { /* 非 JSON 响应保留状态码 */ }
-            return new ProbeSendResult((int)response.StatusCode, root, null);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            logger.LogWarning("Image web search probe timed out for {Url} shape={Shape}", url, shape);
-            return new ProbeSendResult(null, null, $"请求超时（>{RequestTimeout.TotalSeconds:F0}s）");
-        }
-        catch (HttpRequestException ex)
-        {
-            logger.LogWarning("Image web search probe failed for {Url}: {Message}", url, ex.Message);
-            return new ProbeSendResult(null, null, ex.Message);
-        }
-    }
-
-    private async Task<ProbeSendResult> SendGeminiImageAsync(
-        string apiBaseUrl, string apiKey, bool withTool, string model, CancellationToken ct)
-    {
-        var json = JsonSerializer.Serialize(WebSearchProbe.BuildGeminiImageBody(withTool));
-        string? lastPath = null;
-        foreach (var url in WebSearchProbe.GeminiUrlCandidates(apiBaseUrl, model))
-        {
-            try
-            {
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cts.CancelAfter(RequestTimeout);
-                using var request = new HttpRequestMessage(HttpMethod.Post, url);
-                ApplyApiKey(request, apiKey, gemini: true);
-                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
-                ApplyHeaders(request);
-                using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "gemini", cts.Token, callStore, logger, clock, "probe", "probe");
-                var raw = await response.Content.ReadAsStringAsync(cts.Token);
-                JsonElement? root = null;
-                try { root = JsonDocument.Parse(raw).RootElement.Clone(); } catch { }
-                if ((int)response.StatusCode == 404)
-                {
-                    lastPath = url;
-                    continue;
-                }
-                return new ProbeSendResult((int)response.StatusCode, root, null);
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                logger.LogWarning("Web search probe timed out for {Url}", url);
-                return new ProbeSendResult(null, null, $"请求超时（>{RequestTimeout.TotalSeconds:F0}s）");
-            }
-            catch (HttpRequestException ex)
-            {
-                logger.LogWarning("Image web search probe failed for {Url}: {Message}", url, ex.Message);
-                return new ProbeSendResult(null, null, ex.Message);
+                var metadata = Property(container, field);
+                if (HasWebChunks(Property(metadata, "groundingChunks")) ||
+                    HasWebChunks(Property(metadata, "grounding_chunks")))
+                    return field;
             }
         }
-        return new ProbeSendResult(404, null, $"未找到 Gemini 原生端点（最后尝试 {lastPath}）");
+
+        foreach (var container in new[] { root, message, Property(root, "search_info"), Property(root, "searchInfo") })
+        {
+            foreach (var field in new[] { "web_search", "search_result", "search_results", "searchResults" })
+            {
+                if (ArrayHas(Property(container, field), item => HasWebUrl(item, "link") || HasWebUrl(item, "url")))
+                    return field;
+            }
+        }
+
+        if (HasWebCitation(message) || ArrayHas(Property(message, "content"), HasWebCitation))
+            return "annotations";
+
+        return null;
     }
 
-    private async Task<ProbeSendResult> SendOpenAiAsync(
-        string apiBaseUrl, string apiKey, string shape, string model, CancellationToken ct)
+    private static bool HasWebChunks(JsonElement chunks) =>
+        ArrayHas(chunks, chunk => HasWebUrl(Property(chunk, "web"), "uri"));
+
+    private static bool HasWebCitation(JsonElement message) =>
+        ArrayHas(Property(message, "annotations"), annotation =>
+            StringProperty(annotation, "type") == "url_citation" &&
+            (HasWebUrl(Property(annotation, "url_citation"), "url") || HasWebUrl(annotation, "url")));
+
+    private static bool HasWebUrl(JsonElement element, string name) =>
+        Uri.TryCreate(StringProperty(element, name), UriKind.Absolute, out var uri) &&
+        uri.Scheme is "http" or "https" && uri.Host.Length > 0;
+
+    private static JsonElement Property(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) ? value : default;
+
+    private static string? StringProperty(JsonElement element, string name)
     {
-        var body = WebSearchProbe.BuildRequestBody(shape, model, WebSearchProbe.ProbeQuestion);
-        AiModelRequestCompatibility.Apply(body, ProbeConfig(apiBaseUrl, model));
-        var url = $"{apiBaseUrl.TrimEnd('/')}/chat/completions";
-        try
-        {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(RequestTimeout);
-            using var request = new HttpRequestMessage(HttpMethod.Post, url);
-            ApplyApiKey(request, apiKey, gemini: false);
-            request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
-            ApplyHeaders(request);
-            using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "openai", cts.Token, callStore, logger, clock, "probe", "probe");
-            var raw = await response.Content.ReadAsStringAsync(cts.Token);
-            JsonElement? root = null;
-            try { root = JsonDocument.Parse(raw).RootElement.Clone(); } catch { /* 非 JSON 响应保留状态码 */ }
-            return new ProbeSendResult((int)response.StatusCode, root, null);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            logger.LogWarning("Web search probe timed out for {Url} shape={Shape}", url, shape);
-            return new ProbeSendResult(null, null, $"请求超时（>{RequestTimeout.TotalSeconds:F0}s）");
-        }
-        catch (HttpRequestException ex)
-        {
-            logger.LogWarning("Web search probe failed for {Url}: {Message}", url, ex.Message);
-            return new ProbeSendResult(null, null, ex.Message);
-        }
+        var value = Property(element, name);
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     }
 
-    private async Task<ProbeSendResult> SendGeminiAsync(
-        string apiBaseUrl, string apiKey, bool withTool, string model, CancellationToken ct)
-    {
-        var json = JsonSerializer.Serialize(WebSearchProbe.BuildGeminiBody(withTool, WebSearchProbe.ProbeQuestion));
-        string? lastPath = null;
-        foreach (var url in WebSearchProbe.GeminiUrlCandidates(apiBaseUrl, model))
-        {
-            try
-            {
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cts.CancelAfter(RequestTimeout);
-                using var request = new HttpRequestMessage(HttpMethod.Post, url);
-                ApplyApiKey(request, apiKey, gemini: true);
-                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
-                ApplyHeaders(request);
-                using var response = await AiHttpAudit.SendAsync(httpClient, request, model, "gemini", cts.Token, callStore, logger, clock, "probe", "probe");
-                var raw = await response.Content.ReadAsStringAsync(cts.Token);
-                JsonElement? root = null;
-                try { root = JsonDocument.Parse(raw).RootElement.Clone(); } catch { }
-                if ((int)response.StatusCode == 404)
-                {
-                    lastPath = url;
-                    continue; // 该路径没有原生端点，试下一个候选
-                }
-                return new ProbeSendResult((int)response.StatusCode, root, null);
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                logger.LogWarning("Web search probe timed out for {Url}", url);
-                return new ProbeSendResult(null, null, $"请求超时（>{RequestTimeout.TotalSeconds:F0}s）");
-            }
-            catch (HttpRequestException ex)
-            {
-                logger.LogWarning("Web search probe failed for {Url}: {Message}", url, ex.Message);
-                return new ProbeSendResult(null, null, ex.Message);
-            }
-        }
-        // 全部候选 404：以 404 状态回传，让上层报"无原生端点"而不是笼统的拒绝
-        return new ProbeSendResult(404, null, $"未找到 Gemini 原生端点（最后尝试 {lastPath}）");
-    }
+    private static bool HasItems(JsonElement array) =>
+        array.ValueKind == JsonValueKind.Array && array.GetArrayLength() > 0;
+
+    private static JsonElement FirstItem(JsonElement array) => HasItems(array) ? array[0] : default;
+
+    private static bool ArrayHas(JsonElement array, Func<JsonElement, bool> predicate) =>
+        array.ValueKind == JsonValueKind.Array && array.EnumerateArray().Any(predicate);
 }
