@@ -30,9 +30,9 @@ public static class ServiceCollectionExtensions
             .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(20));
         services.AddSingleton<IAiImageResolver, AiImageResolver>();
         services.AddSingleton<AiSearchCapabilityStore>();
-        // 联网搜索探测：独立短超时客户端，与正式 AI 调用互不干扰；探测带密钥，不跟随重定向
+        // 联网搜索探测在 Runner 内统一控制超时；探测带密钥，不跟随重定向。
         Guarded(services.AddHttpClient<WebSearchProbeRunner>(), allowRedirect: false)
-            .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(25));
+            .ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan);
         // 独立搜索服务（预检索注入）：typed client 独立成池，超时钳制在 Provider 基座内按配置生效。
         // AddHttpClient<T> 只注册具体类型，这里再补 IWebSearchProvider 转发，
         // ExternalSearchService 才能通过 IEnumerable<IWebSearchProvider> 收齐全部 Provider。

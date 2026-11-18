@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using Mutter.Core.Configuration;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models.Config;
+using Mutter.Core.Services;
 using Mutter.Core.Services.WebSearch;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
@@ -511,14 +512,14 @@ public partial class ConfigController : ControllerBase
 
         // 先取本次探测对“提交策略”的结论：刚探测并选用的形状即使目标同时变了也必须保留。
         var probed = shape.Length > 0
-            ? _capabilities.GetProbeImageCapability(targetBaseUrl, targetModel, shape, dto.ProviderConnectionId)
-            : null;
+            ? _capabilities.GetProbeResult(targetBaseUrl, targetModel, shape, dto.ProviderConnectionId, dto.ProviderConnectionVersion)
+            : default;
 
         // 换了地址或模型，旧策略的验证结论不再可信：除了本次同时选用的新策略，一律清空回退自动推断。
         var targetChanged = !string.Equals(previousBaseUrl, dto.ApiBaseUrl, StringComparison.Ordinal)
                          || previousConnection != dto.ProviderConnectionId
                          || !string.Equals(previousModelName, dto.ModelName, StringComparison.Ordinal);
-        if (targetChanged && probed is null &&
+        if (targetChanged && !probed.TextVerified &&
             string.Equals(shape, entity.WebSearchShape, StringComparison.Ordinal) &&
             string.Equals(endpoint, entity.WebSearchEndpoint, StringComparison.Ordinal))
         {
@@ -532,7 +533,7 @@ public partial class ConfigController : ControllerBase
         // 顺序不能反：Clear 会连探测账本一起清掉，先 Clear 再把“刚测出的结论”读成 undefined。
         // 用提交时的形状清理，而不是上面可能已被重置为空的 shape。
         if (targetChanged || strategyChanged)
-            _capabilities.Clear(targetBaseUrl, targetModel, dto.WebSearchShape, dto.ProviderConnectionId);
+            _capabilities.Clear(targetBaseUrl, targetModel, dto.WebSearchShape, dto.ProviderConnectionId, dto.ProviderConnectionVersion);
 
         entity.WebSearchEndpoint = endpoint;
         entity.WebSearchShape = shape;
@@ -547,7 +548,7 @@ public partial class ConfigController : ControllerBase
             entity.WebSearchImageVerifiedAt = null;
         }
 
-        if (probed is bool imageCapable)
+        if (probed.ImageCapable is bool imageCapable)
         {
             entity.WebSearchImageCapable = imageCapable;
             entity.WebSearchImageVerifiedAt = DateTime.UtcNow;
@@ -1006,44 +1007,33 @@ public partial class ConfigController : ControllerBase
     [HttpPost("ai/probe-websearch")]
     public async Task<IActionResult> ProbeWebSearch(
         [FromBody] WebSearchProbeDto dto,
-        [FromServices] Mutter.Core.Services.WebSearchProbeRunner runner,
+        [FromServices] WebSearchProbeRunner runner,
         CancellationToken ct)
     {
         if (!TryReadProbeTarget(dto, out var apiBaseUrl, out var model, out var badRequest))
             return BadRequest(new { error = badRequest });
 
-        var (apiKey, keyError) = await ResolveProbeApiKeyAsync(dto);
-        if (apiKey is null)
-            return BadRequest(new { error = keyError ?? "尚未保存过 API Key，请先填写并保存配置再探测" });
+        var (connection, error) = await ResolveProbeConnectionAsync(dto, apiBaseUrl, model, runner, ct);
+        if (connection is null)
+            return BadRequest(new { error });
 
         WebSearchProbeReportDto? report = null;
-        WebSearchProbeEventDto? failure = null;
-        await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct, dto.ProviderConnectionId ?? ""))
+        await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, model, dto, connection, ct))
         {
             if (ev.Type == "done") report = ev.Report;
-            else if (ev.Type == "error") failure = ev;
         }
-
-        if (failure is not null)
-            return Ok(new WebSearchProbeReportDto
-            {
-                Reachable = failure.Reachable ?? false,
-                AuthFailed = failure.AuthFailed ?? false,
-                Error = failure.Error,
-                Results = []
-            });
 
         return Ok(report);
     }
 
     /// <summary>
     /// 联网搜索探测（NDJSON 流）：每完成一个形状推一行，面板据此显示转圈/打钩。
-    /// 事件顺序：start（用例清单）→ 若干 case（单个结果）→ done（完整报告）；失败推 error。
+    /// 事件顺序：start（用例清单）→ 若干 case（单个结果）→ done（完整报告）。
     /// </summary>
     [HttpPost("ai/probe-websearch/stream")]
     public async Task ProbeWebSearchStream(
         [FromBody] WebSearchProbeDto dto,
-        [FromServices] Mutter.Core.Services.WebSearchProbeRunner runner,
+        [FromServices] WebSearchProbeRunner runner,
         CancellationToken ct)
     {
         if (!TryReadProbeTarget(dto, out var apiBaseUrl, out var model, out var badRequest))
@@ -1053,11 +1043,11 @@ public partial class ConfigController : ControllerBase
             return;
         }
 
-        var (apiKey, keyError) = await ResolveProbeApiKeyAsync(dto);
-        if (apiKey is null)
+        var (connection, error) = await ResolveProbeConnectionAsync(dto, apiBaseUrl, model, runner, ct);
+        if (connection is null)
         {
             Response.StatusCode = StatusCodes.Status400BadRequest;
-            await Response.WriteAsJsonAsync(new { error = keyError ?? "尚未保存过 API Key，请先填写并保存配置再探测" }, ct);
+            await Response.WriteAsJsonAsync(new { error }, ct);
             return;
         }
 
@@ -1069,7 +1059,7 @@ public partial class ConfigController : ControllerBase
         var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         try
         {
-            await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, apiKey, model, runner, ct, dto.ProviderConnectionId ?? ""))
+            await foreach (var ev in RunProbeEventsAsync(apiBaseUrl, model, dto, connection, ct))
             {
                 await Response.WriteAsync(JsonSerializer.Serialize(ev, jsonOptions) + "\n", ct);
                 await Response.Body.FlushAsync(ct);
@@ -1085,10 +1075,10 @@ public partial class ConfigController : ControllerBase
     private static bool TryReadProbeTarget(
         WebSearchProbeDto dto, out string apiBaseUrl, out string model, out string error)
     {
-        apiBaseUrl = dto.ApiBaseUrl?.Trim() ?? string.Empty;
+        apiBaseUrl = AiConnectionStore.NormalizeUrl(dto.ApiBaseUrl ?? string.Empty);
         model = dto.ModelName?.Trim() ?? string.Empty;
-        error = string.IsNullOrWhiteSpace(apiBaseUrl) || string.IsNullOrWhiteSpace(model)
-            ? "探测前先填写 API 地址与模型名"
+        error = apiBaseUrl.Length == 0 || model.Length == 0 ? "探测前先填写 API 地址与模型名"
+            : !AiConnectionStore.IsValidUrl(apiBaseUrl) ? "请输入有效的 HTTP 或 HTTPS 模型服务地址"
             : string.Empty;
         return error.Length == 0;
     }
@@ -1097,228 +1087,144 @@ public partial class ConfigController : ControllerBase
     /// Key 传打码值说明表单没改：探测必须用真 Key，从库里取。
     /// 沿用已保存 Key 时目标必须仍是保存时的 origin，否则打码值会把密钥带去任意主机。
     /// </summary>
-    private async Task<(string? Key, string? Error)> ResolveProbeApiKeyAsync(WebSearchProbeDto dto)
+    private sealed record ProbeConnection(
+        string ApiKey, WebSearchProbeRunner Runner, string Protocol, string TemplateId, string Version = "");
+
+    private async Task<(ProbeConnection? Connection, string? Error)> ResolveProbeConnectionAsync(
+        WebSearchProbeDto dto, string apiBaseUrl, string model, WebSearchProbeRunner runner, CancellationToken ct)
     {
         var connectionId = dto.ProviderConnectionId ?? string.Empty;
         if (connectionId.Length > 0)
         {
             var connection = await _dbContext.AiProviderConnections.AsNoTracking()
-                .FirstOrDefaultAsync(c => c.Id == connectionId);
+                .FirstOrDefaultAsync(c => c.Id == connectionId, ct);
             if (connection == null) return (null, "选中的服务商连接已不存在，请重新选择");
-            if (!AiConnectionStore.SameOrigin(connection.ApiBaseUrl, dto.ApiBaseUrl))
-                return (null, "探测地址与所选连接不一致，请先保存连接或重新填写 API Key");
-            if (AiConnectionStore.Models(connection).All(m => m.Id != dto.ModelName))
+            if (!string.IsNullOrEmpty(dto.ProviderConnectionVersion) && dto.ProviderConnectionVersion != connection.Revision)
+                return (null, "服务商连接已更新，请刷新配置后重新检测");
+            if (AiConnectionStore.NormalizeUrl(connection.ApiBaseUrl) != apiBaseUrl)
+                return (null, "探测地址与所选连接不一致，请刷新或先保存连接");
+            if (AiConnectionStore.Models(connection).All(m => m.Id != model))
                 return (null, "该连接下没有选中模型，请先在管理服务商中添加模型");
-            return (connection.ApiKey, null);
+            return (new ProbeConnection(connection.ApiKey,
+                runner.WithConnection(AiConnectionStore.Headers(connection), connection.TemplateId, connection.TimeoutSeconds),
+                connection.Protocol, connection.TemplateId, connection.Revision), null);
         }
         var apiKey = dto.ApiKey;
-        var entity = await _dbContext.AiConfigs.FirstOrDefaultAsync();
+        var entity = await _dbContext.AiConfigs.AsNoTracking().FirstOrDefaultAsync(ct);
         var saved = entity?.ApiKey;
-        if (string.IsNullOrWhiteSpace(apiKey) || AiConnectionStore.IsMaskedSecret(saved, apiKey))
-        {
-            if (string.IsNullOrWhiteSpace(saved)) return (null, "尚未保存过 API Key，请先填写并保存配置再探测");
-            if (entity != null && !AiConnectionStore.SameOrigin(entity.ApiBaseUrl, dto.ApiBaseUrl))
-                return (null, "探测地址与已保存配置不一致，请重新填写 API Key");
-            return (saved, null);
-        }
-        return (apiKey, null);
+        if (!string.IsNullOrWhiteSpace(apiKey) && !AiConnectionStore.IsMaskedSecret(saved, apiKey))
+            return (new ProbeConnection(apiKey, runner, "", ""), null);
+        if (entity is null || string.IsNullOrWhiteSpace(saved))
+            return (null, "尚未保存过 API Key，请先填写并保存配置再探测");
+        if (!AiConnectionStore.SameOrigin(entity.ApiBaseUrl, apiBaseUrl))
+            return (null, "探测地址与已保存配置不一致，请重新填写 API Key");
+        return (new ProbeConnection(saved, runner, "", ""), null);
     }
 
-    /// <summary>
-    /// 探测的单一执行路径：一次性接口与流式接口都消费这里，避免两套逻辑漂移。
-    /// </summary>
+    /// <summary>一次性接口与流式接口共用这一条探测路径。</summary>
     private async IAsyncEnumerable<WebSearchProbeEventDto> RunProbeEventsAsync(
-        string apiBaseUrl, string apiKey, string model,
-        Mutter.Core.Services.WebSearchProbeRunner runner,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct, string providerConnectionId = "")
+        string apiBaseUrl, string model, WebSearchProbeDto dto, ProbeConnection connection,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
-        var connectionProtocol = string.Empty;
-        if (providerConnectionId.Length > 0)
-        {
-            var connection = await _dbContext.AiProviderConnections.AsNoTracking()
-                .FirstOrDefaultAsync(c => c.Id == providerConnectionId, ct);
-            if (connection != null)
-            {
-                // 探测与正式请求必须同模板、同超时，否则会出现“探测通过、线上 400”的假阴性。
-                runner = runner.WithConnection(AiConnectionStore.Headers(connection),
-                    connection.TemplateId, connection.TimeoutSeconds);
-                connectionProtocol = connection.Protocol;
-            }
-        }
-        using var overallCts = new CancellationTokenSource(TimeSpan.FromSeconds(180));
-        using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct, overallCts.Token);
-        var probeCt = probeCts.Token;
+        var cases = WebSearchProbe.OrderedCases(apiBaseUrl, connection.Protocol, connection.TemplateId, dto.PreferredShape ?? "");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromMinutes(3));
 
         yield return new WebSearchProbeEventDto
         {
             Type = "start",
-            Cases = Mutter.Core.Services.WebSearchProbe.Cases
-                .Select(c => new WebSearchProbeCaseDto { Shape = c.Shape, Description = c.Description })
-                .ToList()
+            Cases = cases.Select(c => new WebSearchProbeCaseDto { Shape = c.Shape, Description = c.Description }).ToList()
         };
 
-        // 基线：OpenAI 兼容端不带任何搜索形状，供 token 差分与内容差分。基线失败则整个探测没有意义。
-        var (baseStatus, baseRoot, baseError) = await runner.SendAsync(apiBaseUrl, apiKey, "openai", null, model, probeCt);
-        if (baseStatus is null)
-        {
-            yield return new WebSearchProbeEventDto { Type = "error", Reachable = false, Error = $"上游不可达：{baseError}" };
-            yield break;
-        }
-        if (baseStatus is 401 or 403)
-        {
-            // Gemini 原生连接可能根本没挂 OpenAI 兼容层：以 gemini 基线的结论为准，不在这里终止。
-            if (connectionProtocol != "gemini")
-            {
-                yield return new WebSearchProbeEventDto
-                {
-                    Type = "error", Reachable = true, AuthFailed = true,
-                    Error = $"鉴权失败（{baseStatus}）：Key 无效或无权限，搜索结论无从谈起"
-                };
-                yield break;
-            }
-        }
-
-        var baseTokens = Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(baseRoot ?? default);
-        var baseText = Mutter.Core.Services.WebSearchProbe.ReadResponseText(baseRoot ?? default);
-
-        // 图文基线：同一端点、同一模型、带图但不带搜索。带图探测的 token/内容差分必须和它比，
-        // 不能拿纯文本基线去比——图片本身就会拉高 prompt token。
-        var (imageBaseStatus, imageBaseRoot, _) =
-            await runner.SendImageAsync(apiBaseUrl, apiKey, "openai", null, model, probeCt);
-        var imageBaseTokens = imageBaseStatus is null
-            ? null
-            : Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(imageBaseRoot ?? default);
-        var imageBaseText = imageBaseRoot is null
-            ? null
-            : Mutter.Core.Services.WebSearchProbe.ReadResponseText(imageBaseRoot.Value);
-
-        // Gemini 原生通道要有自己的基线：同一模型、同一端点、不带工具。内容差分必须同端点比，
-        // 否则兼容层与原生层的行为差异会被误当成检索证据。
-        int? geminiBaseTokens = null;
-        string? geminiBaseText = null;
-        var geminiBaselineTried = false;
-
-        int? geminiImageBaseTokens = null;
-        string? geminiImageBaseText = null;
-        var geminiImageBaselineTried = false;
-
         var results = new List<WebSearchProbeResultDto>();
-        foreach (var probeCase in Mutter.Core.Services.WebSearchProbe.Cases)
+        var blockedEndpoints = new Dictionary<string, string>();
+        string? stopReason = null;
+        var reachable = false;
+        foreach (var probeCase in cases)
         {
-            var isGemini = probeCase.Endpoint == "gemini";
-            if (isGemini && !geminiBaselineTried)
+            ct.ThrowIfCancellationRequested();
+            var result = new WebSearchProbeResultDto { Shape = probeCase.Shape, Description = probeCase.Description };
+            var skip = deadline.IsCancellationRequested ? "达到本轮检测总时限"
+                : stopReason ?? blockedEndpoints.GetValueOrDefault(probeCase.Endpoint);
+            if (skip is not null)
             {
-                geminiBaselineTried = true;
-                var (gs, gr, _) = await runner.SendAsync(apiBaseUrl, apiKey, "gemini", null, model, probeCt);
-                geminiBaseTokens = gs is null ? null : Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(gr ?? default);
-                geminiBaseText = gr is null ? null : Mutter.Core.Services.WebSearchProbe.ReadResponseText(gr.Value);
-                // 两个通道都拒绝鉴权时才是真的 Key 无效。
-                if (gs is 401 or 403 && baseStatus is 401 or 403)
-                {
-                    yield return new WebSearchProbeEventDto
-                    {
-                        Type = "error", Reachable = true, AuthFailed = true,
-                        Error = "鉴权失败：Key 无效或无权限，搜索结论无从谈起"
-                    };
-                    yield break;
-                }
+                result.Status = "not_tested";
+                result.Note = skip;
             }
-
-            var (status, root, error) = await runner.SendAsync(apiBaseUrl, apiKey, probeCase.Endpoint, probeCase.Shape, model, probeCt);
-            var cmpTokens = isGemini ? geminiBaseTokens ?? baseTokens : baseTokens;
-            var cmpText = isGemini ? geminiBaseText ?? baseText : baseText;
-            int? delta = status is not null && cmpTokens is int b
-                ? Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(root ?? default) - b
-                : null;
-            var responseText = root is null ? null : Mutter.Core.Services.WebSearchProbe.ReadResponseText(root.Value);
-            var verdict = status is null
-                ? new Mutter.Core.Services.WebSearchProbeVerdict("unreachable", Note: error)
-                : Mutter.Core.Services.WebSearchProbe.Verdict(probeCase.Shape, status, root, delta, cmpText, responseText);
-            // 原生端点整条路径都 404 时不是"形状被拒"，是这地址没挂原生端点——换说人话
-            if (probeCase.Endpoint == "gemini" && status == 404)
-                verdict = new Mutter.Core.Services.WebSearchProbeVerdict("no_native_endpoint",
-                    Note: "该地址下没有找到 Gemini 原生 :generateContent 端点，无法探测原生通道");
-
-            var result = new WebSearchProbeResultDto
+            else
             {
-                Shape = probeCase.Shape,
-                Description = probeCase.Description,
-                Status = verdict.Status,
-                GroundingField = verdict.GroundingField,
-                Note = verdict.Note,
-                PromptTokensDelta = verdict.PromptTokensDelta,
-                Evidence = verdict.Evidence,
-                ImageStatus = "not_tested",
-                ImageNote = "文字联网未通过，未测带图"
-            };
+                var reply = await SendAsync(probeCase);
+                reachable |= reply.Status is not null;
+                var verdict = WebSearchProbe.Verdict(reply, probeCase.Endpoint);
+                result.Status = verdict.Status;
+                result.Note = verdict.Note;
+                result.Evidence = verdict.Evidence;
+                result.GroundingField = verdict.GroundingField;
 
-            // 只有文字形状已验证才值得再花一次请求测图文组合；否则先证明搜索本身能用。
-            if (verdict.Status == "verified")
-            {
-                if (isGemini && !geminiImageBaselineTried)
+                if (verdict.Status == "verified")
                 {
-                    geminiImageBaselineTried = true;
-                    var (gis, gir, _) = await runner.SendImageAsync(
-                        apiBaseUrl, apiKey, "gemini", null, model, probeCt);
-                    geminiImageBaseTokens = gis is null
-                        ? null
-                        : Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(gir ?? default);
-                    geminiImageBaseText = gir is null
-                        ? null
-                        : Mutter.Core.Services.WebSearchProbe.ReadResponseText(gir.Value);
+                    var image = WebSearchImageChallenge.Create();
+                    var imageReply = await SendAsync(probeCase, image, reply.Url);
+                    var imageVerdict = WebSearchProbe.Verdict(imageReply, probeCase.Endpoint, image);
+                    result.ImageStatus = imageVerdict.Status;
+                    result.ImageNote = imageVerdict.Note;
+                    result.ImageEvidence = imageVerdict.Evidence;
+
+                    bool? imageCapable = imageVerdict.Status switch
+                    {
+                        "verified" => true,
+                        "rejected" when imageReply.Status is 400 or 413 or 415 or 422 => false,
+                        _ => null
+                    };
+                    if (imageCapable == false)
+                        result.ImageStatus = "image_rejected";
+                    ct.ThrowIfCancellationRequested();
+                    _capabilities.RecordProbe(apiBaseUrl, model, probeCase.Shape, imageCapable,
+                        dto.ProviderConnectionId ?? "", connection.Version);
+
+                    if (dto.StopOnVerified)
+                        stopReason = "已找到可用的文字联网策略";
                 }
 
-                var (imageStatus, imageRoot, imageError) = await runner.SendImageAsync(
-                    apiBaseUrl, apiKey, probeCase.Endpoint, probeCase.Shape, model, probeCt);
-                var imageCmpTokens = isGemini
-                    ? geminiImageBaseTokens ?? imageBaseTokens
-                    : imageBaseTokens;
-                var imageCmpText = isGemini
-                    ? geminiImageBaseText ?? imageBaseText
-                    : imageBaseText;
-                int? imageDelta = imageStatus is not null && imageCmpTokens is int ib
-                    ? Mutter.Core.Services.WebSearchProbe.ReadPromptTokens(imageRoot ?? default) - ib
-                    : null;
-                var imageText = imageRoot is null
-                    ? null
-                    : Mutter.Core.Services.WebSearchProbe.ReadResponseText(imageRoot.Value);
-                var imageVerdict = imageStatus is null
-                    ? new Mutter.Core.Services.WebSearchProbeVerdict("unreachable", Note: imageError)
-                    : Mutter.Core.Services.WebSearchProbe.ImageVerdict(
-                        probeCase.Shape, imageStatus, imageRoot, imageDelta, imageCmpText, imageText);
-                if (probeCase.Endpoint == "gemini" && imageStatus == 404)
-                    imageVerdict = new Mutter.Core.Services.WebSearchProbeVerdict(
-                        "no_native_endpoint", Note: "该地址下没有找到 Gemini 原生 :generateContent 端点");
-
-                result.ImageStatus = imageVerdict.Status;
-                result.ImageNote = imageVerdict.Note;
-                result.ImageEvidence = imageVerdict.Evidence;
-                result.ImagePromptTokensDelta = imageVerdict.PromptTokensDelta;
-
-                // 结论明确才记账：超时/5xx/无原生端点不代表“图文不支持”，不该污染下次选用。
-                if (imageVerdict.Status is "verified" or "image_rejected" or "no_evidence" or "rejected")
-                {
-                    _capabilities.RecordProbe(
-                        apiBaseUrl, model, probeCase.Shape,
-                        imageCapable: imageVerdict.Status == "verified", connectionId: providerConnectionId);
-                }
+                if (result.Status is "rate_limited" or "quota_exceeded" ||
+                    result.ImageStatus is "rate_limited" or "quota_exceeded")
+                    stopReason ??= "上游限制了后续请求";
+                else if (reply.Status == 401 || result.Status == "unreachable")
+                    blockedEndpoints[probeCase.Endpoint] = "同一接口的请求已遇到鉴权或连接失败";
             }
 
             results.Add(result);
             yield return new WebSearchProbeEventDto { Type = "case", Result = result };
         }
 
+        var authFailed = reachable && results.All(r => r.Status is "auth_failed" or "not_tested");
         yield return new WebSearchProbeEventDto
         {
             Type = "done",
             Report = new WebSearchProbeReportDto
             {
-                Reachable = true,
-                AuthFailed = false,
-                BasePromptTokens = baseTokens,
+                Reachable = reachable,
+                AuthFailed = authFailed,
+                Error = deadline.IsCancellationRequested ? "检测达到总时限，已保留完成的结果"
+                    : authFailed ? "上游鉴权失败，请检查 API Key 和模型权限"
+                    : !reachable ? "未能连接模型服务，请查看检测结果" : null,
                 Results = results
             }
         };
+
+        async Task<ProbeSendResult> SendAsync(
+            WebSearchProbeCase probeCase, WebSearchImageChallenge? image = null, string? verifiedUrl = null)
+        {
+            try
+            {
+                return await connection.Runner.SendAsync(apiBaseUrl, connection.ApiKey, probeCase.Endpoint,
+                    probeCase.Shape, model, deadline.Token, image, verifiedUrl);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && deadline.IsCancellationRequested)
+            {
+                return new ProbeSendResult(null, null, "达到本轮检测总时限", TimedOut: true);
+            }
+        }
     }
 
     /// <summary>
@@ -1505,9 +1411,12 @@ public class ExternalSearchHitDto
 public class WebSearchProbeDto
 {
     public string ProviderConnectionId { get; set; } = string.Empty;
+    public string? ProviderConnectionVersion { get; set; }
     public string ApiBaseUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;
     public string ModelName { get; set; } = string.Empty;
+    public string? PreferredShape { get; set; }
+    public bool StopOnVerified { get; set; }
 }
 
 public class WebSearchProbeResultDto
@@ -1517,12 +1426,12 @@ public class WebSearchProbeResultDto
     public string Status { get; set; } = string.Empty;
     public string? GroundingField { get; set; }
     public string? Note { get; set; }
-    public int? PromptTokensDelta { get; set; }
+    public int? PromptTokensDelta { get; set; } // 旧接口字段，保留用于响应兼容。
 
-    /// <summary>证据类型：grounding_metadata / prompt_token_delta / content_time。</summary>
+    /// <summary>grounding_metadata 表示响应附有有效的网页检索证据。</summary>
     public string? Evidence { get; set; }
 
-    /// <summary>图文组合的判定：verified / image_rejected / no_evidence / not_tested 等。</summary>
+    /// <summary>图文组合的判定，例如 verified、image_unconfirmed 或 not_tested。</summary>
     public string ImageStatus { get; set; } = "not_tested";
     public string? ImageNote { get; set; }
     public string? ImageEvidence { get; set; }
