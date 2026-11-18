@@ -31,7 +31,8 @@ public sealed class OutgoingReply
     public DateTime? CompletedAt { get; set; }
 }
 
-public sealed record DeliveryResult(string State, string? MessageId = null, string? Channel = null, string? Detail = null)
+public sealed record DeliveryResult(string State, string? MessageId = null, string? Channel = null,
+    string? Detail = null, bool HasImage = false)
 {
     public bool Sent => State == DeliveryStates.Sent;
 }

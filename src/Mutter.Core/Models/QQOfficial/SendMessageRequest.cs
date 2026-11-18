@@ -61,7 +61,11 @@ public class SendMessageRequest
             return new SendMessageRequest
             {
                 MsgType = 2,
-                Markdown = new MessageMarkdownSpec { Content = msg.MarkdownText! },
+                Markdown = new MessageMarkdownSpec
+                {
+                    Content = msg.MarkdownText!,
+                    ForceVerifyImageResource = msg.ForceVerifyImageResource
+                },
                 Keyboard = msg.Keyboard,          // 键盘只能随 markdown 下发
                 MsgId = msg.MsgId,
                 EventId = msg.EventId,

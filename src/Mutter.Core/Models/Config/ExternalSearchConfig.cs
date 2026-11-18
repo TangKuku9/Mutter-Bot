@@ -22,6 +22,7 @@ public record ExternalSearchConfig
 
     /// <summary>单次检索最多取回的结果条数。</summary>
     public int MaxResults { get; set; } = DefaultMaxResults;
+    internal bool IncludeReplyImages { get; init; }
 
     public const int DefaultMaxResults = 5;
     public const int CeilingMaxResults = 10;

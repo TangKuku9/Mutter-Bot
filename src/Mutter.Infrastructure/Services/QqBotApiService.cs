@@ -59,10 +59,10 @@ public class QqBotApiService : IQqBotApiService
     public async Task<string?> SendGroupRichAsync(string groupOpenId, OutboundMessage msg, CancellationToken ct = default)
     {
         var body = SendMessageRequest.From(msg);
-        var resp = await SendAsync(HttpMethod.Post, $"/v2/groups/{groupOpenId}/messages", body, ct);
+        using var resp = await SendAsync(HttpMethod.Post, $"/v2/groups/{groupOpenId}/messages", body, ct);
         await EnsureSuccessAsync(resp, ct);
 
-        var sentId = await ReadSentMessageIdAsync(resp, ct);
+        var sentId = (int)resp.StatusCode is 201 or 202 ? null : await ReadSentMessageIdAsync(resp, ct);
         _logger.LogDebug(
             "已发送群消息: group={GroupOpenId}, msgType={MsgType}, keyboard={HasKeyboard}, sentId={SentId}, msg={Message}",
             groupOpenId, body.MsgType, body.Keyboard is not null, sentId ?? "-", Describe(msg));
@@ -132,7 +132,7 @@ public class QqBotApiService : IQqBotApiService
     /// <summary>日志降噪：只记正文前 80 字预览，避免 markdown 长面板刷屏日志。</summary>
     private static string Describe(OutboundMessage msg)
     {
-        var text = msg.UseMarkdown ? msg.MarkdownText : msg.PlainText;
+        var text = msg.ForceVerifyImageResource || !msg.UseMarkdown ? msg.PlainText : msg.MarkdownText;
         if (string.IsNullOrEmpty(text)) return string.Empty;
         return text.Length > 80 ? text[..80] + "…" : text;
     }
@@ -195,7 +195,7 @@ public class QqBotApiService : IQqBotApiService
             var errCode = result?.ErrCode ?? (int)resp.StatusCode;
             var message = result?.Message ?? resp.ReasonPhrase ?? resp.StatusCode.ToString();
             var traceId = result?.TraceId;
-            throw new QqApiException(errCode, message, traceId);
+            throw new QqApiException(errCode, message, traceId, (int)resp.StatusCode);
         }
     }
 }

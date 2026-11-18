@@ -1,5 +1,17 @@
 # AI 回复来源链接排版
 
+## 群内 @ 联网回复
+
+打开面板「AI 设置」中的联网搜索，并在配置文件启用 `Mutter:RichUi:Enabled` 和 `Markdown`。如设置了 `GroupAllowList`，将需要配图的群加入名单。
+
+群内 @ Mutter 触发检索后，有结果时会按 QQ Markdown 输出答案和检索来源。独立搜索使用 SearXNG、Tavily、博查或自定义搜索时可附一张检索图。SearXNG 实例需要启用 JSON 以及图片分类的搜索引擎。
+
+服务商内建搜索有结构化出处时，Mutter 会尝试读取前两条出处的公开 HTTPS 网页，选择一张网页声明的预览图（例如 Open Graph 的 `og:image`），或使用出处直接指向的图片。明确请求看图时，内建搜索提示词会引导模型优先引用能展示该主体的来源页。已有的 Markdown 配置即可启用，配图步骤无需额外模型调用。出处缺失、网页不提供配图或读取失败时，继续发送可用的文字和来源。
+
+自定义 JSON API 的响应可以在 `results` 旁添加可选 `images` 数组。条目可用 HTTPS 图片地址字符串，或 `{"url":"https://cdn.example.org/panda.png","source_url":"https://example.org/panda","width":640,"height":480}` 对象。图片应当可由 QQ 访问，平台会转存图片。正文、来源与配图合成一条被动回复。群聊搜索结果没有合格图片或 QQ 明确表示图片转存失败时，发送无图 Markdown。QQ 明确拒绝 Markdown 时退纯文字，结果未知时保留原发送意图。
+
+## 回复本身带有来源链接
+
 当 AI 回复本身带有联网搜索来源时，Mutter 会把合法链接整理成 QQ 原生 Markdown：
 
 ```text

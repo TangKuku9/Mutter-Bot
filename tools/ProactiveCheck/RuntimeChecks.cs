@@ -18,6 +18,7 @@ using Mutter.Core.Models.Config;
 using Mutter.Core.Models.QQOfficial;
 using Mutter.Core.Proactive;
 using Mutter.Core.Services;
+using Mutter.Core.Services.WebSearch;
 using Mutter.Infrastructure;
 using Mutter.Infrastructure.Ai;
 using Mutter.Infrastructure.Data;
@@ -48,6 +49,8 @@ internal static partial class RuntimeChecks
             ("最终请求预算与超长当前消息", BudgetAsync),
             ("投递未知、成功历史与用量去重", DeliveryAsync),
             ("AI 回复来源链接的 Markdown 排版与安全降级", AiReplyMarkdownAsync),
+            ("群聊 @ 联网图文、严格转存和降级", MentionSearchImagesAsync),
+            ("群聊 @ 内建搜索配图与公网来源边界", BuiltinSearchImagesAsync),
             ("发送成功后记账失败及重启恢复配额", ReceiptFailureAsync),
             ("主动消息分钟/日配额持久化", ActiveQuotaAsync),
             ("模型运行期间关闭开关/群参与/进入静默", FinalPolicyAsync),
@@ -627,6 +630,91 @@ internal static partial class RuntimeChecks
             "an uncertain Markdown receipt must never be replayed");
     }
 
+    private static async Task MentionSearchImagesAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        using var scope = env.Services.CreateScope();
+        var config = env.Config() with
+        {
+            WebSearchEnabled = true,
+            ExternalSearch = new()
+            {
+                Enabled = true, Provider = "tavily", ApiKey = "synthetic-search-key",
+                BaseUrl = "https://search.example.com"
+            }
+        };
+        await scope.ServiceProvider.GetRequiredService<IConfigRepository>().SaveAiConfigAsync(config);
+
+        env.SearchHttp.Handler = (_, _, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                {"results":[{"title":"合成结果","url":"https://example.org/source","content":"合成摘要"}],
+                 "images":[{"url":"https://127.0.0.1/skip.png"},{"url":"https://cdn.example.org/panda.png"}]}
+                """)
+        });
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("""
+            # 大熊猫
+
+            - **特征**：黑白相间。
+            ![忽略模型图片](https://example.net/invented.png)
+            """));
+
+        var chat = env.Services.GetRequiredService<IAiChatService>();
+        const string question = "查一下大熊猫的特征并带图";
+        var ordinary = await chat.ChatReplyAsync("机器人", [("user", question)], [], config, formatSearchReply: false);
+        Require(ordinary.SearchMarkdown is null && env.SearchHttp.Requests.Count == 1
+            && !env.SearchHttp.Requests[0].Body.Contains("include_images"), "普通回复不请求搜索配图");
+
+        var handler = env.Services.GetRequiredService<MessageEventHandler>();
+        var queue = env.Services.GetRequiredService<ConversationWorkQueue>();
+        await queue.StartAsync(default);
+        await handler.HandleDispatchAsync(new QqDispatch("GROUP_AT_MESSAGE_CREATE", "synthetic-at", 1,
+            JsonSerializer.SerializeToElement(new GroupMessageEvent
+            {
+                Id = "synthetic-at", GroupOpenid = "GROUP", Content = question,
+                Author = new AuthorMember { MemberOpenid = "USER", Username = "虚拟用户" }
+            })));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        await queue.StopAsync(deadline.Token);
+        Require(env.SearchHttp.Requests.Count == 2 && env.SearchHttp.Requests[1].Body.Contains("\"include_images\":true"),
+            "@ 联网检索请求图片，且不复用之前不带图的搜索缓存");
+        Require(env.Http.Requests.Count == 2, "图片与出处不会增加模型调用");
+        var wire = SendMessageRequest.From(env.Api.RichMessages.Single());
+        Require(wire.MsgType == 2 && wire.MsgId == "synthetic-at" && wire.Content is null
+            && wire.Markdown is { ForceVerifyImageResource: true }, "同一条 QQ 被动 Markdown 启用严格图片校验");
+        var markdown = wire.Markdown!.Content;
+        Require(markdown.Contains("# 大熊猫\n\n- **特征**") && markdown.Contains("https://example.org/source")
+            && markdown.Contains("![检索配图](https://cdn.example.org/panda.png)")
+            && !markdown.Contains("example.net") && !markdown.Contains("127.0.0.1"),
+            "保留排版和可核对来源，只嵌入提供方的合格图片");
+
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Require(await db.ChatMessages.AnyAsync(m => m.IsBotMessage && m.HasImage), "成功图文被记入历史");
+
+        var dispatcher = env.Services.GetRequiredService<ReplyDispatcher>();
+        var presentation = new SearchReplyMarkdown("其他答案", "## 其他答案", "![配图](https://cdn.example.org/other.png)");
+        var fallback = Reply();
+        fallback.Content = presentation.PlainText;
+        env.Api.Rich = msg => msg.ForceVerifyImageResource
+            ? throw new QqApiException(40034004, "synthetic image transfer failed")
+            : Task.FromResult<string?>("synthetic-no-image");
+        var delivered = await dispatcher.SendAsync(fallback, true, searchMarkdown: presentation);
+        var attempts = env.Api.RichMessages.TakeLast(2).ToArray();
+        Require(delivered.Sent && !delivered.HasImage && attempts[0].ForceVerifyImageResource
+            && !attempts[1].ForceVerifyImageResource && attempts[1].MarkdownText == presentation.Text
+            && attempts[0].MsgSeq < attempts[1].MsgSeq, "明确图片失败后只重试无图 Markdown，使用新序号");
+        Require(await db.ChatMessages.AnyAsync(m => m.MessageId == fallback.Id && !m.HasImage),
+            "降级后的历史只记录正文");
+
+        var unknown = Reply();
+        unknown.Content = "结果未知的答案";
+        var before = env.Api.RichMessages.Count;
+        env.Api.Rich = _ => throw new QqApiException(40034004, "synthetic upstream failure", httpStatus: 503);
+        var uncertain = await dispatcher.SendAsync(unknown, true, searchMarkdown: presentation);
+        Require(uncertain.State == DeliveryStates.Unknown && env.Api.RichMessages.Count == before + 1
+            && env.Api.ActiveCalls == 0, "HTTP 5xx 即使携带可降级业务码也不补发");
+    }
+
     private static async Task ReceiptFailureAsync()
     {
         await using var env = await TestEnvironment.CreateAsync();
@@ -910,6 +998,8 @@ internal static partial class RuntimeChecks
         public TestClock Clock { get; } = new();
         public FakeApi Api { get; } = new();
         public FakeHttp Http { get; } = new();
+        public FakeHttp SearchHttp { get; } = new();
+        public FakeHttp PreviewHttp { get; } = new();
         public FakeImages Images { get; } = new();
         public MonthlyReceiptFault Faults { get; } = new();
         public AiConfig Config() => new()
@@ -937,6 +1027,8 @@ internal static partial class RuntimeChecks
                 services.AddSingleton<IAiImageResolver>(env.Images);
                 services.AddDbContext<AppDbContext>(o => o.UseSqlite($"Data Source={env._file};Pooling=False").AddInterceptors(env.Faults));
                 services.AddHttpClient<HttpModelTransport>().ConfigurePrimaryHttpMessageHandler(() => env.Http);
+                services.AddHttpClient<TavilyProvider>().ConfigurePrimaryHttpMessageHandler(() => env.SearchHttp);
+                services.AddHttpClient<GroundedPreviewImages>().ConfigurePrimaryHttpMessageHandler(() => env.PreviewHttp);
                 env.Services = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
                 using var scope = env.Services.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -990,7 +1082,7 @@ internal static partial class RuntimeChecks
         public Func<HttpRequestMessage, string, CancellationToken, Task<HttpResponseMessage>>? Handler { get; set; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            var body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
             Requests.Add(new Request(request.RequestUri!, body, request.Headers.Authorization?.ToString()));
             return Handler is null ? JsonReply("合成回复") : await Handler(request, body, cancellationToken);
         }

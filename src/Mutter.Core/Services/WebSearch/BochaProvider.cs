@@ -57,6 +57,9 @@ public sealed class BochaProvider(HttpClient httpClient, ILogger<BochaProvider> 
             hits.Add(new WebSearchHit { Title = title, Url = url, Snippet = snippet });
             if (hits.Count >= config.MaxResults) break;
         }
-        return new WebSearchOutcome { Hits = hits };
+        var images = config.IncludeReplyImages && data.TryGetProperty("images", out var imageData)
+            ? ReadImages(imageData, "value", "contentUrl", "hostPageUrl")
+            : [];
+        return new WebSearchOutcome { Hits = hits, Images = images };
     }
 }

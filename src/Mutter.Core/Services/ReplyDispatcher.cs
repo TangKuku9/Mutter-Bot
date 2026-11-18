@@ -8,6 +8,7 @@ using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
 using Mutter.Core.Models.QQOfficial;
 using Mutter.Core.Proactive;
+using Mutter.Core.Services.WebSearch;
 
 namespace Mutter.Core.Services;
 
@@ -19,7 +20,8 @@ public sealed class ReplyDispatcher(
 {
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recent = new();
 
-    public async Task<DeliveryResult> SendAsync(OutgoingReply reply, bool allowActive, CancellationToken ct = default)
+    public async Task<DeliveryResult> SendAsync(OutgoingReply reply, bool allowActive, CancellationToken ct = default,
+        SearchReplyMarkdown? searchMarkdown = null)
     {
         if (ct.IsCancellationRequested)
             return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedCancelled);
@@ -48,15 +50,19 @@ public sealed class ReplyDispatcher(
             return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedCancelled);
         }
         if (blocked is not null) return new DeliveryResult(DeliveryStates.Skipped, Detail: blocked);
+        if (reply.IsProactive || reply.GroupId is null || reply.ReplyToMessageId is null
+            || !richUi.UseMarkdown(reply.GroupId))
+            searchMarkdown = null;
         var conversation = reply.GroupId is null ? $"u:{reply.PeerUserId}" : $"g:{reply.GroupId}";
-        var fingerprint = $"{conversation}:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(reply.Content)))}";
+        var dedupContent = searchMarkdown?.Image is { } image ? $"{reply.Content}\0{image}" : reply.Content;
+        var fingerprint = $"{conversation}:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(dedupContent)))}";
         DeliveryResult result;
         if (!reply.IsProactive && _recent.TryGetValue(fingerprint, out var last)
             && clock.GetUtcNow() - last < TimeSpan.FromSeconds(8))
             result = new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedDuplicate);
         else
         {
-            result = await SendCoreAsync(reply, allowActive, ct);
+            result = await SendCoreAsync(reply, allowActive, searchMarkdown, ct);
             if (result.Sent)
             {
                 _recent[fingerprint] = clock.GetUtcNow();
@@ -79,7 +85,8 @@ public sealed class ReplyDispatcher(
         return result;
     }
 
-    private async Task<DeliveryResult> SendCoreAsync(OutgoingReply reply, bool allowActive, CancellationToken ct)
+    private async Task<DeliveryResult> SendCoreAsync(OutgoingReply reply, bool allowActive,
+        SearchReplyMarkdown? searchMarkdown, CancellationToken ct)
     {
         // 只有真正开始调用平台接口之后的取消才算“结果未知”。发送前取消没有副作用，
         // 记为 skipped 才能和网络中断区分开，也不会白占主动发言配额。
@@ -88,7 +95,12 @@ public sealed class ReplyDispatcher(
         {
             ct.ThrowIfCancellationRequested();
             RuntimeActivity.Current?.Mark("sending");
-            if (reply.ReplyToMessageId is not null)
+            if (searchMarkdown is not null)
+            {
+                var result = await SendPassiveSearchReplyAsync(reply, searchMarkdown, ct);
+                if (result is not null) return result;
+            }
+            else if (reply.ReplyToMessageId is not null)
             {
                 var seq = sequences.Next(reply.ReplyToMessageId) ?? 0;
                 var markdown = TryCreateMarkdown(reply, reply.ReplyToMessageId, seq);
@@ -163,6 +175,77 @@ public sealed class ReplyDispatcher(
         {
             logger.LogWarning(ex, "Delivery outcome unknown id={Id}; will not replay", reply.Id);
             return new DeliveryResult(DeliveryStates.Unknown, Detail: ex.Message);
+        }
+    }
+
+    /// <summary>明确拒收时可以更换格式。不确定时保留原发送意图。</summary>
+    private async Task<DeliveryResult?> SendPassiveSearchReplyAsync(OutgoingReply reply,
+        SearchReplyMarkdown search, CancellationToken ct)
+    {
+        var maxChars = richUi.Options.MaxMarkdownChars;
+        string? markdown = search.Text.Length <= maxChars ? search.Text : null;
+        var withImage = markdown is not null && search.Image is { } image
+            && markdown.Length + image.Length + 2 <= maxChars;
+        if (withImage) markdown += "\n\n" + search.Image;
+
+        while (true)
+        {
+            if (ct.IsCancellationRequested)
+                return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedCancelled);
+            var message = new OutboundMessage
+            {
+                PlainText = reply.Content,
+                MarkdownText = markdown,
+                ForceVerifyImageResource = withImage,
+                MsgId = reply.ReplyToMessageId,
+                MsgSeq = sequences.Next(reply.ReplyToMessageId)
+            };
+            try
+            {
+                var id = await SendRichPassiveAsync(reply, message, ct);
+                if (string.IsNullOrEmpty(id))
+                    return new DeliveryResult(DeliveryStates.Unknown, Detail: "QQ 未返回确认消息 ID");
+                if (markdown is not null)
+                {
+                    richUi.MarkOk(RichUiCapability.CapMarkdown);
+                    richUi.CountMarkdownSent();
+                }
+                return new DeliveryResult(DeliveryStates.Sent, id, "passive", HasImage: withImage);
+            }
+            catch (QqApiException ex)
+            {
+                var code = ex.ErrCode;
+                if (ex.HttpStatus is >= 500 or 201 or 202 || code is >= 500 and <= 599
+                    or 50055001 or 50055002 or 304023 or 304024 or 40054005)
+                    return new DeliveryResult(DeliveryStates.Unknown, Detail: $"QQ 未确认送达 ({code})");
+                if (ex.HttpStatus == 429 || code == 40034100)
+                    return new DeliveryResult(DeliveryStates.Failed, Detail: ProactiveOutcomes.FailedRateLimited);
+                if (code is 304027 or 304103 or 40034005 or 40034128)
+                    return null; // 被动槽位失效，交回现有主动通道策略；不再携带图片。
+                if (markdown is null)
+                    return new DeliveryResult(DeliveryStates.Failed, Detail: $"QQ 拒收搜索回复 ({code})");
+
+                if (withImage && code is 304010 or 40034004 or 40054007)
+                    markdown = search.Text;
+                else if (QqApiErrorCodes.IsMarkdownDenied(code) || code is 40054007 or 40054010 or 304003)
+                {
+                    if (code is 304036 or 40034127 or 50056)
+                        richUi.ReportDenied(RichUiCapability.CapMarkdown, code);
+                    richUi.CountPlainFallback();
+                    markdown = null;
+                }
+                else
+                    return new DeliveryResult(DeliveryStates.Failed, Detail: $"QQ 拒收搜索回复 ({code})");
+
+                withImage = false;
+                richUi.CountDegradeRetry();
+                logger.LogInformation("搜索回复降级 id={Id} code={Code} trace={TraceId}", reply.Id, code, ex.TraceId);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "搜索回复未确认 id={Id}", reply.Id);
+                return new DeliveryResult(DeliveryStates.Unknown, Detail: "QQ 发送结果未确认");
+            }
         }
     }
 

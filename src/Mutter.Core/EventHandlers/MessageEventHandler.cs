@@ -569,38 +569,9 @@ public class MessageEventHandler
             if (AiCallScope.Current is { } callScope)
                 callScope.AutomaticMemory = context.AutomaticMemory;
 
-            var systemPrompt = context.ComposeSystemPrompt();
-
-
-            if (parsed.ImageUrls.Count > 0)
-            {
-                // 张数由 AI 面板控制，且先把动图/失效链筛掉——否则"面板选了 3 张"会名不副实。
-                // 旧写法直接取 ImageUrls[0]，群友一次发好几张时其余全丢。
-                var attachable = await _aiService.AttachableImagesAsync(
-                    context.EffectiveConfig.CapAttachedImages(parsed.ImageUrls), ct);
-
-                if (attachable.Count > 0)
-                {
-                    var historyWithImages = new List<(string Role, string Content, IReadOnlyList<string>? ImageUrls)>();
-                    foreach (var msg in context.Messages)
-                        historyWithImages.Add((msg.Role, msg.Content, null));
-                    if (historyWithImages.Count > 0)
-                    {
-                        var last = historyWithImages[^1];
-                        historyWithImages[^1] = (last.Role, last.Content, attachable);
-                    }
-                    response = await _aiService.ChatAsync(systemPrompt, historyWithImages, context.EffectiveConfig, ct);
-                }
-                else
-                {
-                    response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig, ct);
-                }
-            }
-            else
-            {
-                response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig, ct);
-            }
-
+            response = await _aiService.ChatReplyAsync(context.ComposeSystemPrompt(), context.Messages,
+                context.EffectiveConfig.CapAttachedImages(parsed.ImageUrls), context.EffectiveConfig,
+                groupOpenId is not null && _richUi.UseMarkdown(groupOpenId), ct);
         }
         catch (OperationCanceledException)
         {
@@ -637,7 +608,7 @@ public class MessageEventHandler
                 GroupId = groupOpenId, PeerUserId = userOpenId, BotId = _botId,
                 ReplyToMessageId = msgId, Content = response.Content, Model = response.Model,
                 PromptTokens = response.PromptTokens, CompletionTokens = response.CompletionTokens
-            }, allowActive: true, deliveryDeadline.Token);
+            }, allowActive: true, deliveryDeadline.Token, response.SearchMarkdown);
         }
         catch (OperationCanceledException) when (!hostToken.IsCancellationRequested)
         {
@@ -655,7 +626,7 @@ public class MessageEventHandler
             {
                 GroupId = groupOpenId, Model = response.Model,
                 TotalTokens = response.TotalTokens, Content = response.Content,
-                DeliveryState = delivery.State
+                DeliveryState = delivery.State, delivery.HasImage
             });
         }
         catch (Exception ex) { _logger.LogWarning(ex, "Notify AI complete failed"); }

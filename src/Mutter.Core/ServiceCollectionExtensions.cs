@@ -49,6 +49,10 @@ public static class ServiceCollectionExtensions
         services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<DeepseekProvider>());
         services.AddTransient<IWebSearchProvider>(sp => sp.GetRequiredService<CustomProvider>());
         services.AddSingleton<ExternalSearchService>();
+        services.AddHttpClient<GroundedPreviewImages>()
+            .ConfigurePrimaryHttpMessageHandler(OutboundAddressPolicy.CreatePublicWebHandler)
+            .ConfigureHttpClient(client => client.Timeout = Timeout.InfiniteTimeSpan)
+            .RemoveAllLoggers();
         services.AddSingleton<IContextBuilder, ContextBuilder>();
         services.AddSingleton<MessageRouter>();
         // 择机主动发言：观察窗口 + msg_seq 共享计数 + 发言出口

@@ -58,13 +58,13 @@ public sealed class ExternalSearchService
     /// 但绝不抛异常——聊天回复永远优先于搜索。
     /// </summary>
     public async Task<(WebSearchOutcome Outcome, WebSearchFailure? Failure)> SearchAsync(
-        AiConfig config, string query, CancellationToken ct = default)
+        AiConfig config, string query, CancellationToken ct = default, bool includeReplyImages = false)
     {
         var external = config.ExternalSearch;
         if (external is null || external.Enabled != true)
             return (WebSearchOutcome.Empty, new WebSearchFailure(WebSearchFailureKind.Disabled, null, "未启用"));
 
-        var normalized = external.Normalized();
+        var normalized = external.Normalized() with { IncludeReplyImages = includeReplyImages };
         if (!ExternalSearchConfig.IsConfigured(normalized))
             return (WebSearchOutcome.Empty, new WebSearchFailure(WebSearchFailureKind.Disabled, null, "配置不完整"));
 
@@ -173,7 +173,7 @@ public sealed class ExternalSearchService
     public IWebSearchProvider? ResolveProvider(string providerId) => Route(providerId);
 
     private string CacheKey(ExternalSearchConfig config, string query) =>
-        $"{config.Provider}|{config.BaseUrl.TrimEnd('/')}|{config.MaxResults}|{query.Trim().ToUpperInvariant()}";
+        $"{config.Provider}|{config.BaseUrl.TrimEnd('/')}|{config.MaxResults}|{config.IncludeReplyImages}|{query.Trim().ToUpperInvariant()}";
 
     private bool IsBreakerOpen(string providerId)
     {

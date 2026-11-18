@@ -12,6 +12,7 @@ public class AiChatService : IAiChatService
     private readonly IAiImageResolver _imageResolver;
     private readonly AiSearchCapabilityStore _capabilities;
     private readonly ExternalSearchService? _externalSearch;
+    private readonly GroundedPreviewImages? _groundedPreviewImages;
     private readonly ILogger<AiChatService> _logger;
 
     public AiChatService(
@@ -35,9 +36,24 @@ public class AiChatService : IAiChatService
         IAiImageResolver imageResolver,
         AiSearchCapabilityStore capabilities,
         ExternalSearchService externalSearch,
-        ILogger<AiChatService> logger) : this(executor, imageResolver, capabilities, logger)
+        ILogger<AiChatService> logger, GroundedPreviewImages? groundedPreviewImages = null)
+        : this(executor, imageResolver, capabilities, logger)
     {
         _externalSearch = externalSearch;
+        _groundedPreviewImages = groundedPreviewImages;
+    }
+
+    public async Task<AiChatResponse> ChatReplyAsync(string systemPrompt, List<(string Role, string Content)> history,
+        IReadOnlyList<string> imageUrls, AiConfig config, bool formatSearchReply, CancellationToken ct = default)
+    {
+        using var operation = AiCallScope.Begin(ct);
+        ct = operation.Token;
+        var messages = history.Select(m => AiMessage.Plain(m.Role, m.Content)).ToList();
+        if (messages.Count > 0 && imageUrls.Count > 0)
+            messages[^1] = messages[^1] with { Images = await ResolveImagesAsync(imageUrls, ct) };
+
+        return operation.WithUsage(await SendAsync(new AiChatRequest(systemPrompt, messages,
+            FormatSearchReply: formatSearchReply), config with { }, ct));
     }
 
     public async Task<AiChatResponse> ChatAsync(
@@ -197,7 +213,7 @@ public class AiChatService : IAiChatService
         {
             try
             {
-                return await SendSingleAsync(request, config, strategy, ct);
+                return await SendWithBuiltinSearchAsync(request, config, strategy, ct);
             }
             catch (AiRequestException ex) when (ex.IsDeterministicRejection)
             {
@@ -246,7 +262,7 @@ public class AiChatService : IAiChatService
 
         try
         {
-            return await SendSingleAsync(request, config, strategy, ct);
+            return await SendWithBuiltinSearchAsync(request, config, strategy, ct);
         }
         catch (AiRequestException ex) when (ex.IsDeterministicRejection)
         {
@@ -266,6 +282,29 @@ public class AiChatService : IAiChatService
     private Task<AiChatResponse> SendSingleAsync(
         AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct) =>
         _executor.ExecuteAsync(request, config, strategy, ct);
+
+    private async Task<AiChatResponse> SendWithBuiltinSearchAsync(
+        AiChatRequest request, AiConfig config, AiSearchStrategy strategy, CancellationToken ct)
+    {
+        if (!request.FormatSearchReply)
+            return await SendSingleAsync(request, config, strategy, ct);
+
+        var suffix = SearchReplyMarkdown.PromptSuffix;
+        if (WebSearchTrigger.IsImageQuery(request.LastUserText))
+            suffix += "\n用户明确想看图。优先检索并引用能展示该主体的真实来源页，例如图集、百科条目或官方介绍。";
+        var searchRequest = request with { SystemPrompt = request.SystemPrompt + suffix };
+        var response = await SendSingleAsync(searchRequest, config, strategy, ct);
+        var image = _groundedPreviewImages is not null && !string.IsNullOrWhiteSpace(response.Content)
+            ? await _groundedPreviewImages.FindAsync(response.GroundedUrls, ct)
+            : null;
+        if (SearchReplyMarkdown.Create(response, response.GroundedUrls, image) is { } formatted)
+        {
+            response.Content = formatted.PlainText;
+            if (response.GroundedUrls.Count > 0)
+                response.SearchMarkdown = formatted;
+        }
+        return response;
+    }
 
     /// <summary>
     /// 外搜路线：先自检索，把资料注入消息，再以「不检索」姿态发给模型（资料已在请求里）。
@@ -288,7 +327,8 @@ public class AiChatService : IAiChatService
         if (config.WebSearchImageMode == AiConfig.WebSearchImageModeOff && request.HasImages)
             return (null, true);
         if (string.IsNullOrWhiteSpace(request.SearchQuery)
-            && !WebSearchTrigger.ShouldSearch(request.LastUserText, request.HasImages, intent))
+            && !WebSearchTrigger.ShouldSearch(request.LastUserText, request.HasImages, intent)
+            && !(request.FormatSearchReply && WebSearchTrigger.IsImageQuery(request.LastUserText)))
             // 外搜是首选通道：它判定“不需要检索”时，内建通道也不能自行搜一遍。
             return (null, true);
 
@@ -308,7 +348,8 @@ public class AiChatService : IAiChatService
         try
         {
             RuntimeActivity.Current?.Mark("search", config.ExternalSearch.Provider);
-            (outcome, var failure) = await _externalSearch.SearchAsync(config, query, ct);
+            (outcome, var failure) = await _externalSearch.SearchAsync(config, query, ct,
+                includeReplyImages: request.FormatSearchReply);
             if (failure is not null)
             {
                 // 鉴权失败、超时、熔断、异常等都按同一策略处理；回复优先于检索。
@@ -318,13 +359,16 @@ public class AiChatService : IAiChatService
                 return (null, false);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "外搜异常，回落内建/普通路线（回复优先）");
             return (null, false);
         }
 
+        var image = request.FormatSearchReply ? outcome.Images.FirstOrDefault() : null;
         var injection = ExternalSearchInjector.BuildInjection(outcome.Hits, DateTimeOffset.UtcNow);
+        if (injection is null && image is not null)
+            injection = "【检索资料】检索只找到了附图。应用会单独附上图片。请说明可用资料有限，勿推测图中内容。";
         if (injection is null)
         {
             _logger.LogInformation("外搜 0 条可用命中，视为无资料，直接原请求发送");
@@ -339,8 +383,10 @@ public class AiChatService : IAiChatService
                 ? m with { Text = m.Text + "\n\n【图片已识别内容】\n" + imageContext.Value.Caption }
                 : m).ToList();
         }
+        var suffix = ExternalSearchInjector.SystemPromptSuffix;
+        if (request.FormatSearchReply) suffix += SearchReplyMarkdown.PromptSuffix;
         var injectedRequest = new AiChatRequest(
-            request.SystemPrompt + ExternalSearchInjector.SystemPromptSuffix,
+            request.SystemPrompt + suffix,
             messages,
             request.ResponseFormat,
             // 资料已经在请求里，模型侧不再需要搜索
@@ -353,6 +399,12 @@ public class AiChatService : IAiChatService
         try
         {
             var response = await SendSingleAsync(injectedRequest, config, AiSearchStrategy.CompatNoSearch, ct);
+            if (request.FormatSearchReply
+                && SearchReplyMarkdown.Create(response, outcome.Hits.Select(hit => hit.Url), image) is { } formatted)
+            {
+                response.Content = formatted.PlainText;
+                response.SearchMarkdown = formatted;
+            }
             return (response, false);
         }
         catch (AiRequestException ex) when (ex.IsDeterministicRejection && !ct.IsCancellationRequested)
@@ -467,14 +519,15 @@ public class AiChatService : IAiChatService
             request.SystemPrompt + ImageSearchStage2Suffix,
             messages,
             request.ResponseFormat,
-            AiSearchIntent.Force);
+            AiSearchIntent.Force,
+            FormatSearchReply: request.FormatSearchReply);
 
         try
         {
             _logger.LogInformation(
                 "两段式联网：query={Query} url={Url} shape={Shape}",
                 Truncate(parsed.Value.Query, 80), config.ApiBaseUrl, strategy.Shape);
-            return await SendSingleAsync(stage2, config, strategy, ct);
+            return await SendWithBuiltinSearchAsync(stage2, config, strategy, ct);
         }
         catch (AiRequestException ex) when (ex.IsDeterministicRejection && !ct.IsCancellationRequested)
         {
