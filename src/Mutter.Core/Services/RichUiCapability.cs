@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using Mutter.Core.Configuration;
+using Mutter.Core.Models.Config;
 
 namespace Mutter.Core.Services;
 
@@ -42,6 +43,7 @@ public sealed class RichUiCapability
     public const string CapInteraction = "interaction";
 
     private readonly RichUiOptions _opt;
+    private GroupMarkdownPolicy _groupMarkdown = GroupMarkdownPolicy.Inherited;
     private readonly ConcurrentDictionary<string, CapState> _states = new()
     {
         [CapMarkdown] = CapState.Unknown,
@@ -64,6 +66,10 @@ public sealed class RichUiCapability
     /// <summary>原始配置（键盘行列上限、label 上限等约束由调用方读取）。</summary>
     public RichUiOptions Options => _opt;
 
+    public GroupMarkdownPolicy GroupMarkdown => Volatile.Read(ref _groupMarkdown);
+
+    public void SetGroupMarkdown(GroupMarkdownPolicy policy) => Volatile.Write(ref _groupMarkdown, policy);
+
     /// <summary>总开关 + 群白名单。groupId 为 null（私聊等场景）时仅看总开关与白名单是否为空。</summary>
     public bool RichEnabled(string? groupId)
     {
@@ -74,7 +80,15 @@ public sealed class RichUiCapability
 
     /// <summary>是否使用 markdown（msg_type=2）。被平台拒绝过则退回纯文本。</summary>
     public bool UseMarkdown(string? groupId) =>
-        RichEnabled(groupId) && _opt.Markdown && StateOf(CapMarkdown) != CapState.Denied;
+        MarkdownConfigured(groupId) && StateOf(CapMarkdown) != CapState.Denied;
+
+    public bool MarkdownConfigured(string? groupId)
+    {
+        var policy = GroupMarkdown;
+        return groupId is not null && policy.Mode != GroupMarkdownMode.Inherit
+            ? policy.Allows(groupId)
+            : RichEnabled(groupId) && _opt.Markdown;
+    }
 
     /// <summary>
     /// 实际生效的键盘模式。键盘只能挂在 markdown 消息上，故 markdown 不可用时强制 None；
@@ -83,7 +97,7 @@ public sealed class RichUiCapability
     /// </summary>
     public GameKeyboardMode EffectiveKeyboardMode(string? groupId)
     {
-        if (!UseMarkdown(groupId)) return GameKeyboardMode.None;
+        if (!RichEnabled(groupId) || !UseMarkdown(groupId)) return GameKeyboardMode.None;
 
         var configured = _opt.ResolveKeyboardMode();
         if (configured == GameKeyboardMode.None) return GameKeyboardMode.None;
@@ -111,7 +125,7 @@ public sealed class RichUiCapability
 
     /// <summary>是否用 markdown 内嵌文字链替代按钮（无按钮权限时的可点替身）。</summary>
     public bool UseCmdInputLinks(string? groupId) =>
-        EffectiveKeyboardMode(groupId) == GameKeyboardMode.None
+        RichEnabled(groupId) && EffectiveKeyboardMode(groupId) == GameKeyboardMode.None
         && _opt.CmdInputLinks && UseMarkdown(groupId);
 
     /// <summary>是否使用 &lt;qqbot-at-user&gt; 真实 @ 标签（文本与 markdown 消息均支持，不依赖 markdown）。</summary>

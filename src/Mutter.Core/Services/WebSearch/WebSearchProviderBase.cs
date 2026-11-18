@@ -33,7 +33,7 @@ public abstract class WebSearchProviderBase(HttpClient httpClient, ILogger logge
         HttpResponseMessage response;
         try
         {
-            response = await HttpClient.SendAsync(request, timeout.Token);
+            response = await HttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -112,6 +112,26 @@ public abstract class WebSearchProviderBase(HttpClient httpClient, ILogger logge
             if (!string.IsNullOrWhiteSpace(text)) return text;
         }
         return string.Empty;
+    }
+
+    protected static IReadOnlyList<WebSearchImage> ReadImages(JsonElement container, string field,
+        string urlField, string sourceField, string? sourceUrl = null)
+    {
+        if (container.ValueKind != JsonValueKind.Object || !container.TryGetProperty(field, out var array)
+            || array.ValueKind != JsonValueKind.Array) return [];
+
+        var images = new List<WebSearchImage>();
+        foreach (var item in array.EnumerateArray())
+        {
+            var url = item.ValueKind == JsonValueKind.String ? item.GetString() : ReadString(item, urlField);
+            var safeUrl = SearchReplyMarkdown.PublicUrl(url, httpsOnly: true);
+            if (safeUrl is null || images.Any(image => image.Url == safeUrl)) continue;
+            images.Add(new WebSearchImage(safeUrl, sourceUrl ?? ReadString(item, sourceField),
+                int.TryParse(ReadString(item, "width"), out var width) ? width : 0,
+                int.TryParse(ReadString(item, "height"), out var height) ? height : 0));
+            if (images.Count == 4) break;
+        }
+        return images;
     }
 }
 

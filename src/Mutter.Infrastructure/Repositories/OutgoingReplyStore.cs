@@ -90,7 +90,7 @@ public sealed class OutgoingReplyStore(IServiceScopeFactory scopes, TimeProvider
                 {
                     MessageId = reply.Id, ChatType = reply.GroupId is null ? 1 : 0,
                     GroupId = reply.GroupId, PeerUserId = reply.PeerUserId,
-                    UserId = reply.BotId, UserName = "Bot", PlainText = reply.Content,
+                    UserId = reply.BotId, UserName = "Bot", PlainText = reply.Content, HasImage = result.HasImage,
                     IsBotMessage = true, IsProactive = reply.IsProactive, AiModelUsed = reply.Model,
                     AiOperationId = reply.AiOperationId,
                     PromptTokens = reply.Model is null ? null : reply.PromptTokens,

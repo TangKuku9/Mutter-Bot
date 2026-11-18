@@ -22,7 +22,7 @@ public sealed class SearxngProvider(HttpClient httpClient, ILogger<SearxngProvid
     {
         var baseUri = TrimTrailingSlash(config.BaseUrl);
         RequireHttpUrl(baseUri);
-        var url = BuildUrl(baseUri, query);
+        var url = BuildUrl(baseUri, query, config.IncludeReplyImages);
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("Accept", "application/json");
@@ -36,23 +36,32 @@ public sealed class SearxngProvider(HttpClient httpClient, ILogger<SearxngProvid
             throw new WebSearchRequestException(WebSearchFailureKind.InvalidResponse, null, "缺少 results 数组");
 
         var hits = new List<WebSearchHit>();
+        var images = new List<WebSearchImage>();
         foreach (var item in results.EnumerateArray())
         {
             if (item.ValueKind != JsonValueKind.Object) continue;
-            var hit = ParseHit(item);
-            if (hit is not null) hits.Add(hit);
-            if (hits.Count >= config.MaxResults) break;
+            if (ReadString(item, "template") == "images.html")
+            {
+                if (config.IncludeReplyImages && images.Count == 0
+                    && SearchReplyMarkdown.PublicUrl(ReadString(item, "img_src"), httpsOnly: true) is { } imageUrl)
+                    images.Add(new WebSearchImage(imageUrl, ReadString(item, "url")));
+                continue;
+            }
+            if (hits.Count < config.MaxResults && ParseHit(item) is { } hit)
+                hits.Add(hit);
+            if (hits.Count >= config.MaxResults && (!config.IncludeReplyImages || images.Count > 0)) break;
         }
-        return new WebSearchOutcome { Hits = hits };
+        return new WebSearchOutcome { Hits = hits, Images = images };
     }
 
     /// <summary>GET /search?q=…&amp;format=json&amp;safesearch=1；不依赖非标准结果条数参数。</summary>
-    private static string BuildUrl(string baseUri, string query)
+    private static string BuildUrl(string baseUri, string query, bool includeImages)
     {
         var builder = new StringBuilder(baseUri);
         if (!baseUri.EndsWith('/')) builder.Append('/');
         builder.Append("search");
         builder.Append("?format=json&safesearch=1&language=zh-CN");
+        if (includeImages) builder.Append("&categories=general,images");
         builder.Append("&q=").Append(Uri.EscapeDataString(query));
         return builder.ToString();
     }

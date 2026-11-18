@@ -4,7 +4,10 @@
       <template #header>
         <div class="card-head">
           <b>群列表与配置</b>
-          <el-button size="small" @click="load">刷新</el-button>
+          <div class="group-actions">
+            <el-button size="small" @click="markdownDialog = true">QQ Markdown</el-button>
+            <el-button size="small" @click="load">刷新</el-button>
+          </div>
         </div>
       </template>
       <el-table :data="groups" v-loading="loading" stripe>
@@ -71,6 +74,9 @@
         <el-form-item label="AI 择机发言">
           <el-switch v-model="form.aiProactiveEnabled" />
           <ParamHelpButton :label="helpLabel('aiProactiveEnabled')" @click="openHelp('aiProactiveEnabled')" />
+        </el-form-item>
+        <el-form-item label="表情包">
+          <router-link :to="{ path: '/stickers', query: { group: editingId } }">管理本群图库与发送策略</router-link>
         </el-form-item>
         <el-form-item label="@ 识别码">
           <el-input v-model="form.botMentionOpenId" clearable placeholder="留空 = 认不出有人 @ 机器人" />
@@ -147,13 +153,15 @@
       </el-table>
     </el-card>
 
+    <GroupMarkdownSettings v-model="markdownDialog" :groups="groups" />
     <ParamHelpDrawer v-model="helpVisible" :title="helpTitle" :lines="helpLines" :current="helpCurrent"
       :index="helpIndex" :total="helpTotal" @step="stepHelp" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '../api'
 import { useUnsavedChanges } from '../useUnsavedChanges'
@@ -161,11 +169,15 @@ import { useParamHelp } from '../paramHelp'
 import { useMediaQuery } from '../useMediaQuery'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
+import GroupMarkdownSettings from '../components/GroupMarkdownSettings.vue'
 
 // 窄屏收起加入时间等次要列，保留群名/OpenId 身份列与操作列（操作列固定在右侧）
 const narrow = useMediaQuery('(max-width: 600px)')
 
 const groups = ref([])
+const route = useRoute()
+const markdownDialog = ref(route.query.markdown === '1')
+watch(() => route.query.markdown, value => { if (value === '1') markdownDialog.value = true })
 const quotas = ref([])
 const characters = ref([])
 const loading = ref(false)
@@ -367,7 +379,8 @@ onMounted(load)
 </script>
 
 <style scoped>
-.card-head { display: flex; justify-content: space-between; align-items: center; }
+.card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.group-actions { display: flex; }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; }
 /* 摘要读取失败与上次更新是当前状态，不是参数说明 */
 .sub-hint { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }

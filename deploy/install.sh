@@ -126,7 +126,10 @@ restore_all_skipped() {
     done
 }
 trap restore_all_skipped EXIT
-cp -r "$PUBLISH_DIR"/* "$INSTALL_DIR/"
+for publish_item in "$PUBLISH_DIR"/*; do
+    [ "$(basename "$publish_item")" = "data" ] && continue
+    cp -r "$publish_item" "$INSTALL_DIR/"
+done
 restore_all_skipped
 trap - EXIT
 chown -R "$SERVICE_NAME:$SERVICE_NAME" "$INSTALL_DIR"

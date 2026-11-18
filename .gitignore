@@ -27,6 +27,7 @@ src/Mutter.Web/wwwroot/
 *.nupkg
 
 # SQLite database files (never track runtime/production databases)
+/data/media/stickers/
 *.db
 *.db-shm
 *.db-wal

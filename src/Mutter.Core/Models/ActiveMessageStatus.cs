@@ -28,6 +28,8 @@ public class ActiveMessageSendResult
     public bool Success { get; set; }
     public string Reason { get; set; } = string.Empty;
     public string? ErrorMessage { get; set; }
+    public bool HasImage { get; set; }
+    public bool ImageMaterialRejected { get; set; }
 
     /// <summary>发送成功时平台分配的消息 id（可用于撤回），解析失败为 null。</summary>
     public string? MessageId { get; set; }

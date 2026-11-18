@@ -325,6 +325,7 @@
           </div>
         </div>
         <div class="ai-search-content">
+          <p><router-link :to="{ path: '/groups', query: { markdown: '1' } }">设置来源链接与配图的 QQ Markdown 输出</router-link></p>
           <AiSettingField
             label="优先检索通道"
             control-id="ai-search-route"

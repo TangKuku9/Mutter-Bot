@@ -297,6 +297,42 @@ public static class WebSearchProbe
     private static bool HasWebChunks(JsonElement chunks) =>
         ArrayHas(chunks, chunk => HasWebUrl(Property(chunk, "web"), "uri"));
 
+    /// <summary>从协议定义的引文或搜索结果读取来源链接。</summary>
+    public static IReadOnlyList<string> ReadGroundedUrls(JsonElement root, bool gemini)
+    {
+        var reply = FirstItem(Property(root, gemini ? "candidates" : "choices"));
+        var message = Property(reply, "message");
+        var urls = new HashSet<string>(StringComparer.Ordinal);
+
+        void AddUrls(JsonElement array, Func<JsonElement, string?> readUrl)
+        {
+            foreach (var item in Items(array).Take(16))
+                if (WebSearch.SearchReplyMarkdown.PublicUrl(readUrl(item)) is { } url)
+                    urls.Add(url);
+        }
+
+        foreach (var container in new[] { reply, message, root })
+        foreach (var field in new[] { "groundingMetadata", "grounding_metadata" })
+        {
+            var metadata = Property(container, field);
+            foreach (var chunks in new[] { "groundingChunks", "grounding_chunks" })
+                AddUrls(Property(metadata, chunks), item => StringProperty(Property(item, "web"), "uri"));
+        }
+
+        foreach (var container in new[] { root, message, Property(root, "search_info"), Property(root, "searchInfo") })
+        foreach (var field in new[] { "web_search", "search_result", "search_results", "searchResults" })
+            AddUrls(Property(container, field), item => StringProperty(item, "link") ?? StringProperty(item, "url"));
+
+        foreach (var part in Items(Property(message, "content")).Take(16).Prepend(message))
+            AddUrls(Property(part, "annotations"), item => StringProperty(item, "type") == "url_citation"
+                ? StringProperty(Property(item, "url_citation"), "url") ?? StringProperty(item, "url")
+                : null);
+        return urls.Take(3).ToArray();
+    }
+
+    private static IEnumerable<JsonElement> Items(JsonElement value) =>
+        value.ValueKind == JsonValueKind.Array ? value.EnumerateArray() : [];
+
     private static bool HasWebCitation(JsonElement message) =>
         ArrayHas(Property(message, "annotations"), annotation =>
             StringProperty(annotation, "type") == "url_citation" &&

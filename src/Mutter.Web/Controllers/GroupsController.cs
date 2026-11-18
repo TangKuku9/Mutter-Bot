@@ -42,6 +42,8 @@ public class GroupsController : ControllerBase
                     cfg.IsEnabled,
                     cfg.TriggerMode,
                     cfg.AiProactiveEnabled,
+                    cfg.AutoCollectStickers,
+                    cfg.UseStickersInReplies,
                     cfg.BotMentionOpenId,
                     cfg.ActiveCharacter,
                     cfg.CustomTemperature,
@@ -62,6 +64,8 @@ public class GroupsController : ControllerBase
         public bool IsEnabled { get; set; }
         public int TriggerMode { get; set; }
         public bool AiProactiveEnabled { get; set; }
+        public bool? AutoCollectStickers { get; set; }
+        public bool? UseStickersInReplies { get; set; }
         public string? BotMentionOpenId { get; set; }
         public string? ActiveCharacter { get; set; }
         public double? CustomTemperature { get; set; }
@@ -90,6 +94,8 @@ public class GroupsController : ControllerBase
         entity.IsEnabled = dto.IsEnabled;
         entity.TriggerMode = dto.TriggerMode == 2 ? 2 : 0;
         entity.AiProactiveEnabled = dto.AiProactiveEnabled;
+        if (dto.AutoCollectStickers.HasValue) entity.AutoCollectStickers = dto.AutoCollectStickers.Value;
+        if (dto.UseStickersInReplies.HasValue) entity.UseStickersInReplies = dto.UseStickersInReplies.Value;
         entity.BotMentionOpenId = string.IsNullOrWhiteSpace(dto.BotMentionOpenId) ? null : dto.BotMentionOpenId.Trim();
         entity.ActiveCharacter = dto.ActiveCharacter;
         entity.CustomTemperature = dto.CustomTemperature is { } temperature && double.IsFinite(temperature)

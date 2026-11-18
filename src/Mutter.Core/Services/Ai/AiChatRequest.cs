@@ -36,7 +36,8 @@ public sealed record AiChatRequest(
     IReadOnlyList<AiMessage> Messages,
     string? ResponseFormat = null,
     AiSearchIntent Search = AiSearchIntent.Inherit,
-    string? SearchQuery = null)
+    string? SearchQuery = null,
+    bool FormatSearchReply = false)
 {
     public bool HasImages => Messages.Any(m => m.Images.Count > 0);
 

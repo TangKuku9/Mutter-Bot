@@ -16,6 +16,19 @@ public static class OutboundAddressPolicy
     private static readonly IPAddress[] Ipv6MetadataAddresses =
         [IPAddress.Parse("fd00:ec2::254"), IPAddress.Parse("fd20:ce::254")];
 
+    private static readonly IPNetwork[] NonPublicV4 = [
+        IPNetwork.Parse("0.0.0.0/8"), IPNetwork.Parse("10.0.0.0/8"), IPNetwork.Parse("100.64.0.0/10"),
+        IPNetwork.Parse("127.0.0.0/8"), IPNetwork.Parse("169.254.0.0/16"), IPNetwork.Parse("172.16.0.0/12"),
+        IPNetwork.Parse("192.0.0.0/24"), IPNetwork.Parse("192.0.2.0/24"), IPNetwork.Parse("192.88.99.0/24"),
+        IPNetwork.Parse("192.168.0.0/16"), IPNetwork.Parse("198.18.0.0/15"), IPNetwork.Parse("198.51.100.0/24"),
+        IPNetwork.Parse("203.0.113.0/24"), IPNetwork.Parse("224.0.0.0/3")
+    ];
+    private static readonly IPNetwork GlobalV6 = IPNetwork.Parse("2000::/3");
+    private static readonly IPNetwork[] NonPublicV6 = [
+        IPNetwork.Parse("2001::/23"), IPNetwork.Parse("2001:db8::/32"), IPNetwork.Parse("2002::/16"),
+        IPNetwork.Parse("3fff::/20")
+    ];
+
     /// <summary>
     /// 默认直连并固定已校验的 DNS 结果；开启系统代理后由代理解析目标，地址策略只能覆盖代理本身，
     /// 因此这个开关默认关闭，且只应在信任代理时打开。
@@ -27,6 +40,26 @@ public static class OutboundAddressPolicy
         ConnectCallback = ConnectAsync,
         Proxy = new SwitchableProxy(allowSystemProxy ?? (() => false), systemProxy ?? HttpClient.DefaultProxy)
     };
+
+    // 来源页来自搜索结果，需要比管理员配置的模型或搜索端点更严格的出站限制。
+    public static SocketsHttpHandler CreatePublicWebHandler() => new()
+    {
+        AllowAutoRedirect = false,
+        UseProxy = false,
+        UseCookies = false,
+        AutomaticDecompression = DecompressionMethods.All,
+        MaxResponseDrainSize = 0,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        ConnectCallback = (context, ct) => ConnectFilteredAsync(context, IsPublicWebAddress, ct)
+    };
+
+    public static bool IsPublicWebAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        return address.AddressFamily == AddressFamily.InterNetwork
+            ? !NonPublicV4.Any(network => network.Contains(address))
+            : GlobalV6.Contains(address) && !NonPublicV6.Any(network => network.Contains(address));
+    }
 
     /// <summary>按当前设置决定是否走系统代理；设置改变后下一次请求立即生效，无需重启。</summary>
     private sealed class SwitchableProxy(Func<bool> allowSystemProxy, IWebProxy systemProxy) : IWebProxy
@@ -83,10 +116,16 @@ public static class OutboundAddressPolicy
     {
         if (IsBlockedHost(context.DnsEndPoint.Host))
             throw new HttpRequestException("目标为链路本地或云元数据地址，已被安全策略拒绝");
+        return await ConnectFilteredAsync(context, address => !IsBlockedAddress(address), ct);
+    }
+
+    private static async ValueTask<Stream> ConnectFilteredAsync(SocketsHttpConnectionContext context,
+        Func<IPAddress, bool> isAllowed, CancellationToken ct)
+    {
         var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, ct);
-        var allowed = FilterAllowed(addresses);
+        var allowed = addresses.Where(isAllowed).ToArray();
         if (allowed.Length == 0)
-            throw new HttpRequestException("目标地址解析到链路本地或云元数据地址，已被安全策略拒绝");
+            throw new HttpRequestException("目标地址解析到不允许访问的地址");
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
         try
         {

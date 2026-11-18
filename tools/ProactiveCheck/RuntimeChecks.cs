@@ -4,11 +4,13 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Mutter.Core;
 using Mutter.Core.Configuration;
 using Mutter.Core.EventHandlers;
@@ -18,11 +20,13 @@ using Mutter.Core.Models.Config;
 using Mutter.Core.Models.QQOfficial;
 using Mutter.Core.Proactive;
 using Mutter.Core.Services;
+using Mutter.Core.Services.WebSearch;
 using Mutter.Infrastructure;
 using Mutter.Infrastructure.Ai;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Repositories;
 using Mutter.Infrastructure.Services;
+using Mutter.Web.Controllers;
 using Mutter.Web.Services;
 
 /// <summary>只使用合成标识符、临时 SQLite 和假 HTTP，不读取部署数据或访问外部服务。</summary>
@@ -48,6 +52,12 @@ internal static partial class RuntimeChecks
             ("最终请求预算与超长当前消息", BudgetAsync),
             ("投递未知、成功历史与用量去重", DeliveryAsync),
             ("AI 回复来源链接的 Markdown 排版与安全降级", AiReplyMarkdownAsync),
+            ("群聊 Markdown 面板范围、旧配置继承与重启持久化", GroupMarkdownSettingsAsync),
+            ("群聊 @ 联网图文、严格转存和降级", MentionSearchImagesAsync),
+            ("群聊 @ 内建搜索配图与公网来源边界", BuiltinSearchImagesAsync),
+            ("群静态表情收藏、去重、隔离与单次模型选图", GroupStickersAsync),
+            ("择机表情配置、主动图文和同群最低间隔", ProactiveStickersAsync),
+            ("QQ 表情素材三步上传、鉴权隔离与缓存更新", QqStickerMaterialsAsync),
             ("发送成功后记账失败及重启恢复配额", ReceiptFailureAsync),
             ("主动消息分钟/日配额持久化", ActiveQuotaAsync),
             ("模型运行期间关闭开关/群参与/进入静默", FinalPolicyAsync),
@@ -627,6 +637,132 @@ internal static partial class RuntimeChecks
             "an uncertain Markdown receipt must never be replayed");
     }
 
+    private static async Task GroupMarkdownSettingsAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync(legacy: true);
+        var richUi = env.Services.GetRequiredService<RichUiCapability>();
+        var store = env.Services.GetRequiredService<GroupMarkdownSettingsStore>();
+        var settings = new GroupMarkdownController(store, richUi);
+        await store.StartAsync(default);
+        Require(richUi.UseMarkdown("GROUP") && !richUi.UseMarkdown("OTHER") && !richUi.UseMarkdown(null),
+            "首次运行沿用旧白名单，私聊不受群设置影响");
+        Require(await settings.Save(new("selected", []), default) is BadRequestObjectResult && richUi.UseMarkdown("GROUP"),
+            "空选定群提交被拒且原策略继续生效");
+        Require(await settings.Save(new("selected", ["OTHER"]), default) is OkObjectResult
+            && !richUi.UseMarkdown("GROUP") && richUi.UseMarkdown("OTHER") && !richUi.UseMarkdown(null),
+            "保存后当场切换群范围，面板选择优先于旧白名单");
+
+        var dispatcher = env.Services.GetRequiredService<ReplyDispatcher>();
+        var selected = Reply("OTHER");
+        selected.Content = "可查阅 [来源](https://example.org/selected)";
+        await dispatcher.SendAsync(selected, false);
+        var excluded = Reply("GROUP");
+        excluded.Content = "可查阅 [来源](https://example.org/excluded)";
+        await dispatcher.SendAsync(excluded, false);
+        Require(env.Api.PassiveRichCalls == 1 && env.Api.PassiveCalls == 1
+            && env.Api.RichMessages.Single().MarkdownText!.Contains("来源：[来源]"),
+            "仅选定群使用 QQ Markdown 排版发送来源链接");
+
+        var restored = new RichUiCapability(env.Services.GetRequiredService<IOptions<MutterOptions>>());
+        using var restoredStore = new GroupMarkdownSettingsStore(env.Services.GetRequiredService<IServiceScopeFactory>(), restored);
+        await restoredStore.StartAsync(default);
+        Require(!restored.UseMarkdown("GROUP") && restored.UseMarkdown("OTHER"), "重启恢复面板配置");
+        await settings.Save(new("all", null), default);
+        richUi.ReportDenied(RichUiCapability.CapMarkdown, 40034011);
+        Require(richUi.MarkdownConfigured("OTHER") && !richUi.UseMarkdown("OTHER"), "平台拒绝仍保留纯文本降级");
+        richUi.ResetForDiagnostics();
+        Require(richUi.UseMarkdown("GROUP") && richUi.UseMarkdown("OTHER"), "全部群允许发送 Markdown");
+        await settings.Save(new("off", null), default);
+        Require(!richUi.UseMarkdown("GROUP") && !richUi.UseMarkdown("OTHER"), "关闭后所有群都用纯文本");
+        await settings.Save(new("inherit", null), default);
+        Require(richUi.UseMarkdown("GROUP") && !richUi.UseMarkdown("OTHER"), "可恢复沿用部署配置");
+    }
+
+    private static async Task MentionSearchImagesAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        using var scope = env.Services.CreateScope();
+        var config = env.Config() with
+        {
+            WebSearchEnabled = true,
+            ExternalSearch = new()
+            {
+                Enabled = true, Provider = "tavily", ApiKey = "synthetic-search-key",
+                BaseUrl = "https://search.example.com"
+            }
+        };
+        await scope.ServiceProvider.GetRequiredService<IConfigRepository>().SaveAiConfigAsync(config);
+
+        env.SearchHttp.Handler = (_, _, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                {"results":[{"title":"合成结果","url":"https://example.org/source","content":"合成摘要"}],
+                 "images":[{"url":"https://127.0.0.1/skip.png"},{"url":"https://cdn.example.org/panda.png"}]}
+                """)
+        });
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("""
+            # 大熊猫
+
+            - **特征**：黑白相间。
+            ![忽略模型图片](https://example.net/invented.png)
+            """));
+
+        var chat = env.Services.GetRequiredService<IAiChatService>();
+        const string question = "查一下大熊猫的特征并带图";
+        var ordinary = await chat.ChatReplyAsync("机器人", [("user", question)], [], config, formatSearchReply: false);
+        Require(ordinary.SearchMarkdown is null && env.SearchHttp.Requests.Count == 1
+            && !env.SearchHttp.Requests[0].Body.Contains("include_images"), "普通回复不请求搜索配图");
+
+        var handler = env.Services.GetRequiredService<MessageEventHandler>();
+        var queue = env.Services.GetRequiredService<ConversationWorkQueue>();
+        await queue.StartAsync(default);
+        await handler.HandleDispatchAsync(new QqDispatch("GROUP_AT_MESSAGE_CREATE", "synthetic-at", 1,
+            JsonSerializer.SerializeToElement(new GroupMessageEvent
+            {
+                Id = "synthetic-at", GroupOpenid = "GROUP", Content = question,
+                Author = new AuthorMember { MemberOpenid = "USER", Username = "虚拟用户" }
+            })));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        await queue.StopAsync(deadline.Token);
+        Require(env.SearchHttp.Requests.Count == 2 && env.SearchHttp.Requests[1].Body.Contains("\"include_images\":true"),
+            "@ 联网检索请求图片，且不复用之前不带图的搜索缓存");
+        Require(env.Http.Requests.Count == 2, "图片与出处不会增加模型调用");
+        var wire = SendMessageRequest.From(env.Api.RichMessages.Single());
+        Require(wire.MsgType == 2 && wire.MsgId == "synthetic-at" && wire.Content is null
+            && wire.Markdown is { ForceVerifyImageResource: true }, "同一条 QQ 被动 Markdown 启用严格图片校验");
+        var markdown = wire.Markdown!.Content;
+        Require(markdown.Contains("# 大熊猫\n\n- **特征**") && markdown.Contains("https://example.org/source")
+            && markdown.Contains("![检索配图](https://cdn.example.org/panda.png)")
+            && !markdown.Contains("example.net") && !markdown.Contains("127.0.0.1"),
+            "保留排版和可核对来源，只嵌入提供方的合格图片");
+
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Require(await db.ChatMessages.AnyAsync(m => m.IsBotMessage && m.HasImage), "成功图文被记入历史");
+
+        var dispatcher = env.Services.GetRequiredService<ReplyDispatcher>();
+        var presentation = new SearchReplyMarkdown("其他答案", "## 其他答案", "![配图](https://cdn.example.org/other.png)");
+        var fallback = Reply();
+        fallback.Content = presentation.PlainText;
+        env.Api.Rich = msg => msg.ForceVerifyImageResource
+            ? throw new QqApiException(40034004, "synthetic image transfer failed")
+            : Task.FromResult<string?>("synthetic-no-image");
+        var delivered = await dispatcher.SendAsync(fallback, true, searchMarkdown: presentation);
+        var attempts = env.Api.RichMessages.TakeLast(2).ToArray();
+        Require(delivered.Sent && !delivered.HasImage && attempts[0].ForceVerifyImageResource
+            && !attempts[1].ForceVerifyImageResource && attempts[1].MarkdownText == presentation.Text
+            && attempts[0].MsgSeq < attempts[1].MsgSeq, "明确图片失败后只重试无图 Markdown，使用新序号");
+        Require(await db.ChatMessages.AnyAsync(m => m.MessageId == fallback.Id && !m.HasImage),
+            "降级后的历史只记录正文");
+
+        var unknown = Reply();
+        unknown.Content = "结果未知的答案";
+        var before = env.Api.RichMessages.Count;
+        env.Api.Rich = _ => throw new QqApiException(40034004, "synthetic upstream failure", httpStatus: 503);
+        var uncertain = await dispatcher.SendAsync(unknown, true, searchMarkdown: presentation);
+        Require(uncertain.State == DeliveryStates.Unknown && env.Api.RichMessages.Count == before + 1
+            && env.Api.ActiveCalls == 0, "HTTP 5xx 即使携带可降级业务码也不补发");
+    }
+
     private static async Task ReceiptFailureAsync()
     {
         await using var env = await TestEnvironment.CreateAsync();
@@ -910,6 +1046,11 @@ internal static partial class RuntimeChecks
         public TestClock Clock { get; } = new();
         public FakeApi Api { get; } = new();
         public FakeHttp Http { get; } = new();
+        public FakeHttp SearchHttp { get; } = new();
+        public FakeHttp PreviewHttp { get; } = new();
+        public FakeHttp StickerHttp { get; } = new();
+        public FakeStickerMaterials StickerMaterials { get; } = new();
+        public string StickerDirectory => _file + ".stickers";
         public FakeImages Images { get; } = new();
         public MonthlyReceiptFault Faults { get; } = new();
         public AiConfig Config() => new()
@@ -937,6 +1078,12 @@ internal static partial class RuntimeChecks
                 services.AddSingleton<IAiImageResolver>(env.Images);
                 services.AddDbContext<AppDbContext>(o => o.UseSqlite($"Data Source={env._file};Pooling=False").AddInterceptors(env.Faults));
                 services.AddHttpClient<HttpModelTransport>().ConfigurePrimaryHttpMessageHandler(() => env.Http);
+                services.AddHttpClient<TavilyProvider>().ConfigurePrimaryHttpMessageHandler(() => env.SearchHttp);
+                services.AddHttpClient<GroundedPreviewImages>().ConfigurePrimaryHttpMessageHandler(() => env.PreviewHttp);
+                services.AddHttpClient("qq-sticker-storage").ConfigurePrimaryHttpMessageHandler(() => env.StickerHttp);
+                services.AddSingleton(sp => new GroupStickerLibrary(sp.GetRequiredService<IServiceScopeFactory>(),
+                    env.Clock, NullLogger<GroupStickerLibrary>.Instance, env.StickerDirectory));
+                services.AddSingleton<IStickerMaterialService>(env.StickerMaterials);
                 env.Services = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
                 using var scope = env.Services.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -944,7 +1091,7 @@ internal static partial class RuntimeChecks
                 {
                     var script = db.Database.GenerateCreateScript();
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|AiUsageArchives|GroupMemoryItems|GroupMemoryLearningStates)\" \\([\\s\\S]*?\\);", "");
+                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|AiUsageArchives|GroupMemoryItems|GroupMemoryLearningStates|GroupMarkdownSettings)\" \\([\\s\\S]*?\\);", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
                         "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|GroupMemoryItems|GroupMemoryLearningStates)\"[^;]*;", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
@@ -972,7 +1119,23 @@ internal static partial class RuntimeChecks
         {
             if (Services is not null) await Services.DisposeAsync();
             foreach (var suffix in new[] { "", "-wal", "-shm" }) File.Delete(_file + suffix);
+            if (Directory.Exists(StickerDirectory))
+            {
+                foreach (var path in Directory.EnumerateFiles(StickerDirectory)) File.Delete(path);
+                Directory.Delete(StickerDirectory);
+            }
         }
+    }
+
+    private sealed class FakeStickerMaterials : IStickerMaterialService
+    {
+        public List<string> Hashes { get; } = [];
+        public Task<string?> GetReferenceAsync(string hash, StickerFile file, CancellationToken ct)
+        {
+            Hashes.Add(hash);
+            return Task.FromResult<string?>("qqbot-media://image/v1/synthetic-sticker");
+        }
+        public Task InvalidateAsync(string hash, string reference, CancellationToken ct) => Task.CompletedTask;
     }
 
     private sealed class TestClock : TimeProvider
@@ -990,7 +1153,7 @@ internal static partial class RuntimeChecks
         public Func<HttpRequestMessage, string, CancellationToken, Task<HttpResponseMessage>>? Handler { get; set; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            var body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
             Requests.Add(new Request(request.RequestUri!, body, request.Headers.Authorization?.ToString()));
             return Handler is null ? JsonReply("合成回复") : await Handler(request, body, cancellationToken);
         }

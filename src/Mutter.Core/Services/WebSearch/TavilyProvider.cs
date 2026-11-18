@@ -36,6 +36,11 @@ public sealed class TavilyProvider(HttpClient httpClient, ILogger<TavilyProvider
             ["include_answer"] = false,
             ["include_raw_content"] = false
         };
+        if (config.IncludeReplyImages)
+        {
+            body["include_images"] = true;
+            body["safe_search"] = true;
+        }
 
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
@@ -52,6 +57,7 @@ public sealed class TavilyProvider(HttpClient httpClient, ILogger<TavilyProvider
             throw new WebSearchRequestException(WebSearchFailureKind.InvalidResponse, null, "缺少 results 数组");
 
         var hits = new List<WebSearchHit>();
+        var images = new List<WebSearchImage>();
         foreach (var item in results.EnumerateArray())
         {
             if (item.ValueKind != JsonValueKind.Object) continue;
@@ -60,8 +66,12 @@ public sealed class TavilyProvider(HttpClient httpClient, ILogger<TavilyProvider
             var snippet = ReadString(item, "content");
             if (title.Length == 0 || url.Length == 0) continue;
             hits.Add(new WebSearchHit { Title = title, Url = url, Snippet = snippet });
+            if (config.IncludeReplyImages && images.Count == 0)
+                images.AddRange(ReadImages(item, "images", "url", "source_url", url));
             if (hits.Count >= config.MaxResults) break;
         }
-        return new WebSearchOutcome { Hits = hits };
+        if (config.IncludeReplyImages && images.Count == 0)
+            images.AddRange(ReadImages(root, "images", "url", "source_url"));
+        return new WebSearchOutcome { Hits = hits, Images = images };
     }
 }

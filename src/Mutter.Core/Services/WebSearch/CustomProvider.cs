@@ -60,6 +60,10 @@ public sealed class CustomProvider(HttpClient httpClient, ILogger<CustomProvider
             hits.Add(new WebSearchHit { Title = title, Url = url, Snippet = snippet });
             if (hits.Count >= config.MaxResults) break;
         }
-        return new WebSearchOutcome { Hits = hits };
+        return new WebSearchOutcome
+        {
+            Hits = hits,
+            Images = config.IncludeReplyImages ? ReadImages(root, "images", "url", "source_url") : []
+        };
     }
 }

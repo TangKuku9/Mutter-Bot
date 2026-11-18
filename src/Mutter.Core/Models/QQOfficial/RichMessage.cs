@@ -13,6 +13,10 @@ public class MessageMarkdownSpec
 {
     [JsonPropertyName("content")]
     public string Content { get; set; } = string.Empty;
+
+    [JsonPropertyName("force_verify_image_resource")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ForceVerifyImageResource { get; set; }
 }
 
 /// <summary>内嵌键盘。id（平台按钮模板）与 content（自定义按钮）互斥。</summary>
@@ -142,6 +146,9 @@ public sealed record OutboundMessage
 
     /// <summary>markdown 正文（msg_type=2）。非空则优先于 PlainText。</summary>
     public string? MarkdownText { get; init; }
+
+    public bool ForceVerifyImageResource { get; init; }
+    public string? MarkdownWithoutImage { get; init; }
 
     /// <summary>按钮键盘。官方约束：只能挂在 markdown 消息上。</summary>
     public KeyboardSpec? Keyboard { get; init; }

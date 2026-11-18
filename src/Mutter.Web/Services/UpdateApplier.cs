@@ -1281,6 +1281,7 @@ public sealed class UpdateApplier
         if (isDirectory)
         {
             return name.Equals("logs", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("data", StringComparison.OrdinalIgnoreCase) ||
                    name.Equals(BackupDirName, StringComparison.OrdinalIgnoreCase) ||
                    name.Equals(UpdateDirName, StringComparison.OrdinalIgnoreCase);
         }
@@ -1476,6 +1477,7 @@ public sealed class UpdateApplier
         $kind = if ($cfg.Kind) { [string]$cfg.Kind } else { 'full' }
         $excludeDirs = @(
             (Join-Path $cfg.AppDir 'logs'),
+            (Join-Path $cfg.AppDir 'data'),
             (Join-Path $cfg.AppDir '.backup'),
             (Join-Path $cfg.AppDir '.update')
         )
