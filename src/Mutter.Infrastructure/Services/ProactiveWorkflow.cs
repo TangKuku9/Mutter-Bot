@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Mutter.Core.Configuration;
@@ -25,6 +26,8 @@ public sealed class ProactiveWorkflow
     private readonly ILogger<ProactiveWorkflow> _logger;
     private readonly TimeProvider _clock;
     private readonly RuntimeOptions _runtime;
+    private readonly GroupStickerReplies? _stickerReplies;
+    private readonly RichUiCapability? _richUi;
 
     public ProactiveWorkflow(
         IServiceScopeFactory scopeFactory,
@@ -33,7 +36,8 @@ public sealed class ProactiveWorkflow
         IStructuredAiService structuredAi,
         IAiChatService ai,
         IContextBuilder contextBuilder,
-        ILogger<ProactiveWorkflow> logger, TimeProvider clock, RuntimeOptions runtime)
+        ILogger<ProactiveWorkflow> logger, TimeProvider clock, RuntimeOptions runtime,
+        GroupStickerReplies? stickerReplies = null, RichUiCapability? richUi = null)
     {
         _scopeFactory = scopeFactory;
         _observe = observe;
@@ -44,6 +48,8 @@ public sealed class ProactiveWorkflow
         _logger = logger;
         _clock = clock;
         _runtime = runtime;
+        _stickerReplies = stickerReplies;
+        _richUi = richUi;
     }
 
     public async Task RunAsync(ProactiveWindow window, CancellationToken ct)
@@ -157,6 +163,18 @@ public sealed class ProactiveWorkflow
         }
         memoryCount += automatic.Count;
         memoryChars += automatic.Text.Length;
+        var stickerChoices = StickerChoices.Empty;
+        if (_stickerReplies is not null && _richUi?.UseMarkdown(window.GroupId) == true)
+        {
+            stickerChoices = await _stickerReplies.ChoicesAsync(window.GroupId, proactive: true, aiToken);
+            var suffix = GroupStickerReplies.Prompt(stickerChoices, proactive: true);
+            var inputSize = judgePrompt.Length + userPrompt.Length + images.Count * AiRequestBudget.ImageTokens + 144;
+            if (inputSize + suffix.Length <= AiRequestBudget.InputBudget(
+                judgeConfig.MaxTokens, judgeConfig.ContextWindowTokens, judgeConfig.MaxInputTokens))
+                judgePrompt += suffix;
+            else
+                stickerChoices = StickerChoices.Empty;
+        }
         aiToken.ThrowIfCancellationRequested();
         // 将实际评估阶段与最终投递结果分开，发送前的开关/时段复核不能抹掉已发生的评估。
         onEvaluationStarted();
@@ -254,7 +272,10 @@ public sealed class ProactiveWorkflow
         // 判定/改写成功后，投递不能再受模型 120 秒期限约束；给平台发送独立的 30 秒窗口。
         using var deliveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deliveryDeadline.CancelAfter(TimeSpan.FromSeconds(30));
-        var result = await _speaker.SpeakAsync(window, line, config, deliveryDeadline.Token, usage);
+        var stickerHash = !searchUsed && data.StickerId is { ValueKind: JsonValueKind.Number } choice
+            && choice.TryGetInt32(out var stickerId) && stickerId >= 1 && stickerId <= stickerChoices.Items.Count
+            ? stickerChoices.Items[stickerId - 1].Hash : null;
+        var result = await _speaker.SpeakAsync(window, line, config, deliveryDeadline.Token, usage, stickerHash);
         if (result.Outcome is ProactiveOutcomes.SentPassive or ProactiveOutcomes.SentActive)
             _observe.MarkSent(window.GroupId, _clock.GetUtcNow().UtcDateTime);
         var logDetail = string.IsNullOrWhiteSpace(searchDetail)

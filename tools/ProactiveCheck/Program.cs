@@ -2279,6 +2279,9 @@ file sealed class ScriptedAiChatService : IAiChatService
 
     public ScriptedAiChatService(params object[] responses) => _responses = new Queue<object>(responses);
 
+    public Task<AiChatResponse> ChatReplyAsync(string systemPrompt, List<(string Role, string Content)> history,
+        IReadOnlyList<string> imageUrls, AiConfig config, bool formatSearchReply, CancellationToken ct = default) => Next();
+
     public Task<AiChatResponse> ChatAsync(string systemPrompt,
         List<(string Role, string Content)> conversationHistory, AiConfig config,
         CancellationToken ct = default) => Next();

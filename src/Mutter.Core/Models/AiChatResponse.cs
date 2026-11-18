@@ -1,3 +1,5 @@
+using Mutter.Core.Services.WebSearch;
+
 namespace Mutter.Core.Models;
 
 public class AiChatResponse
@@ -6,6 +8,8 @@ public class AiChatResponse
     public string? RawContent { get; set; }
     public string? Model { get; set; }
     public string? FinishReason { get; set; }
+    public SearchReplyMarkdown? SearchMarkdown { get; set; }
+    public IReadOnlyList<string> GroundedUrls { get; set; } = [];
     public int PromptTokens { get; set; }
     public int CompletionTokens { get; set; }
     public int TotalTokens => PromptTokens + CompletionTokens;

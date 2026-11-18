@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -59,10 +60,10 @@ public class QqBotApiService : IQqBotApiService
     public async Task<string?> SendGroupRichAsync(string groupOpenId, OutboundMessage msg, CancellationToken ct = default)
     {
         var body = SendMessageRequest.From(msg);
-        var resp = await SendAsync(HttpMethod.Post, $"/v2/groups/{groupOpenId}/messages", body, ct);
+        using var resp = await SendAsync(HttpMethod.Post, $"/v2/groups/{groupOpenId}/messages", body, ct);
         await EnsureSuccessAsync(resp, ct);
 
-        var sentId = await ReadSentMessageIdAsync(resp, ct);
+        var sentId = (int)resp.StatusCode is 201 or 202 ? null : await ReadSentMessageIdAsync(resp, ct);
         _logger.LogDebug(
             "已发送群消息: group={GroupOpenId}, msgType={MsgType}, keyboard={HasKeyboard}, sentId={SentId}, msg={Message}",
             groupOpenId, body.MsgType, body.Keyboard is not null, sentId ?? "-", Describe(msg));
@@ -132,7 +133,7 @@ public class QqBotApiService : IQqBotApiService
     /// <summary>日志降噪：只记正文前 80 字预览，避免 markdown 长面板刷屏日志。</summary>
     private static string Describe(OutboundMessage msg)
     {
-        var text = msg.UseMarkdown ? msg.MarkdownText : msg.PlainText;
+        var text = msg.ForceVerifyImageResource || !msg.UseMarkdown ? msg.PlainText : msg.MarkdownText;
         if (string.IsNullOrEmpty(text)) return string.Empty;
         return text.Length > 80 ? text[..80] + "…" : text;
     }
@@ -159,6 +160,65 @@ public class QqBotApiService : IQqBotApiService
             _logger.LogWarning(ex, "上传媒体失败: group={GroupOpenId}, fileType={FileType}", groupOpenId, fileType);
             return null;
         }
+    }
+
+    internal async Task<(string ImageId, string Reference, int Ttl)> UploadStickerMaterialAsync(
+        string hash, StickerFile file, HttpClient storage, CancellationToken ct)
+    {
+        var extension = file.ContentType switch
+        {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            _ => throw new InvalidOperationException("不支持的静态表情格式")
+        };
+        using var prepared = await SendAsync(HttpMethod.Post, "/v2/media-images/prepare", new
+        {
+            file_name = $"mutter-{hash}.{extension}",
+            file_size = file.Bytes.Length,
+            content_type = file.ContentType,
+            md5 = Convert.ToHexStringLower(MD5.HashData(file.Bytes)),
+            sha1 = Convert.ToHexStringLower(SHA1.HashData(file.Bytes))
+        }, ct);
+        await EnsureSuccessAsync(prepared, ct);
+        var ticket = await prepared.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, ct);
+        var uploadId = ticket.GetProperty("upload_id").GetString();
+        if (string.IsNullOrEmpty(uploadId)
+            || !Uri.TryCreate(ticket.GetProperty("presigned_url").GetString(), UriKind.Absolute, out var url)
+            || !GroupStickerCollector.IsPublicHttps(url))
+            throw new InvalidOperationException("QQ 素材上传凭证无效");
+
+        // 对象存储请求使用预签名 URL，QQ 通用鉴权只用于 prepare 和 complete。
+        using var content = new ByteArrayContent(file.Bytes);
+        content.Headers.ContentType = new MediaTypeHeaderValue(file.ContentType);
+        using var uploaded = await storage.PutAsync(url, content, ct);
+        uploaded.EnsureSuccessStatusCode();
+        var md5 = uploaded.Headers.ETag?.Tag.Trim('"');
+        if (md5 is not { Length: 32 } || !md5.All(Uri.IsHexDigit))
+            throw new InvalidOperationException("QQ 素材上传缺少有效 ETag");
+
+        using var completed = await SendAsync(HttpMethod.Post, "/v2/media-images/complete", new
+        {
+            upload_id = uploadId,
+            md5
+        }, ct);
+        await EnsureSuccessAsync(completed, ct);
+        var image = await completed.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, ct);
+        var reference = image.GetProperty("url").GetString();
+        var imageId = image.GetProperty("image_id").GetString();
+        if (string.IsNullOrWhiteSpace(imageId) || !QqStickerMaterialService.IsMaterialReference(reference))
+            throw new InvalidOperationException("QQ 返回无效素材");
+        var ttl = image.TryGetProperty("ttl", out var ttlValue) && ttlValue.TryGetInt32(out var seconds)
+            ? seconds : 3600;
+        return (imageId, reference!, Math.Clamp(ttl, 60, 90 * 24 * 3600));
+    }
+
+    internal async Task DeleteStickerMaterialAsync(string imageId, CancellationToken ct)
+    {
+        using var response = await SendAsync(HttpMethod.Delete,
+            "/v2/media-images/" + Uri.EscapeDataString(imageId) + "/delete", null, ct);
+        try { await EnsureSuccessAsync(response, ct); }
+        catch (QqApiException ex) when (ex.ErrCode == 40035008) { }
     }
 
     private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string relativePath, object? body, CancellationToken ct)
@@ -195,7 +255,7 @@ public class QqBotApiService : IQqBotApiService
             var errCode = result?.ErrCode ?? (int)resp.StatusCode;
             var message = result?.Message ?? resp.ReasonPhrase ?? resp.StatusCode.ToString();
             var traceId = result?.TraceId;
-            throw new QqApiException(errCode, message, traceId);
+            throw new QqApiException(errCode, message, traceId, (int)resp.StatusCode);
         }
     }
 }

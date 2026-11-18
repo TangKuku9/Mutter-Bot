@@ -33,6 +33,8 @@ public class MessageEventHandler
     private readonly UpstreamHealthTracker _health;
     private readonly RuntimeOptions _runtime;
     private readonly ILogger<MessageEventHandler> _logger;
+    private readonly IGroupStickerCollector? _stickerCollector;
+    private readonly GroupStickerReplies? _stickerReplies;
     private string _botId = string.Empty;
 
     private readonly ConcurrentDictionary<string, DateTime> _processedMsgIds = new();
@@ -63,7 +65,9 @@ public class MessageEventHandler
         GroupMessageGate groupGate,
         UpstreamHealthTracker health,
         RuntimeOptions runtime,
-        ILogger<MessageEventHandler> logger)
+        ILogger<MessageEventHandler> logger,
+        IGroupStickerCollector? stickerCollector = null,
+        GroupStickerReplies? stickerReplies = null)
     {
         _parser = parser;
         _router = router;
@@ -82,6 +86,8 @@ public class MessageEventHandler
         _health = health;
         _runtime = runtime;
         _logger = logger;
+        _stickerCollector = stickerCollector;
+        _stickerReplies = stickerReplies;
     }
 
     public void SetBotId(string id) => _botId = id;
@@ -341,6 +347,8 @@ public class MessageEventHandler
             parsed.PlainText = BotMention.Strip(parsed.PlainText, route.BotMentionCode);
         }
         parsed.HasAtBot = mention;
+        if (!reprocessAsAt && route.CollectStickers && parsed.Sticker is { } sticker)
+            _stickerCollector?.TryEnqueue(evt.GroupOpenid, sticker);
 
         // 内容级去重：QQ 服务端可能用不同 msgId 重复投递同一消息。
         // 历史上游戏指令（「突破」「修炼」等）曾跳过此检查——去重窗口(30s)会误杀
@@ -555,6 +563,8 @@ public class MessageEventHandler
         RuntimeActivity.Current?.Mark("context");
         ct = operation.Token;
         AiChatResponse response;
+        IReadOnlyList<GroupSticker> candidates = [];
+        var useMarkdown = groupOpenId is not null && _richUi.UseMarkdown(groupOpenId);
         try
         {
             try { await _notificationService.NotifyAiResponseStartedAsync(groupOpenId, senderName); }
@@ -570,37 +580,27 @@ public class MessageEventHandler
                 callScope.AutomaticMemory = context.AutomaticMemory;
 
             var systemPrompt = context.ComposeSystemPrompt();
-
-
-            if (parsed.ImageUrls.Count > 0)
+            var aiConfig = context.EffectiveConfig;
+            var imageUrls = aiConfig.CapAttachedImages(parsed.ImageUrls);
+            if (useMarkdown && _stickerReplies is not null)
             {
-                // 张数由 AI 面板控制，且先把动图/失效链筛掉——否则"面板选了 3 张"会名不副实。
-                // 旧写法直接取 ImageUrls[0]，群友一次发好几张时其余全丢。
-                var attachable = await _aiService.AttachableImagesAsync(
-                    context.EffectiveConfig.CapAttachedImages(parsed.ImageUrls), ct);
-
-                if (attachable.Count > 0)
+                var choices = await _stickerReplies.ChoicesAsync(groupOpenId!, proactive: false, ct);
+                candidates = choices.Items;
+                if (candidates.Count > 0)
                 {
-                    var historyWithImages = new List<(string Role, string Content, IReadOnlyList<string>? ImageUrls)>();
-                    foreach (var msg in context.Messages)
-                        historyWithImages.Add((msg.Role, msg.Content, null));
-                    if (historyWithImages.Count > 0)
-                    {
-                        var last = historyWithImages[^1];
-                        historyWithImages[^1] = (last.Role, last.Content, attachable);
-                    }
-                    response = await _aiService.ChatAsync(systemPrompt, historyWithImages, context.EffectiveConfig, ct);
-                }
-                else
-                {
-                    response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig, ct);
+                    var suffix = GroupStickerReplies.Prompt(choices);
+                    var currentSize = systemPrompt.Length + 8 + context.Messages.Sum(message => message.Content.Length + 8)
+                        + imageUrls.Count * AiRequestBudget.ImageTokens;
+                    var budget = AiRequestBudget.InputBudget(aiConfig.MaxTokens,
+                        aiConfig.ContextWindowTokens, aiConfig.MaxInputTokens);
+                    if (currentSize + suffix.Length <= budget)
+                        systemPrompt += suffix;
+                    else
+                        candidates = [];
                 }
             }
-            else
-            {
-                response = await _aiService.ChatAsync(systemPrompt, context.Messages, context.EffectiveConfig, ct);
-            }
-
+            response = await _aiService.ChatReplyAsync(systemPrompt, context.Messages,
+                imageUrls, aiConfig, useMarkdown, ct);
         }
         catch (OperationCanceledException)
         {
@@ -630,6 +630,7 @@ public class MessageEventHandler
         using var deliveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
         deliveryDeadline.CancelAfter(TimeSpan.FromSeconds(30));
         DeliveryResult delivery;
+        var stickerHash = GroupStickerReplies.TakeChoice(response, candidates);
         try
         {
             delivery = await _dispatcher.SendAsync(new OutgoingReply
@@ -637,7 +638,7 @@ public class MessageEventHandler
                 GroupId = groupOpenId, PeerUserId = userOpenId, BotId = _botId,
                 ReplyToMessageId = msgId, Content = response.Content, Model = response.Model,
                 PromptTokens = response.PromptTokens, CompletionTokens = response.CompletionTokens
-            }, allowActive: true, deliveryDeadline.Token);
+            }, allowActive: true, deliveryDeadline.Token, response.SearchMarkdown, stickerHash);
         }
         catch (OperationCanceledException) when (!hostToken.IsCancellationRequested)
         {
@@ -655,7 +656,7 @@ public class MessageEventHandler
             {
                 GroupId = groupOpenId, Model = response.Model,
                 TotalTokens = response.TotalTokens, Content = response.Content,
-                DeliveryState = delivery.State
+                DeliveryState = delivery.State, delivery.HasImage
             });
         }
         catch (Exception ex) { _logger.LogWarning(ex, "Notify AI complete failed"); }

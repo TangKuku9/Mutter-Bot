@@ -5,6 +5,9 @@ namespace Mutter.Core.Interfaces;
 
 public interface IAiChatService
 {
+    Task<AiChatResponse> ChatReplyAsync(string systemPrompt, List<(string Role, string Content)> history,
+        IReadOnlyList<string> imageUrls, AiConfig config, bool formatSearchReply, CancellationToken ct = default);
+
     Task<AiChatResponse> ChatAsync(
         string systemPrompt,
         List<(string Role, string Content)> conversationHistory,

@@ -100,6 +100,7 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
             {
                 Content = CjkTextFixer.Cleanse(rawContent),
                 RawContent = rawContent,
+                GroundedUrls = searchShape is null ? [] : WebSearchProbe.ReadGroundedUrls(json, gemini: false),
                 Model = model,
                 FinishReason = finishReason,
                 PromptTokens = promptTokens,
@@ -189,6 +190,7 @@ public sealed class HttpModelTransport(HttpClient httpClient, ILogger<HttpModelT
                 {
                     Content = CjkTextFixer.Cleanse(rawContent),
                     RawContent = rawContent,
+                    GroundedUrls = requestBody.ContainsKey("tools") ? WebSearchProbe.ReadGroundedUrls(json, gemini: true) : [],
                     Model = config.ModelName,
                     FinishReason = finishReason,
                     PromptTokens = promptTokens,

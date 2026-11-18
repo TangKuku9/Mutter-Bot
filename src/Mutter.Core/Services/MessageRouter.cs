@@ -53,14 +53,14 @@ public class MessageRouter
             ? config.BotMentionOpenId
             : null;
 
-        if (isAtBot || mentionCode is not null) return new GroupRoute(true, false, mentionCode);
+        if (isAtBot || mentionCode is not null) return new GroupRoute(true, false, mentionCode, config.AutoCollectStickers);
 
         // 非 @ 消息只有两种归宿：围观档落库，以及被择机窗口采集。要不要说话由 AI 判时机，
         // 不再有“命中关键词就接话”这种无判断的旁路（它曾与择机共用同一被动槽位造成二次回复）。
         var global = await configRepo.GetProactiveConfigAsync(ct);
         var shouldObserve = global.Enabled && config.AiProactiveEnabled;
 
-        return new GroupRoute(config.TriggerMode == 2, shouldObserve, null);
+        return new GroupRoute(config.TriggerMode == 2, shouldObserve, null, config.AutoCollectStickers);
     }
 
     public async Task<bool> ShouldProcessPrivateAsync(string userOpenId, CancellationToken ct = default)
@@ -78,5 +78,6 @@ public class MessageRouter
     /// <param name="ShouldProcess">走既有回复链路：消息落库，被 @ 时才回。</param>
     /// <param name="ShouldObserve">是否送进择机发言的观察窗口。</param>
     /// <param name="BotMentionCode">非空 = 这条按识别码判定为 @ 了机器人，值是那串码，用于把 at 段从喂模型的文本里剥掉。</param>
-    public readonly record struct GroupRoute(bool ShouldProcess, bool ShouldObserve, string? BotMentionCode);
+    public readonly record struct GroupRoute(bool ShouldProcess, bool ShouldObserve, string? BotMentionCode,
+        bool CollectStickers = false);
 }

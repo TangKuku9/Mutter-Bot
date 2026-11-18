@@ -39,6 +39,11 @@ public static partial class WebSearchTrigger
     [GeneratedRegex(@"(19|20)\d{2}[年\-/\.](1[0-2]|0?[1-9])[月\-/\.]([12][0-9]|3[01]|0?[1-9])日?", RegexOptions.CultureInvariant)]
     private static partial Regex DateRegex();
 
+    [GeneratedRegex(@"(?:搜图|找图|搜.*图片|找.*图片|配图|带图|什么样|search.*images?|find.*images?)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ImageQueryRegex();
+
+    internal static bool IsImageQuery(string text) => ImageQueryRegex().IsMatch(text);
+
     /// <summary>
     /// 判定一条用户消息是否触发外部检索。
     /// 触发条件（auto 档）：带图 / 含 URL / 命中日期 / 命中时效关键词 / 疑问词 + 足够长的事实询问。

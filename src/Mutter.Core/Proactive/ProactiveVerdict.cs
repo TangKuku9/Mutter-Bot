@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Mutter.Core.Proactive;
@@ -12,6 +13,9 @@ public class ProactiveVerdict
     /// <summary>要发的原话（纯文本，QQ 不渲染 markdown）。空或 null 表示这次不说话。</summary>
     [JsonPropertyName("line")]
     public string? Line { get; set; }
+
+    [JsonPropertyName("sticker_id")]
+    public JsonElement? StickerId { get; set; }
 
     /// <summary>接的是哪个话题，仅用于面板留痕。</summary>
     [JsonPropertyName("topic")]

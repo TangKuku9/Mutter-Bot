@@ -11,12 +11,15 @@ public sealed record WebSearchHit
     public required string Snippet { get; init; }
 }
 
+public sealed record WebSearchImage(string Url, string? SourceUrl = null, int Width = 0, int Height = 0);
+
 /// <summary>一次检索的结果：命中列表 + 附带说明（是否命中缓存/是否兜底等）。</summary>
 public sealed record WebSearchOutcome
 {
     public static readonly WebSearchOutcome Empty = new() { Hits = [], ServedFromCache = false };
 
     public IReadOnlyList<WebSearchHit> Hits { get; init; } = [];
+    public IReadOnlyList<WebSearchImage> Images { get; init; } = [];
 
     /// <summary>命中 3 分钟缓存。</summary>
     [JsonIgnore]
