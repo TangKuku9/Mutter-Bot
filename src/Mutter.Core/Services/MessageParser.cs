@@ -13,7 +13,7 @@ public class MessageParser : IMessageParser
     /// 群表情包（faceType=6）的 text 为空但附件里带图片 URL。
     /// </summary>
     private static readonly Regex FaceSegment =
-        new(@"<faceType=\d+,faceId=""[^""]*"",ext=""([^""]*)"">", RegexOptions.Compiled);
+        new(@"<faceType=(?<type>\d+),faceId=""[^""]*"",ext=""(?<ext>[^""]*)"">", RegexOptions.Compiled);
 
     public ParsedMessage Parse(string content, List<Attachment>? attachments)
     {
@@ -34,6 +34,12 @@ public class MessageParser : IMessageParser
         }
 
         result.HasImage = result.ImageUrls.Count > 0;
+        if (attachments is [ { IsImage: true, Url: { Length: > 0 } stickerUrl } attachment ])
+        {
+            var faces = FaceSegment.Matches(content ?? string.Empty);
+            if (faces.Count == 1 && faces[0].Groups["type"].Value == "6")
+                result.Sticker = new StickerAttachment(stickerUrl, FaceName(faces[0].Groups["ext"].Value), attachment.Size);
+        }
         result.RawSegmentsJson = JsonSerializer.Serialize(result.ImageUrls);
         result.PlainText = NormalizeFaceTags(content, result.HasImage);
 
@@ -50,7 +56,7 @@ public class MessageParser : IMessageParser
             content?.Trim() ?? string.Empty,
             m =>
             {
-                var name = FaceName(m.Groups[1].Value);
+            var name = FaceName(m.Groups["ext"].Value);
                 return name.Length > 0 ? $"[表情:{name}]" : (hasImage ? "[表情图]" : "[表情]");
             });
 
@@ -68,7 +74,9 @@ public class MessageParser : IMessageParser
             var padded = extBase64.Length % 4 == 0 ? extBase64 : extBase64.PadRight(extBase64.Length + (4 - extBase64.Length % 4), '=');
             var json = System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(padded));
             using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("text", out var textEl)) return string.Empty;
+            if (doc.RootElement.ValueKind != JsonValueKind.Object
+                || !doc.RootElement.TryGetProperty("text", out var textEl) || textEl.ValueKind != JsonValueKind.String)
+                return string.Empty;
 
             return (textEl.GetString() ?? string.Empty).Trim().TrimStart('[').TrimEnd(']').Trim();
         }

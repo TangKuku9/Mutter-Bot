@@ -187,6 +187,7 @@ public sealed class ReplyDispatcher(
         var withImage = markdown is not null && search.Image is { } image
             && markdown.Length + image.Length + 2 <= maxChars;
         if (withImage) markdown += "\n\n" + search.Image;
+        var materialRejected = false;
 
         while (true)
         {
@@ -210,7 +211,8 @@ public sealed class ReplyDispatcher(
                     richUi.MarkOk(RichUiCapability.CapMarkdown);
                     richUi.CountMarkdownSent();
                 }
-                return new DeliveryResult(DeliveryStates.Sent, id, "passive", HasImage: withImage);
+                return new DeliveryResult(DeliveryStates.Sent, id, "passive",
+                    HasImage: withImage, ImageMaterialRejected: materialRejected);
             }
             catch (QqApiException ex)
             {
@@ -225,8 +227,11 @@ public sealed class ReplyDispatcher(
                 if (markdown is null)
                     return new DeliveryResult(DeliveryStates.Failed, Detail: $"QQ 拒收搜索回复 ({code})");
 
-                if (withImage && code is 304010 or 40034004 or 40054007)
+                if (withImage && code is 304010 or 40034004 or 40054007 or 40035008 or 40035009 or 40035010)
+                {
+                    materialRejected = code is 40035008 or 40035009 or 40035010;
                     markdown = search.Text;
+                }
                 else if (QqApiErrorCodes.IsMarkdownDenied(code) || code is 40054007 or 40054010 or 304003)
                 {
                     if (code is 304036 or 40034127 or 50056)

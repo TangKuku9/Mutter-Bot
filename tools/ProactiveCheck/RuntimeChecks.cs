@@ -51,6 +51,8 @@ internal static partial class RuntimeChecks
             ("AI 回复来源链接的 Markdown 排版与安全降级", AiReplyMarkdownAsync),
             ("群聊 @ 联网图文、严格转存和降级", MentionSearchImagesAsync),
             ("群聊 @ 内建搜索配图与公网来源边界", BuiltinSearchImagesAsync),
+            ("群静态表情收藏、去重、隔离与单次模型选图", GroupStickersAsync),
+            ("QQ 表情素材三步上传、鉴权隔离与缓存更新", QqStickerMaterialsAsync),
             ("发送成功后记账失败及重启恢复配额", ReceiptFailureAsync),
             ("主动消息分钟/日配额持久化", ActiveQuotaAsync),
             ("模型运行期间关闭开关/群参与/进入静默", FinalPolicyAsync),
@@ -1000,6 +1002,9 @@ internal static partial class RuntimeChecks
         public FakeHttp Http { get; } = new();
         public FakeHttp SearchHttp { get; } = new();
         public FakeHttp PreviewHttp { get; } = new();
+        public FakeHttp StickerHttp { get; } = new();
+        public FakeStickerMaterials StickerMaterials { get; } = new();
+        public string StickerDirectory => _file + ".stickers";
         public FakeImages Images { get; } = new();
         public MonthlyReceiptFault Faults { get; } = new();
         public AiConfig Config() => new()
@@ -1029,6 +1034,10 @@ internal static partial class RuntimeChecks
                 services.AddHttpClient<HttpModelTransport>().ConfigurePrimaryHttpMessageHandler(() => env.Http);
                 services.AddHttpClient<TavilyProvider>().ConfigurePrimaryHttpMessageHandler(() => env.SearchHttp);
                 services.AddHttpClient<GroundedPreviewImages>().ConfigurePrimaryHttpMessageHandler(() => env.PreviewHttp);
+                services.AddHttpClient("qq-sticker-storage").ConfigurePrimaryHttpMessageHandler(() => env.StickerHttp);
+                services.AddSingleton(sp => new GroupStickerLibrary(sp.GetRequiredService<IServiceScopeFactory>(),
+                    env.Clock, NullLogger<GroupStickerLibrary>.Instance, env.StickerDirectory));
+                services.AddSingleton<IStickerMaterialService>(env.StickerMaterials);
                 env.Services = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
                 using var scope = env.Services.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -1064,7 +1073,23 @@ internal static partial class RuntimeChecks
         {
             if (Services is not null) await Services.DisposeAsync();
             foreach (var suffix in new[] { "", "-wal", "-shm" }) File.Delete(_file + suffix);
+            if (Directory.Exists(StickerDirectory))
+            {
+                foreach (var path in Directory.EnumerateFiles(StickerDirectory)) File.Delete(path);
+                Directory.Delete(StickerDirectory);
+            }
         }
+    }
+
+    private sealed class FakeStickerMaterials : IStickerMaterialService
+    {
+        public List<string> Hashes { get; } = [];
+        public Task<string?> GetReferenceAsync(string hash, StickerFile file, CancellationToken ct)
+        {
+            Hashes.Add(hash);
+            return Task.FromResult<string?>("qqbot-media://image/v1/synthetic-sticker");
+        }
+        public Task InvalidateAsync(string hash, string reference, CancellationToken ct) => Task.CompletedTask;
     }
 
     private sealed class TestClock : TimeProvider

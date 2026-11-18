@@ -20,6 +20,9 @@ public class AppDbContext : DbContext
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<GroupInfo> GroupInfos => Set<GroupInfo>();
     public DbSet<GroupConfigEntity> GroupConfigs => Set<GroupConfigEntity>();
+    public DbSet<StickerAssetEntity> StickerAssets => Set<StickerAssetEntity>();
+    public DbSet<GroupStickerEntity> GroupStickers => Set<GroupStickerEntity>();
+    public DbSet<QqStickerMaterialEntity> QqStickerMaterials => Set<QqStickerMaterialEntity>();
     public DbSet<AiConfigEntity> AiConfigs => Set<AiConfigEntity>();
     public DbSet<AiProviderConnectionEntity> AiProviderConnections => Set<AiProviderConnectionEntity>();
     public DbSet<PrivateChatConfigEntity> PrivateChatConfigs => Set<PrivateChatConfigEntity>();
@@ -128,6 +131,14 @@ public class AppDbContext : DbContext
         {
             e.HasKey(x => x.GroupId);
         });
+
+        modelBuilder.Entity<StickerAssetEntity>().HasKey(x => x.Hash);
+        modelBuilder.Entity<GroupStickerEntity>(e =>
+        {
+            e.HasKey(x => new { x.GroupId, x.Hash });
+            e.HasOne<StickerAssetEntity>().WithMany().HasForeignKey(x => x.Hash).OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<QqStickerMaterialEntity>().HasKey(x => new { x.AppId, x.Hash });
 
         modelBuilder.Entity<AiConfigEntity>(e =>
         {
@@ -802,6 +813,7 @@ public class AppDbContext : DbContext
         {
         }
 
+        await EnsureGroupStickerSchemaAsync(ct);
         await EnsureChatTimelineIndexesAsync(ct);
         await BackfillFacePlaceholdersAsync(ct);
         await Repositories.AiConnectionStore.MigrateLegacyAsync(this, _logger, ct);
@@ -835,6 +847,38 @@ public class AppDbContext : DbContext
         """, ct);
 
     /// <summary>新增表和预算列，保留所有既有业务表与数据。</summary>
+    private async Task EnsureGroupStickerSchemaAsync(CancellationToken ct)
+    {
+        foreach (var sql in new[]
+        {
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"AutoCollectStickers\" INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"UseStickersInReplies\" INTEGER NOT NULL DEFAULT 0"
+        })
+        {
+            try { await Database.ExecuteSqlRawAsync(sql, ct); }
+            catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 1
+                && ex.Message.Contains("duplicate column name", StringComparison.Ordinal)) { }
+        }
+
+        await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "StickerAssets" (
+                "Hash" TEXT NOT NULL PRIMARY KEY, "ContentType" TEXT NOT NULL,
+                "Width" INTEGER NOT NULL, "Height" INTEGER NOT NULL, "Bytes" INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS "GroupStickers" (
+                "GroupId" TEXT NOT NULL, "Hash" TEXT NOT NULL, "Label" TEXT NOT NULL,
+                "IsEnabled" INTEGER NOT NULL, "SeenCount" INTEGER NOT NULL, "SentCount" INTEGER NOT NULL,
+                "FirstSeenAt" TEXT NOT NULL, "LastSeenAt" TEXT NOT NULL, "LastSentAt" TEXT NULL,
+                PRIMARY KEY ("GroupId", "Hash"), FOREIGN KEY ("Hash") REFERENCES "StickerAssets" ("Hash") ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS "IX_GroupStickers_Hash" ON "GroupStickers" ("Hash");
+            CREATE TABLE IF NOT EXISTS "QqStickerMaterials" (
+                "AppId" TEXT NOT NULL, "Hash" TEXT NOT NULL, "ImageId" TEXT NOT NULL,
+                "Reference" TEXT NOT NULL, "ExpiresAt" TEXT NOT NULL, PRIMARY KEY ("AppId", "Hash")
+            );
+            """, ct);
+    }
+
     private async Task EnsureRuntimeSchemaAsync(CancellationToken ct)
     {
         await Database.ExecuteSqlRawAsync("""

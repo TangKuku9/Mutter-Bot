@@ -93,6 +93,8 @@ public class ConfigRepository : IConfigRepository
             CustomSystemPrompt = entity.CustomSystemPrompt,
             CustomTemperature = entity.CustomTemperature,
             AiProactiveEnabled = entity.AiProactiveEnabled,
+            AutoCollectStickers = entity.AutoCollectStickers,
+            UseStickersInReplies = entity.UseStickersInReplies,
             ProactiveOverrides = ProactiveOverridesCodec.Decode(entity.ProactiveOverridesJson),
             BotMentionOpenId = entity.BotMentionOpenId,
             ActiveCharacter = entity.ActiveCharacter,
@@ -179,6 +181,8 @@ public class ConfigRepository : IConfigRepository
                 CustomSystemPrompt = config.CustomSystemPrompt,
                 CustomTemperature = config.CustomTemperature,
                 AiProactiveEnabled = config.AiProactiveEnabled,
+                AutoCollectStickers = config.AutoCollectStickers,
+                UseStickersInReplies = config.UseStickersInReplies,
                 ProactiveOverridesJson = EncodeOverrides(config.ProactiveOverrides),
                 BotMentionOpenId = config.BotMentionOpenId,
                 ActiveCharacter = config.ActiveCharacter,
@@ -193,6 +197,8 @@ public class ConfigRepository : IConfigRepository
             entity.CustomSystemPrompt = config.CustomSystemPrompt;
             entity.CustomTemperature = config.CustomTemperature;
             entity.AiProactiveEnabled = config.AiProactiveEnabled;
+            entity.AutoCollectStickers = config.AutoCollectStickers;
+            entity.UseStickersInReplies = config.UseStickersInReplies;
             // partial 保存契约：ProactiveOverrides 为 null 表示保持原值，不整行覆盖。
             if (config.ProactiveOverrides is not null)
                 entity.ProactiveOverridesJson = EncodeOverrides(config.ProactiveOverrides);
@@ -232,6 +238,8 @@ public class ConfigRepository : IConfigRepository
                 CustomSystemPrompt = e.CustomSystemPrompt,
                 CustomTemperature = e.CustomTemperature,
                 AiProactiveEnabled = e.AiProactiveEnabled,
+                AutoCollectStickers = e.AutoCollectStickers,
+                UseStickersInReplies = e.UseStickersInReplies,
                 ProactiveOverrides = ProactiveOverridesCodec.Decode(e.ProactiveOverridesJson),
                 BotMentionOpenId = e.BotMentionOpenId,
                 ActiveCharacter = e.ActiveCharacter,

@@ -32,7 +32,7 @@ public sealed class OutgoingReply
 }
 
 public sealed record DeliveryResult(string State, string? MessageId = null, string? Channel = null,
-    string? Detail = null, bool HasImage = false)
+    string? Detail = null, bool HasImage = false, bool ImageMaterialRejected = false)
 {
     public bool Sent => State == DeliveryStates.Sent;
 }

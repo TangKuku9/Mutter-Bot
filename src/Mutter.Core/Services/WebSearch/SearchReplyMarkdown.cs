@@ -15,7 +15,7 @@ public sealed partial record SearchReplyMarkdown(string PlainText, string Text, 
     public static SearchReplyMarkdown? Create(AiChatResponse response, IEnumerable<string> sourceUrls,
         WebSearchImage? image = null)
     {
-        var answer = response.RawContent ?? response.Content;
+        var answer = GroupStickerReplies.StripMarkers(response.RawContent ?? response.Content);
         if (string.IsNullOrWhiteSpace(answer)) return null;
 
         // 中立化模型输出的链接、图片、自动链接和 QQ 标签，保留标题、加粗、列表与换行。

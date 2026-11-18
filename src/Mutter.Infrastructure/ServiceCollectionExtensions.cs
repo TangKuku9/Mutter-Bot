@@ -58,6 +58,18 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient<QqBotApiService>();
         services.AddSingleton<IQqBotApiService>(sp => sp.GetRequiredService<QqBotApiService>());
         services.AddSingleton<IActiveMessageService, ActiveMessageService>();
+        services.AddSingleton(sp => new GroupStickerLibrary(sp.GetRequiredService<IServiceScopeFactory>(),
+            sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<GroupStickerLibrary>>(),
+            Path.Combine(AppContext.BaseDirectory, "data", "media", "stickers")));
+        services.AddSingleton<IGroupStickerLibrary>(sp => sp.GetRequiredService<GroupStickerLibrary>());
+        services.AddSingleton<GroupStickerCollector>();
+        services.AddSingleton<IGroupStickerCollector>(sp => sp.GetRequiredService<GroupStickerCollector>());
+        services.AddHostedService(sp => sp.GetRequiredService<GroupStickerCollector>());
+        services.AddHttpClient("qq-sticker-storage")
+            .ConfigurePrimaryHttpMessageHandler(OutboundAddressPolicy.CreatePublicWebHandler)
+            .RemoveAllLoggers();
+        services.AddSingleton<IStickerMaterialService, QqStickerMaterialService>();
+        services.AddSingleton<GroupStickerReplies>();
 
         services.AddHostedService(sp => sp.GetRequiredService<ConversationWorkQueue>());
         services.AddSingleton<ProactiveWorkflow>();

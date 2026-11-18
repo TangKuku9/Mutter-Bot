@@ -165,6 +165,43 @@ async function setupGroups(page, { width = 1366 } = {}) {
   await expect(page.getByText('东楼测试群', { exact: true })).toBeVisible()
 }
 
+test('群表情设置与图库可在窄屏使用', async ({ page }) => {
+  await setupGroups(page, { width: 390 })
+  const photo = 'a'.repeat(64)
+  const root = '/api/groups/group-1/stickers'
+  let updated, config
+  await page.route(`**${root}**`, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === root) return route.fulfill({ json: [{ hash: photo, label: '', seenCount: 2, sentCount: 0, isEnabled: true }] })
+    if (path.endsWith('/image')) return route.fulfill({
+      contentType: 'image/png',
+      body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aI1sAAAAASUVORK5CYII=', 'base64')
+    })
+    if (route.request().method() === 'PUT') updated = route.request().postDataJSON()
+    return route.fulfill({ status: 204 })
+  })
+  await page.route('**/api/groups/group-1/config', async route => {
+    config = route.request().postDataJSON()
+    return route.fulfill({ json: { message: '已保存' } })
+  })
+  await page.getByRole('button', { name: '编辑', exact: true }).click()
+  for (const name of ['自动收藏表情', '回复使用表情']) {
+    await page.locator('.el-form-item').filter({ hasText: name }).locator('.el-switch').click()
+    await expect(page.getByRole('switch', { name, exact: true })).toHaveAttribute('aria-checked', 'true')
+  }
+  await page.getByRole('button', { name: '查看本群图库' }).click()
+  const gallery = page.getByRole('dialog', { name: '本群表情包' })
+  await expect(gallery).toBeVisible()
+  await expect(gallery.getByRole('img', { name: '未命名表情' })).toBeVisible()
+  await gallery.getByLabel('表情描述').fill('开心鼓掌')
+  await gallery.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => updated).toEqual({ label: '开心鼓掌', isEnabled: true })
+  await gallery.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(gallery).toBeHidden()
+  await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => config).toMatchObject({ autoCollectStickers: true, useStickersInReplies: true })
+})
+
 test('群列表窄屏隐藏加入时间、保留身份列与固定操作列，@ 识别码帮助按钮同行', async ({ page }) => {
   await setupGroups(page)
   await expect(page.getByText('加入时间', { exact: true })).toBeVisible()

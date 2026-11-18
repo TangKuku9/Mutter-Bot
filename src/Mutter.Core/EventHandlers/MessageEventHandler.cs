@@ -33,6 +33,8 @@ public class MessageEventHandler
     private readonly UpstreamHealthTracker _health;
     private readonly RuntimeOptions _runtime;
     private readonly ILogger<MessageEventHandler> _logger;
+    private readonly IGroupStickerCollector? _stickerCollector;
+    private readonly GroupStickerReplies? _stickerReplies;
     private string _botId = string.Empty;
 
     private readonly ConcurrentDictionary<string, DateTime> _processedMsgIds = new();
@@ -63,7 +65,9 @@ public class MessageEventHandler
         GroupMessageGate groupGate,
         UpstreamHealthTracker health,
         RuntimeOptions runtime,
-        ILogger<MessageEventHandler> logger)
+        ILogger<MessageEventHandler> logger,
+        IGroupStickerCollector? stickerCollector = null,
+        GroupStickerReplies? stickerReplies = null)
     {
         _parser = parser;
         _router = router;
@@ -82,6 +86,8 @@ public class MessageEventHandler
         _health = health;
         _runtime = runtime;
         _logger = logger;
+        _stickerCollector = stickerCollector;
+        _stickerReplies = stickerReplies;
     }
 
     public void SetBotId(string id) => _botId = id;
@@ -341,6 +347,8 @@ public class MessageEventHandler
             parsed.PlainText = BotMention.Strip(parsed.PlainText, route.BotMentionCode);
         }
         parsed.HasAtBot = mention;
+        if (!reprocessAsAt && route.CollectStickers && parsed.Sticker is { } sticker)
+            _stickerCollector?.TryEnqueue(evt.GroupOpenid, sticker);
 
         // 内容级去重：QQ 服务端可能用不同 msgId 重复投递同一消息。
         // 历史上游戏指令（「突破」「修炼」等）曾跳过此检查——去重窗口(30s)会误杀
@@ -555,6 +563,8 @@ public class MessageEventHandler
         RuntimeActivity.Current?.Mark("context");
         ct = operation.Token;
         AiChatResponse response;
+        IReadOnlyList<GroupSticker> candidates = [];
+        var useMarkdown = groupOpenId is not null && _richUi.UseMarkdown(groupOpenId);
         try
         {
             try { await _notificationService.NotifyAiResponseStartedAsync(groupOpenId, senderName); }
@@ -569,9 +579,27 @@ public class MessageEventHandler
             if (AiCallScope.Current is { } callScope)
                 callScope.AutomaticMemory = context.AutomaticMemory;
 
-            response = await _aiService.ChatReplyAsync(context.ComposeSystemPrompt(), context.Messages,
-                context.EffectiveConfig.CapAttachedImages(parsed.ImageUrls), context.EffectiveConfig,
-                groupOpenId is not null && _richUi.UseMarkdown(groupOpenId), ct);
+            var systemPrompt = context.ComposeSystemPrompt();
+            var aiConfig = context.EffectiveConfig;
+            var imageUrls = aiConfig.CapAttachedImages(parsed.ImageUrls);
+            if (useMarkdown && _stickerReplies is not null)
+            {
+                candidates = await _stickerReplies.CandidatesAsync(groupOpenId!, ct);
+                if (candidates.Count > 0)
+                {
+                    var suffix = GroupStickerReplies.Prompt(candidates);
+                    var currentSize = systemPrompt.Length + 8 + context.Messages.Sum(message => message.Content.Length + 8)
+                        + imageUrls.Count * AiRequestBudget.ImageTokens;
+                    var budget = AiRequestBudget.InputBudget(aiConfig.MaxTokens,
+                        aiConfig.ContextWindowTokens, aiConfig.MaxInputTokens);
+                    if (currentSize + suffix.Length <= budget)
+                        systemPrompt += suffix;
+                    else
+                        candidates = [];
+                }
+            }
+            response = await _aiService.ChatReplyAsync(systemPrompt, context.Messages,
+                imageUrls, aiConfig, useMarkdown, ct);
         }
         catch (OperationCanceledException)
         {
@@ -601,14 +629,20 @@ public class MessageEventHandler
         using var deliveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
         deliveryDeadline.CancelAfter(TimeSpan.FromSeconds(30));
         DeliveryResult delivery;
+        var stickerHash = GroupStickerReplies.TakeChoice(response, candidates);
+        var presentation = response.SearchMarkdown;
+        PreparedGroupSticker? preparedSticker = null;
         try
         {
+            if (stickerHash is not null && _stickerReplies is not null && _richUi.UseMarkdown(groupOpenId))
+                preparedSticker = await _stickerReplies.PrepareAsync(groupOpenId!, stickerHash, response.Content,
+                    _richUi.Options.MaxMarkdownChars, deliveryDeadline.Token);
             delivery = await _dispatcher.SendAsync(new OutgoingReply
             {
                 GroupId = groupOpenId, PeerUserId = userOpenId, BotId = _botId,
                 ReplyToMessageId = msgId, Content = response.Content, Model = response.Model,
                 PromptTokens = response.PromptTokens, CompletionTokens = response.CompletionTokens
-            }, allowActive: true, deliveryDeadline.Token, response.SearchMarkdown);
+            }, allowActive: true, deliveryDeadline.Token, preparedSticker?.Message ?? presentation);
         }
         catch (OperationCanceledException) when (!hostToken.IsCancellationRequested)
         {
@@ -620,6 +654,8 @@ public class MessageEventHandler
             _logger.LogWarning("AI reply not confirmed msg={Message} state={State}", msgId, delivery.State);
             return;
         }
+        if (stickerHash is not null && preparedSticker is not null && _stickerReplies is not null)
+            await _stickerReplies.CompleteAsync(groupOpenId!, stickerHash, preparedSticker, delivery);
         try
         {
             await _notificationService.NotifyAiResponseCompletedAsync(new
