@@ -16,12 +16,12 @@ namespace Mutter.Core.Services;
 public sealed class ReplyDispatcher(
     IQqBotApiService api, IActiveMessageService active, ReplySeqTracker sequences,
     IOutgoingReplyStore store, IServiceScopeFactory scopes, TimeProvider clock,
-    RichUiCapability richUi, ILogger<ReplyDispatcher> logger)
+    RichUiCapability richUi, ILogger<ReplyDispatcher> logger, GroupStickerReplies? stickerReplies = null)
 {
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recent = new();
 
     public async Task<DeliveryResult> SendAsync(OutgoingReply reply, bool allowActive, CancellationToken ct = default,
-        SearchReplyMarkdown? searchMarkdown = null)
+        SearchReplyMarkdown? searchMarkdown = null, string? stickerHash = null)
     {
         if (ct.IsCancellationRequested)
             return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedCancelled);
@@ -53,11 +53,22 @@ public sealed class ReplyDispatcher(
         if (reply.IsProactive || reply.GroupId is null || reply.ReplyToMessageId is null
             || !richUi.UseMarkdown(reply.GroupId))
             searchMarkdown = null;
+        PreparedGroupSticker? sticker = null;
+        if (searchMarkdown is null && stickerHash is not null && stickerReplies is not null
+            && reply.GroupId is not null && (reply.ReplyToMessageId is not null || reply.IsProactive && allowActive)
+            && richUi.UseMarkdown(reply.GroupId))
+        {
+            sticker = await stickerReplies.PrepareAsync(reply.GroupId, stickerHash, reply.Content, reply.IsProactive,
+                richUi.Options.MaxMarkdownChars, ct);
+            searchMarkdown = sticker?.Message;
+        }
         var conversation = reply.GroupId is null ? $"u:{reply.PeerUserId}" : $"g:{reply.GroupId}";
         var dedupContent = searchMarkdown?.Image is { } image ? $"{reply.Content}\0{image}" : reply.Content;
         var fingerprint = $"{conversation}:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(dedupContent)))}";
         DeliveryResult result;
-        if (!reply.IsProactive && _recent.TryGetValue(fingerprint, out var last)
+        if (limits?.IsQuietNow(clock.GetUtcNow().UtcDateTime) == true)
+            result = new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedQuietHours);
+        else if (!reply.IsProactive && _recent.TryGetValue(fingerprint, out var last)
             && clock.GetUtcNow() - last < TimeSpan.FromSeconds(8))
             result = new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedDuplicate);
         else
@@ -81,6 +92,8 @@ public sealed class ReplyDispatcher(
             logger.LogError(ex, "Delivery receipt could not be persisted id={Id} state={State}", reply.Id, result.State);
             result = result with { Detail = $"{result.Detail}；投递回执暂未写入，待发送记录保留供核查" };
         }
+        if (sticker is not null)
+            await stickerReplies!.CompleteAsync(reply.GroupId!, stickerHash!, sticker, result);
         RuntimeActivity.Current?.Outcome(result.State, result.Detail);
         return result;
     }
@@ -95,7 +108,7 @@ public sealed class ReplyDispatcher(
         {
             ct.ThrowIfCancellationRequested();
             RuntimeActivity.Current?.Mark("sending");
-            if (searchMarkdown is not null)
+            if (searchMarkdown is not null && reply.ReplyToMessageId is not null)
             {
                 var result = await SendPassiveSearchReplyAsync(reply, searchMarkdown, ct);
                 if (result is not null) return result;
@@ -153,18 +166,26 @@ public sealed class ReplyDispatcher(
             if (!allowActive) return new DeliveryResult(DeliveryStates.Failed, Detail: ProactiveOutcomes.FailedNoChannel);
             ct.ThrowIfCancellationRequested();
             sendStarted = true;
-            var activeMarkdown = reply.GroupId is not null ? TryCreateMarkdown(reply, null, null) : null;
+            var activeMarkdown = reply.IsProactive && searchMarkdown?.Image is { } image
+                ? new OutboundMessage
+                {
+                    PlainText = reply.Content, MarkdownText = searchMarkdown.Text + "\n\n" + image,
+                    MarkdownWithoutImage = searchMarkdown.Text, ForceVerifyImageResource = true
+                }
+                : reply.GroupId is not null ? TryCreateMarkdown(reply, null, null) : null;
             var activeResult = reply.GroupId is not null
                 ? activeMarkdown is not null
                     ? await active.SendGroupActiveRichAsync(reply.GroupId, activeMarkdown, ct)
                     : await active.SendGroupActiveAsync(reply.GroupId, reply.Content, ct)
                 : await active.SendPrivateActiveAsync(reply.PeerUserId!, reply.Content, ct);
             return activeResult.Success
-                ? new DeliveryResult(DeliveryStates.Sent, activeResult.MessageId, "active")
+                ? new DeliveryResult(DeliveryStates.Sent, activeResult.MessageId, "active",
+                    HasImage: activeResult.HasImage, ImageMaterialRejected: activeResult.ImageMaterialRejected)
                 : new DeliveryResult(activeResult.Reason == "unknown" ? DeliveryStates.Unknown : DeliveryStates.Failed,
                     Detail: activeResult.Reason is "rejected" ? ProactiveOutcomes.FailedReceiverRejected
                         : activeResult.Reason is "quota_exhausted" or "rate_limited" ? ProactiveOutcomes.FailedRateLimited
-                        : activeResult.ErrorMessage ?? ProactiveOutcomes.FailedApiError);
+                        : activeResult.ErrorMessage ?? ProactiveOutcomes.FailedApiError,
+                    ImageMaterialRejected: activeResult.ImageMaterialRejected);
         }
         catch (OperationCanceledException) when (!sendStarted)
         {
@@ -217,8 +238,7 @@ public sealed class ReplyDispatcher(
             catch (QqApiException ex)
             {
                 var code = ex.ErrCode;
-                if (ex.HttpStatus is >= 500 or 201 or 202 || code is >= 500 and <= 599
-                    or 50055001 or 50055002 or 304023 or 304024 or 40054005)
+                if (QqApiErrorCodes.IsDeliveryUncertain(ex))
                     return new DeliveryResult(DeliveryStates.Unknown, Detail: $"QQ 未确认送达 ({code})");
                 if (ex.HttpStatus == 429 || code == 40034100)
                     return new DeliveryResult(DeliveryStates.Failed, Detail: ProactiveOutcomes.FailedRateLimited);
@@ -227,9 +247,9 @@ public sealed class ReplyDispatcher(
                 if (markdown is null)
                     return new DeliveryResult(DeliveryStates.Failed, Detail: $"QQ 拒收搜索回复 ({code})");
 
-                if (withImage && code is 304010 or 40034004 or 40054007 or 40035008 or 40035009 or 40035010)
+                if (withImage && QqApiErrorCodes.IsImageDenied(code))
                 {
-                    materialRejected = code is 40035008 or 40035009 or 40035010;
+                    materialRejected = QqApiErrorCodes.IsImageMaterialDenied(code);
                     markdown = search.Text;
                 }
                 else if (QqApiErrorCodes.IsMarkdownDenied(code) || code is 40054007 or 40054010 or 304003)

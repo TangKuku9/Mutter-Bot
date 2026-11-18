@@ -72,14 +72,8 @@
           <el-switch v-model="form.aiProactiveEnabled" />
           <ParamHelpButton :label="helpLabel('aiProactiveEnabled')" @click="openHelp('aiProactiveEnabled')" />
         </el-form-item>
-        <el-form-item label="自动收藏表情">
-          <el-switch v-model="form.autoCollectStickers" aria-label="自动收藏表情" />
-          <el-button class="sticker-button" size="small" @click="stickersVisible = true">查看本群图库</el-button>
-          <div class="sub-hint">只收藏已收到的 QQ 静态表情包。能否收到未 @ 的消息取决于机器人订阅权限。</div>
-        </el-form-item>
-        <el-form-item label="回复使用表情">
-          <el-switch v-model="form.useStickersInReplies" aria-label="回复使用表情" />
-          <div class="sub-hint">群内被 @ 时，Mutter 可以选一张本群已标注的表情。需要启用 QQ Markdown。</div>
+        <el-form-item label="表情包">
+          <router-link :to="{ path: '/stickers', query: { group: editingId } }">管理本群图库与发送策略</router-link>
         </el-form-item>
         <el-form-item label="@ 识别码">
           <el-input v-model="form.botMentionOpenId" clearable placeholder="留空 = 认不出有人 @ 机器人" />
@@ -135,7 +129,6 @@
         <el-button type="primary" :loading="saving || memoryLoading" :disabled="memoryLoading" @click="save">保存</el-button>
       </template>
     </el-dialog>
-    <GroupStickerLibrary v-model="stickersVisible" :group-id="editingId" />
 
     <el-card shadow="never" style="margin-top: 16px">
       <template #header><b>主动消息用量（自然月累计）</b></template>
@@ -171,7 +164,6 @@ import { useParamHelp } from '../paramHelp'
 import { useMediaQuery } from '../useMediaQuery'
 import ParamHelpButton from '../components/ParamHelpButton.vue'
 import ParamHelpDrawer from '../components/ParamHelpDrawer.vue'
-import GroupStickerLibrary from '../components/GroupStickerLibrary.vue'
 
 // 窄屏收起加入时间等次要列，保留群名/OpenId 身份列与操作列（操作列固定在右侧）
 const narrow = useMediaQuery('(max-width: 600px)')
@@ -184,7 +176,6 @@ const dialog = ref(false)
 const saving = ref(false)
 const form = ref(null)
 const editingId = ref('')
-const stickersVisible = ref(false)
 const memoryUnavailable = ref(false)
 const memoryLoading = ref(false)
 const memoryUpdatedAt = ref(null)
@@ -322,8 +313,6 @@ const edit = async (row) => {
     memoryInjectionEnabled: row.config?.memoryInjectionEnabled ?? null,
     triggerMode: row.config?.triggerMode ?? 0,
     aiProactiveEnabled: row.config?.aiProactiveEnabled ?? false,
-    autoCollectStickers: row.config?.autoCollectStickers ?? false,
-    useStickersInReplies: row.config?.useStickersInReplies ?? false,
     botMentionOpenId: row.config?.botMentionOpenId ?? '',
     activeCharacter: row.config?.activeCharacter ?? '',
     customSystemPrompt: row.config?.customSystemPrompt ?? '',
@@ -385,7 +374,6 @@ onMounted(load)
 .dialog-head { display: flex; justify-content: space-between; align-items: center; }
 /* 摘要读取失败与上次更新是当前状态，不是参数说明 */
 .sub-hint { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }
-.sticker-button { margin-left: 12px; }
 /* 整行控件给右边的「?」留出位置，否则宽度占满会把按钮挤到下一行 */
 .el-form-item__content > .el-input,
 .el-form-item__content > .el-textarea { width: calc(100% - 32px); }

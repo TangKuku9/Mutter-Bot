@@ -3,8 +3,10 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
+using Mutter.Core.Models.Config;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
+using Mutter.Infrastructure.Services;
 
 namespace Mutter.Infrastructure.Repositories;
 
@@ -23,18 +25,17 @@ public sealed class GroupStickerLibrary(
             .OrderByDescending(row => row.LastSeenAt).ThenBy(row => row.Hash)).Take(MaxPerGroup).ToListAsync(ct);
     }
 
-    public async Task<IReadOnlyList<GroupSticker>> CandidatesAsync(string groupId, CancellationToken ct)
+    public async Task<StickerChoices> ChoicesAsync(string groupId, bool proactive, CancellationToken ct)
     {
         using var scope = scopes.CreateScope();
         var db = Db(scope);
-        if (!await db.GroupConfigs.AnyAsync(c => c.GroupId == groupId && c.IsEnabled && c.UseStickersInReplies, ct))
-            return [];
-        var since = clock.GetUtcNow().UtcDateTime.AddMinutes(-5);
-        return await Project(db.GroupStickers.AsNoTracking()
-            .Where(row => row.GroupId == groupId && row.IsEnabled && row.Label != ""
-                && (row.LastSentAt == null || row.LastSentAt < since))
+        var now = clock.GetUtcNow().UtcDateTime;
+        var policy = await ReadAvailablePolicyAsync(db, groupId, proactive, now, ct);
+        if (policy is null) return StickerChoices.Empty;
+        var items = await Project(Eligible(db, groupId, now)
             .OrderBy(row => row.SentCount).ThenByDescending(row => row.LastSeenAt).ThenBy(row => row.Hash))
             .Take(8).ToListAsync(ct);
+        return new StickerChoices(items, proactive ? policy.StickerProactiveTendency : policy.StickerReplyTendency);
     }
 
     internal async Task<bool> CanCollectAsync(string groupId, CancellationToken ct)
@@ -43,16 +44,27 @@ public sealed class GroupStickerLibrary(
         return await CollectionEnabledAsync(Db(scope), groupId, ct);
     }
 
-    public async Task<bool> CanSendAsync(string groupId, string hash, CancellationToken ct)
+    public async Task<bool> CanSendAsync(string groupId, string hash, bool proactive, CancellationToken ct)
     {
         using var scope = scopes.CreateScope();
         var db = Db(scope);
-        return await db.GroupStickers.AnyAsync(row => row.GroupId == groupId && row.Hash == hash
-            && row.IsEnabled && row.Label != "" && db.GroupConfigs.Any(c => c.GroupId == groupId
-                && c.IsEnabled && c.UseStickersInReplies), ct);
+        var now = clock.GetUtcNow().UtcDateTime;
+        return await ReadAvailablePolicyAsync(db, groupId, proactive, now, ct) is not null
+            && await Eligible(db, groupId, now).AnyAsync(row => row.Hash == hash, ct);
     }
 
-    internal async Task CollectAsync(string groupId, string label, StickerFile file, CancellationToken ct)
+    public async Task<string?> ImportAsync(string groupId, string? label, byte[] bytes, CancellationToken ct)
+    {
+        if (StaticStickerImage.Read(bytes) is not { } file)
+            return "请选择静态 PNG、JPEG 或 WebP，宽和高均不能超过 2048 像素";
+        return await StoreAsync(groupId, label, file, fromChat: false, ct)
+            ? null : "图库容量已满，或所选群不存在";
+    }
+
+    internal Task<bool> CollectAsync(string groupId, string label, StickerFile file, CancellationToken ct) =>
+        StoreAsync(groupId, label, file, fromChat: true, ct);
+
+    private async Task<bool> StoreAsync(string groupId, string? label, StickerFile file, bool fromChat, CancellationToken ct)
     {
         var hash = Convert.ToHexStringLower(SHA256.HashData(file.Bytes));
         await _files.WaitAsync(ct);
@@ -61,22 +73,28 @@ public sealed class GroupStickerLibrary(
             using var scope = scopes.CreateScope();
             var db = Db(scope);
             await using var tx = await db.Database.BeginTransactionAsync(ct);
-            if (!await CollectionEnabledAsync(db, groupId, ct)) return;
+            if (fromChat ? !await CollectionEnabledAsync(db, groupId, ct)
+                : !await db.KnownGroups.AnyAsync(group => group.GroupOpenId == groupId, ct)) return false;
 
             var now = clock.GetUtcNow().UtcDateTime;
             var groupEntry = await db.GroupStickers.FindAsync([groupId, hash], ct);
             if (groupEntry is not null)
             {
-                groupEntry.LastSeenAt = now;
-                if (groupEntry.SeenCount < int.MaxValue) groupEntry.SeenCount++;
+                if (fromChat)
+                {
+                    groupEntry.LastSeenAt = now;
+                    if (groupEntry.SeenCount < int.MaxValue) groupEntry.SeenCount++;
+                }
+                else if (!string.IsNullOrWhiteSpace(label))
+                    groupEntry.Label = NormalizeLabel(label);
             }
             else
             {
-                if (await db.GroupStickers.CountAsync(row => row.GroupId == groupId, ct) >= MaxPerGroup) return;
+                if (await db.GroupStickers.CountAsync(row => row.GroupId == groupId, ct) >= MaxPerGroup) return false;
                 db.GroupStickers.Add(new GroupStickerEntity
                 {
                     GroupId = groupId, Hash = hash, Label = NormalizeLabel(label), IsEnabled = true,
-                    SeenCount = 1, FirstSeenAt = now, LastSeenAt = now
+                    SeenCount = fromChat ? 1 : 0, FirstSeenAt = now, LastSeenAt = now
                 });
             }
 
@@ -84,7 +102,7 @@ public sealed class GroupStickerLibrary(
             if (asset is null)
             {
                 if (await db.StickerAssets.SumAsync(row => (long)row.Bytes, ct) + file.Bytes.Length > MaxTotalBytes)
-                    return;
+                    return false;
                 db.StickerAssets.Add(new StickerAssetEntity
                 {
                     Hash = hash, ContentType = file.ContentType, Width = file.Width, Height = file.Height,
@@ -96,6 +114,7 @@ public sealed class GroupStickerLibrary(
             if (!File.Exists(path)) await WriteAsync(path, file.Bytes, ct);
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
+            return true;
         }
         finally { _files.Release(); }
     }
@@ -110,14 +129,14 @@ public sealed class GroupStickerLibrary(
                            where entry.GroupId == groupId && entry.Hash == hash
                                && (!forReply || (entry.IsEnabled && entry.Label != ""
                                    && db.GroupConfigs.Any(c => c.GroupId == groupId
-                                       && c.IsEnabled && c.UseStickersInReplies)))
+                                       && c.IsEnabled && (c.UseStickersInReplies || c.UseStickersInProactive))))
                            select blob).AsNoTracking().SingleOrDefaultAsync(ct);
         if (asset is null) return null;
         try
         {
             await using var file = new FileStream(PathFor(hash), FileMode.Open, FileAccess.Read,
                 FileShare.Read | FileShare.Delete, 8192, FileOptions.Asynchronous);
-            if (file.Length != asset.Bytes || asset.Bytes is <= 0 or > Services.StaticStickerImage.MaxBytes) return null;
+            if (file.Length != asset.Bytes || asset.Bytes is <= 0 or > StaticStickerImage.MaxBytes) return null;
             var data = new byte[asset.Bytes];
             await file.ReadExactlyAsync(data, ct);
             return new StickerFile(data, asset.ContentType, asset.Width, asset.Height);
@@ -204,6 +223,26 @@ public sealed class GroupStickerLibrary(
 
     private static Task<bool> CollectionEnabledAsync(AppDbContext db, string groupId, CancellationToken ct) =>
         db.GroupConfigs.AnyAsync(c => c.GroupId == groupId && c.IsEnabled && c.AutoCollectStickers, ct);
+
+    private static IQueryable<GroupStickerEntity> Eligible(AppDbContext db, string groupId, DateTime now)
+    {
+        var since = now.AddMinutes(-5);
+        return db.GroupStickers.AsNoTracking().Where(row => row.GroupId == groupId && row.IsEnabled
+            && row.Label != "" && (row.LastSentAt == null || row.LastSentAt <= since));
+    }
+
+    private static async Task<GroupConfigEntity?> ReadAvailablePolicyAsync(
+        AppDbContext db, string groupId, bool proactive, DateTime now, CancellationToken ct)
+    {
+        var policy = await db.GroupConfigs.AsNoTracking().FirstOrDefaultAsync(c => c.GroupId == groupId
+            && c.IsEnabled && (proactive ? c.AiProactiveEnabled && c.UseStickersInProactive : c.UseStickersInReplies), ct);
+        if (policy is null) return null;
+        var interval = StickerSettings.NormalizeInterval(policy.StickerIntervalMinutes);
+        if (interval == 0) return policy;
+        var since = now.AddMinutes(-interval);
+        return await db.GroupStickers.AnyAsync(row => row.GroupId == groupId && row.LastSentAt > since, ct)
+            ? null : policy;
+    }
 
     private static IQueryable<GroupSticker> Project(IQueryable<GroupStickerEntity> entries) =>
         entries.Select(row => new GroupSticker(row.Hash, row.Label, row.IsEnabled, row.SeenCount,

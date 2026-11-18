@@ -114,11 +114,13 @@ public class ActiveMessageService : IActiveMessageService
 
         var limits = ResolveLimits(scope, config);
         var attempt = msg;
+        var formatDowngraded = false;
+        var materialRejected = false;
         string? sentId = null;
-        for (var send = 0; ; send++)
+        while (true)
         {
             if (!await TryAcquireAsync(db, key, scope, limits, ct))
-                return new ActiveMessageSendResult { Success = false, Reason = "rate_limited" };
+                return new ActiveMessageSendResult { Success = false, Reason = "rate_limited", ImageMaterialRejected = materialRejected };
             ct.ThrowIfCancellationRequested();
             try
             {
@@ -127,10 +129,22 @@ public class ActiveMessageService : IActiveMessageService
                 else
                     sentId = await _apiService.SendPrivateRichAsync(key, attempt, ct);
 
+                if (msg.ForceVerifyImageResource && string.IsNullOrEmpty(sentId))
+                    return new ActiveMessageSendResult { Reason = "unknown", ImageMaterialRejected = materialRejected };
                 if (attempt.UseMarkdown) _richUi.CountMarkdownSent();
                 break;
             }
-            catch (QqApiException ex) when (attempt.UseMarkdown && send == 0
+            catch (QqApiException ex) when (msg.ForceVerifyImageResource && QqApiErrorCodes.IsDeliveryUncertain(ex))
+            {
+                return new ActiveMessageSendResult { Reason = "unknown", ImageMaterialRejected = materialRejected };
+            }
+            catch (QqApiException ex) when (attempt.ForceVerifyImageResource && QqApiErrorCodes.IsImageDenied(ex.ErrCode))
+            {
+                materialRejected = QqApiErrorCodes.IsImageMaterialDenied(ex.ErrCode);
+                _richUi.CountDegradeRetry();
+                attempt = attempt with { MarkdownText = attempt.MarkdownWithoutImage, ForceVerifyImageResource = false };
+            }
+            catch (QqApiException ex) when (attempt.UseMarkdown && !formatDowngraded
                                             && (QqApiErrorCodes.IsMarkdownDenied(ex.ErrCode)
                                                 || QqApiErrorCodes.IsKeyboardDenied(ex.ErrCode)))
             {
@@ -140,8 +154,9 @@ public class ActiveMessageService : IActiveMessageService
                 _richUi.CountDegradeRetry();
                 _richUi.CountPlainFallback();
                 _logger.LogWarning("主动富消息被拒，降级重发 subject={Scope} key={Key} errCode={ErrCode}", scope, key, ex.ErrCode);
+                formatDowngraded = true;
                 attempt = markdownBroken
-                    ? attempt with { MarkdownText = null, Keyboard = null }
+                    ? attempt with { MarkdownText = null, Keyboard = null, ForceVerifyImageResource = false }
                     : attempt with { Keyboard = null };
                 continue;
             }
@@ -152,18 +167,20 @@ public class ActiveMessageService : IActiveMessageService
                 {
                     try { await MarkRejectedAsync(key, scope, ct); }
                     catch (Exception persistError) { _logger.LogError(persistError, "接收方拒绝状态写入失败"); }
-                    return new ActiveMessageSendResult { Success = false, Reason = "rejected" };
+                    return new ActiveMessageSendResult { Success = false, Reason = "rejected", ImageMaterialRejected = materialRejected };
                 }
                 // 40034100 主动消息超频控：官方侧限流，记下来便于面板区分「被平台拦」与「被自己拦」
                 if (ex.ErrCode == 40034100)
                     return new ActiveMessageSendResult { Success = false, Reason = "rate_limited", ErrorMessage = ex.Message };
 
-                return new ActiveMessageSendResult { Success = false, Reason = "error", ErrorMessage = ex.Message };
+                return new ActiveMessageSendResult { Success = false, Reason = "error", ErrorMessage = ex.Message,
+                    ImageMaterialRejected = materialRejected };
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "发送主动消息异常 subject={Scope} key={Key}", scope, key);
-                return new ActiveMessageSendResult { Success = false, Reason = "unknown", ErrorMessage = ex.Message };
+                return new ActiveMessageSendResult { Success = false, Reason = "unknown", ErrorMessage = ex.Message,
+                    ImageMaterialRejected = materialRejected };
             }
         }
 
@@ -180,7 +197,11 @@ public class ActiveMessageService : IActiveMessageService
                 """, receiptDeadline.Token);
         }
         catch (Exception ex) { _logger.LogError(ex, "主动消息已发送，月累计写入失败 subject={Scope} key={Key}", scope, key); }
-        return new ActiveMessageSendResult { Success = true, Reason = "ok", MessageId = sentId };
+        return new ActiveMessageSendResult
+        {
+            Success = true, Reason = "ok", MessageId = sentId,
+            HasImage = attempt.UseMarkdown && attempt.ForceVerifyImageResource, ImageMaterialRejected = materialRejected
+        };
     }
 
     private async Task<ActiveMessageQuotaStatus> GetQuotaStatusAsync(string key, string scope, CancellationToken ct)

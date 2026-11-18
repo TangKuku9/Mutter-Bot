@@ -9,6 +9,14 @@ public static class QqApiErrorCodes
     /// <summary>无 Markdown 能力（权限缺失或语法被拒）→ 降级纯文本重发。</summary>
     public static bool IsMarkdownDenied(int errCode) => MarkdownDenied.Contains(errCode);
 
+    public static bool IsImageMaterialDenied(int code) => code is 40035008 or 40035009 or 40035010;
+
+    public static bool IsImageDenied(int code) =>
+        code is 304010 or 40034004 or 40054007 || IsImageMaterialDenied(code);
+
+    public static bool IsDeliveryUncertain(QqApiException ex) => ex.HttpStatus is >= 500 or 201 or 202
+        || ex.ErrCode is >= 500 and <= 599 or 50055001 or 50055002 or 304023 or 304024 or 40054005;
+
     /// <summary>无消息按钮组件能力或键盘参数被拒 → 降级为无按钮（文字链/纯文本）。</summary>
     public static bool IsKeyboardDenied(int errCode) => KeyboardDenied.Contains(errCode);
 

@@ -52,6 +52,7 @@ internal static partial class RuntimeChecks
             ("群聊 @ 联网图文、严格转存和降级", MentionSearchImagesAsync),
             ("群聊 @ 内建搜索配图与公网来源边界", BuiltinSearchImagesAsync),
             ("群静态表情收藏、去重、隔离与单次模型选图", GroupStickersAsync),
+            ("择机表情配置、主动图文和同群最低间隔", ProactiveStickersAsync),
             ("QQ 表情素材三步上传、鉴权隔离与缓存更新", QqStickerMaterialsAsync),
             ("发送成功后记账失败及重启恢复配额", ReceiptFailureAsync),
             ("主动消息分钟/日配额持久化", ActiveQuotaAsync),

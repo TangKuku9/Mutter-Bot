@@ -852,7 +852,11 @@ public class AppDbContext : DbContext
         foreach (var sql in new[]
         {
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"AutoCollectStickers\" INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"UseStickersInReplies\" INTEGER NOT NULL DEFAULT 0"
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"UseStickersInReplies\" INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"UseStickersInProactive\" INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"StickerReplyTendency\" INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"StickerProactiveTendency\" INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"StickerIntervalMinutes\" INTEGER NOT NULL DEFAULT 3"
         })
         {
             try { await Database.ExecuteSqlRawAsync(sql, ct); }

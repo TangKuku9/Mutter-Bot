@@ -95,6 +95,10 @@ public class ConfigRepository : IConfigRepository
             AiProactiveEnabled = entity.AiProactiveEnabled,
             AutoCollectStickers = entity.AutoCollectStickers,
             UseStickersInReplies = entity.UseStickersInReplies,
+            UseStickersInProactive = entity.UseStickersInProactive,
+            StickerReplyTendency = entity.StickerReplyTendency,
+            StickerProactiveTendency = entity.StickerProactiveTendency,
+            StickerIntervalMinutes = entity.StickerIntervalMinutes,
             ProactiveOverrides = ProactiveOverridesCodec.Decode(entity.ProactiveOverridesJson),
             BotMentionOpenId = entity.BotMentionOpenId,
             ActiveCharacter = entity.ActiveCharacter,
@@ -183,6 +187,10 @@ public class ConfigRepository : IConfigRepository
                 AiProactiveEnabled = config.AiProactiveEnabled,
                 AutoCollectStickers = config.AutoCollectStickers,
                 UseStickersInReplies = config.UseStickersInReplies,
+                UseStickersInProactive = config.UseStickersInProactive,
+                StickerReplyTendency = StickerSettings.NormalizeTendency(config.StickerReplyTendency),
+                StickerProactiveTendency = StickerSettings.NormalizeTendency(config.StickerProactiveTendency),
+                StickerIntervalMinutes = StickerSettings.NormalizeInterval(config.StickerIntervalMinutes),
                 ProactiveOverridesJson = EncodeOverrides(config.ProactiveOverrides),
                 BotMentionOpenId = config.BotMentionOpenId,
                 ActiveCharacter = config.ActiveCharacter,
@@ -199,6 +207,10 @@ public class ConfigRepository : IConfigRepository
             entity.AiProactiveEnabled = config.AiProactiveEnabled;
             entity.AutoCollectStickers = config.AutoCollectStickers;
             entity.UseStickersInReplies = config.UseStickersInReplies;
+            entity.UseStickersInProactive = config.UseStickersInProactive;
+            entity.StickerReplyTendency = StickerSettings.NormalizeTendency(config.StickerReplyTendency);
+            entity.StickerProactiveTendency = StickerSettings.NormalizeTendency(config.StickerProactiveTendency);
+            entity.StickerIntervalMinutes = StickerSettings.NormalizeInterval(config.StickerIntervalMinutes);
             // partial 保存契约：ProactiveOverrides 为 null 表示保持原值，不整行覆盖。
             if (config.ProactiveOverrides is not null)
                 entity.ProactiveOverridesJson = EncodeOverrides(config.ProactiveOverrides);
@@ -240,6 +252,10 @@ public class ConfigRepository : IConfigRepository
                 AiProactiveEnabled = e.AiProactiveEnabled,
                 AutoCollectStickers = e.AutoCollectStickers,
                 UseStickersInReplies = e.UseStickersInReplies,
+                UseStickersInProactive = e.UseStickersInProactive,
+                StickerReplyTendency = e.StickerReplyTendency,
+                StickerProactiveTendency = e.StickerProactiveTendency,
+                StickerIntervalMinutes = e.StickerIntervalMinutes,
                 ProactiveOverrides = ProactiveOverridesCodec.Decode(e.ProactiveOverridesJson),
                 BotMentionOpenId = e.BotMentionOpenId,
                 ActiveCharacter = e.ActiveCharacter,

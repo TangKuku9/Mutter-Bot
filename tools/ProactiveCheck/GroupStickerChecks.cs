@@ -13,8 +13,10 @@ using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
 using Mutter.Core.Models.Config;
 using Mutter.Core.Models.QQOfficial;
+using Mutter.Core.Proactive;
 using Mutter.Core.Services;
 using Mutter.Infrastructure.Data;
+using Mutter.Infrastructure.Entities;
 using Mutter.Infrastructure.Services;
 
 internal static partial class RuntimeChecks
@@ -81,7 +83,7 @@ internal static partial class RuntimeChecks
         Require(group[0].Hash == other[0].Hash && Directory.GetFiles(env.StickerDirectory).Length == 1,
             "同一图片跨群去重，两群各自记录出现次数");
         Require(await library.ReadAsync("DISABLED", group[0].Hash, false, timeout.Token) is null
-            && (await library.CandidatesAsync("GROUP", timeout.Token)).Count == 0,
+            && (await library.ChoicesAsync("GROUP", proactive: false, timeout.Token)).Items.Count == 0,
             "群外无法取图，未标注图片不进入候选");
 
         var hash = group[0].Hash;
@@ -119,6 +121,68 @@ internal static partial class RuntimeChecks
             "删除一个群的条目保留另一群图片，释放最后一份引用后清理文件");
 
         await collector.StopAsync(timeout.Token);
+    }
+
+    private static async Task ProactiveStickersAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync();
+        using var scope = env.Services.CreateScope();
+        var configs = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        db.KnownGroups.Add(new KnownGroupEntity { GroupOpenId = "GROUP" });
+        await db.SaveChangesAsync();
+        var group = new GroupConfig
+        {
+            GroupId = "GROUP", IsEnabled = true, AiProactiveEnabled = true, UseStickersInReplies = true,
+            StickerReplyTendency = 0, StickerProactiveTendency = 2, StickerIntervalMinutes = 9
+        };
+        await configs.SaveGroupConfigAsync(group);
+        await configs.SaveProactiveConfigAsync(new ProactiveChatConfig
+        {
+            Enabled = true, AllowActiveChannel = true, QuietStartHour = 0, QuietEndHour = 0
+        });
+        var library = env.Services.GetRequiredService<IGroupStickerLibrary>();
+        var png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aI1sAAAAASUVORK5CYII=");
+        Require(await library.ImportAsync("GROUP", "庆祝", png, default) is null
+            && (await library.ListAsync("GROUP", default)).Single().SeenCount == 0,
+            "手动导入静态图片不会增加群里出现次数");
+        Require((await library.ChoicesAsync("GROUP", proactive: false, default)) is { Tendency: 0, Items.Count: 1 }
+            && (await library.ChoicesAsync("GROUP", proactive: true, default)).Items.Count == 0,
+            "仅 @ 回复时择机模型没有表情候选");
+        group.UseStickersInProactive = true;
+        await configs.SaveGroupConfigAsync(group);
+
+        var workflow = env.Services.GetRequiredService<ProactiveWorkflow>();
+        var now = env.Clock.GetUtcNow().UtcDateTime;
+        ProactiveWindow Window(string id) => new()
+        {
+            GroupId = "GROUP", LastMessageId = "", LastMessageUtcAt = now,
+            Messages = [new ObservedMessage("虚拟用户", "终于写完了", id, now)]
+        };
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("""{"line":"","sticker_id":1}"""));
+        await workflow.RunAsync(Window("no-text"), default);
+        Require(env.Api.RichMessages.Count == 0 && env.Api.PassiveCalls == 0 && env.StickerMaterials.Hashes.Count == 0,
+            "选中表情不触发单发表情");
+
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("""{"line":"辛苦，庆祝一下！","sticker_id":1}"""));
+        await workflow.RunAsync(Window("has-text"), default);
+        using var request = JsonDocument.Parse(env.Http.Requests.Last().Body);
+        var prompt = request.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!;
+        var sent = env.Api.RichMessages.Single();
+        var wire = SendMessageRequest.From(sent);
+        Require(env.Http.Requests.Count == 2 && prompt.Contains("更愿意用图") && prompt.Contains("sticker_id")
+            && sent.IsActive && wire.MsgType == 2 && wire.Markdown is { ForceVerifyImageResource: true } markdown
+            && markdown.Content.Contains("qqbot-media://image/v1/synthetic-sticker"),
+            "择机配图倾向随原请求传入，主动渠道可发图文，无额外模型调用");
+        Require((await library.ListAsync("GROUP", default)).Single().SentCount == 1,
+            "主动图文确认送达后增加图库发送次数");
+        env.Clock.Advance(TimeSpan.FromMinutes(6));
+        Require((await library.ChoicesAsync("GROUP", proactive: false, default)).Items.Count == 0
+            && (await library.ChoicesAsync("GROUP", proactive: true, default)).Items.Count == 0,
+            "同群最低间隔同时限制 @ 回复与择机发言");
+        env.Clock.Advance(TimeSpan.FromMinutes(3));
+        Require((await library.ChoicesAsync("GROUP", proactive: true, default)) is { Tendency: 2, Items.Count: 1 },
+            "同群最低间隔到期后恢复候选");
     }
 
     private static async Task QqStickerMaterialsAsync()

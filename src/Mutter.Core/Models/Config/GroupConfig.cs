@@ -14,6 +14,10 @@ public class GroupConfig
     public bool AiProactiveEnabled { get; set; }
     public bool AutoCollectStickers { get; set; }
     public bool UseStickersInReplies { get; set; }
+    public bool UseStickersInProactive { get; set; }
+    public int StickerReplyTendency { get; set; } = StickerSettings.DefaultReplyTendency;
+    public int StickerProactiveTendency { get; set; } = StickerSettings.DefaultProactiveTendency;
+    public int StickerIntervalMinutes { get; set; } = StickerSettings.DefaultIntervalMinutes;
 
     public ProactiveOverrides? ProactiveOverrides { get; set; }
 

@@ -1,3 +1,5 @@
+using Mutter.Core.Models.Config;
+
 namespace Mutter.Infrastructure.Entities;
 
 public class GroupConfigEntity
@@ -13,6 +15,10 @@ public class GroupConfigEntity
     public bool AiProactiveEnabled { get; set; }
     public bool AutoCollectStickers { get; set; }
     public bool UseStickersInReplies { get; set; }
+    public bool UseStickersInProactive { get; set; }
+    public int StickerReplyTendency { get; set; } = StickerSettings.DefaultReplyTendency;
+    public int StickerProactiveTendency { get; set; } = StickerSettings.DefaultProactiveTendency;
+    public int StickerIntervalMinutes { get; set; } = StickerSettings.DefaultIntervalMinutes;
 
     /// <summary>择机参数的稀疏覆盖；null/空对象均跟随全局。</summary>
     public string? ProactiveOverridesJson { get; set; }

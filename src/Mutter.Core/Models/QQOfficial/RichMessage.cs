@@ -148,6 +148,7 @@ public sealed record OutboundMessage
     public string? MarkdownText { get; init; }
 
     public bool ForceVerifyImageResource { get; init; }
+    public string? MarkdownWithoutImage { get; init; }
 
     /// <summary>按钮键盘。官方约束：只能挂在 markdown 消息上。</summary>
     public KeyboardSpec? Keyboard { get; init; }

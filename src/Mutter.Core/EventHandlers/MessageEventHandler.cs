@@ -584,10 +584,11 @@ public class MessageEventHandler
             var imageUrls = aiConfig.CapAttachedImages(parsed.ImageUrls);
             if (useMarkdown && _stickerReplies is not null)
             {
-                candidates = await _stickerReplies.CandidatesAsync(groupOpenId!, ct);
+                var choices = await _stickerReplies.ChoicesAsync(groupOpenId!, proactive: false, ct);
+                candidates = choices.Items;
                 if (candidates.Count > 0)
                 {
-                    var suffix = GroupStickerReplies.Prompt(candidates);
+                    var suffix = GroupStickerReplies.Prompt(choices);
                     var currentSize = systemPrompt.Length + 8 + context.Messages.Sum(message => message.Content.Length + 8)
                         + imageUrls.Count * AiRequestBudget.ImageTokens;
                     var budget = AiRequestBudget.InputBudget(aiConfig.MaxTokens,
@@ -630,19 +631,14 @@ public class MessageEventHandler
         deliveryDeadline.CancelAfter(TimeSpan.FromSeconds(30));
         DeliveryResult delivery;
         var stickerHash = GroupStickerReplies.TakeChoice(response, candidates);
-        var presentation = response.SearchMarkdown;
-        PreparedGroupSticker? preparedSticker = null;
         try
         {
-            if (stickerHash is not null && _stickerReplies is not null && _richUi.UseMarkdown(groupOpenId))
-                preparedSticker = await _stickerReplies.PrepareAsync(groupOpenId!, stickerHash, response.Content,
-                    _richUi.Options.MaxMarkdownChars, deliveryDeadline.Token);
             delivery = await _dispatcher.SendAsync(new OutgoingReply
             {
                 GroupId = groupOpenId, PeerUserId = userOpenId, BotId = _botId,
                 ReplyToMessageId = msgId, Content = response.Content, Model = response.Model,
                 PromptTokens = response.PromptTokens, CompletionTokens = response.CompletionTokens
-            }, allowActive: true, deliveryDeadline.Token, preparedSticker?.Message ?? presentation);
+            }, allowActive: true, deliveryDeadline.Token, response.SearchMarkdown, stickerHash);
         }
         catch (OperationCanceledException) when (!hostToken.IsCancellationRequested)
         {
@@ -654,8 +650,6 @@ public class MessageEventHandler
             _logger.LogWarning("AI reply not confirmed msg={Message} state={State}", msgId, delivery.State);
             return;
         }
-        if (stickerHash is not null && preparedSticker is not null && _stickerReplies is not null)
-            await _stickerReplies.CompleteAsync(groupOpenId!, stickerHash, preparedSticker, delivery);
         try
         {
             await _notificationService.NotifyAiResponseCompletedAsync(new
