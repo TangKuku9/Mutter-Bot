@@ -165,6 +165,31 @@ async function setupGroups(page, { width = 1366 } = {}) {
   await expect(page.getByText('东楼测试群', { exact: true })).toBeVisible()
 }
 
+test('群管理可查看 QQ Markdown 状态并保存选定群', async ({ page }) => {
+  await setupGroups(page, { width: 390 })
+  let saved
+  await page.route('**/api/groups/markdown-settings', route => {
+    if (route.request().method() === 'PUT') {
+      saved = route.request().postDataJSON()
+      return route.fulfill({ json: { ...saved, effectiveMode: 'selected', platformState: 'Denied', platformDeniedCode: 40034011 } })
+    }
+    return route.fulfill({ json: { mode: 'inherit', effectiveMode: 'off', groupIds: [], platformState: 'Unknown' } })
+  })
+  await page.getByRole('button', { name: 'QQ Markdown', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'QQ群 Markdown' })
+  await expect(dialog).toContainText('当前范围 关闭')
+  await dialog.locator('.el-select').filter({ has: page.getByRole('combobox', { name: 'Markdown 发送范围' }) }).click()
+  await page.getByRole('option', { name: '仅选定群', exact: true }).click()
+  const save = dialog.getByRole('button', { name: '保存设置' })
+  await expect(save).toBeDisabled()
+  await dialog.getByText('东楼测试群', { exact: true }).click()
+  await save.click()
+  await expect.poll(() => saved).toEqual({ mode: 'selected', groupIds: ['group-1'] })
+  await expect(dialog).toContainText('当前范围 1 个选定群')
+  await expect(dialog).toContainText('QQ 拒绝（40034011），当前使用纯文本')
+  await expect(save).toBeDisabled()
+})
+
 test('群表情设置与图库可在窄屏使用', async ({ page }) => {
   await setupGroups(page, { width: 390 })
   const photo = 'a'.repeat(64)

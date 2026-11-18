@@ -4,11 +4,13 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Mutter.Core;
 using Mutter.Core.Configuration;
 using Mutter.Core.EventHandlers;
@@ -24,6 +26,7 @@ using Mutter.Infrastructure.Ai;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Repositories;
 using Mutter.Infrastructure.Services;
+using Mutter.Web.Controllers;
 using Mutter.Web.Services;
 
 /// <summary>只使用合成标识符、临时 SQLite 和假 HTTP，不读取部署数据或访问外部服务。</summary>
@@ -49,6 +52,7 @@ internal static partial class RuntimeChecks
             ("最终请求预算与超长当前消息", BudgetAsync),
             ("投递未知、成功历史与用量去重", DeliveryAsync),
             ("AI 回复来源链接的 Markdown 排版与安全降级", AiReplyMarkdownAsync),
+            ("群聊 Markdown 面板范围、旧配置继承与重启持久化", GroupMarkdownSettingsAsync),
             ("群聊 @ 联网图文、严格转存和降级", MentionSearchImagesAsync),
             ("群聊 @ 内建搜索配图与公网来源边界", BuiltinSearchImagesAsync),
             ("群静态表情收藏、去重、隔离与单次模型选图", GroupStickersAsync),
@@ -633,6 +637,47 @@ internal static partial class RuntimeChecks
             "an uncertain Markdown receipt must never be replayed");
     }
 
+    private static async Task GroupMarkdownSettingsAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync(legacy: true);
+        var richUi = env.Services.GetRequiredService<RichUiCapability>();
+        var store = env.Services.GetRequiredService<GroupMarkdownSettingsStore>();
+        var settings = new GroupMarkdownController(store, richUi);
+        await store.StartAsync(default);
+        Require(richUi.UseMarkdown("GROUP") && !richUi.UseMarkdown("OTHER") && !richUi.UseMarkdown(null),
+            "首次运行沿用旧白名单，私聊不受群设置影响");
+        Require(await settings.Save(new("selected", []), default) is BadRequestObjectResult && richUi.UseMarkdown("GROUP"),
+            "空选定群提交被拒且原策略继续生效");
+        Require(await settings.Save(new("selected", ["OTHER"]), default) is OkObjectResult
+            && !richUi.UseMarkdown("GROUP") && richUi.UseMarkdown("OTHER") && !richUi.UseMarkdown(null),
+            "保存后当场切换群范围，面板选择优先于旧白名单");
+
+        var dispatcher = env.Services.GetRequiredService<ReplyDispatcher>();
+        var selected = Reply("OTHER");
+        selected.Content = "可查阅 [来源](https://example.org/selected)";
+        await dispatcher.SendAsync(selected, false);
+        var excluded = Reply("GROUP");
+        excluded.Content = "可查阅 [来源](https://example.org/excluded)";
+        await dispatcher.SendAsync(excluded, false);
+        Require(env.Api.PassiveRichCalls == 1 && env.Api.PassiveCalls == 1
+            && env.Api.RichMessages.Single().MarkdownText!.Contains("来源：[来源]"),
+            "仅选定群使用 QQ Markdown 排版发送来源链接");
+
+        var restored = new RichUiCapability(env.Services.GetRequiredService<IOptions<MutterOptions>>());
+        using var restoredStore = new GroupMarkdownSettingsStore(env.Services.GetRequiredService<IServiceScopeFactory>(), restored);
+        await restoredStore.StartAsync(default);
+        Require(!restored.UseMarkdown("GROUP") && restored.UseMarkdown("OTHER"), "重启恢复面板配置");
+        await settings.Save(new("all", null), default);
+        richUi.ReportDenied(RichUiCapability.CapMarkdown, 40034011);
+        Require(richUi.MarkdownConfigured("OTHER") && !richUi.UseMarkdown("OTHER"), "平台拒绝仍保留纯文本降级");
+        richUi.ResetForDiagnostics();
+        Require(richUi.UseMarkdown("GROUP") && richUi.UseMarkdown("OTHER"), "全部群允许发送 Markdown");
+        await settings.Save(new("off", null), default);
+        Require(!richUi.UseMarkdown("GROUP") && !richUi.UseMarkdown("OTHER"), "关闭后所有群都用纯文本");
+        await settings.Save(new("inherit", null), default);
+        Require(richUi.UseMarkdown("GROUP") && !richUi.UseMarkdown("OTHER"), "可恢复沿用部署配置");
+    }
+
     private static async Task MentionSearchImagesAsync()
     {
         await using var env = await TestEnvironment.CreateAsync();
@@ -1046,7 +1091,7 @@ internal static partial class RuntimeChecks
                 {
                     var script = db.Database.GenerateCreateScript();
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|AiUsageArchives|GroupMemoryItems|GroupMemoryLearningStates)\" \\([\\s\\S]*?\\);", "");
+                        "CREATE TABLE \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|AiUsageArchives|GroupMemoryItems|GroupMemoryLearningStates|GroupMarkdownSettings)\" \\([\\s\\S]*?\\);", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
                         "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|GroupMemoryItems|GroupMemoryLearningStates)\"[^;]*;", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,

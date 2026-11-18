@@ -44,7 +44,9 @@
           </el-form-item>
         </el-form>
         <p v-if="!settings.isEnabled && (settings.autoCollectStickers || sendMode !== 'off')" class="status-note">请先在群管理里启用本群，收藏与发送设置才会生效。</p>
-        <p v-else-if="sendMode !== 'off' && !settings.markdownAvailable" class="status-note">当前群的 QQ Markdown 不可用，表情发送暂不生效。</p>
+        <p v-else-if="sendMode !== 'off' && !settings.markdownAvailable" class="status-note">
+          当前群暂不能发送表情。<router-link :to="{ path: '/groups', query: { markdown: '1' } }">查看 QQ Markdown 设置</router-link>
+        </p>
         <p v-if="settings.useStickersInProactive" class="status-note">
           {{ settings.aiProactiveEnabled ? '择机发言仍遵守现有的发言条件和配额。' : '要在择机发言时配图，请先在群管理里启用本群参与择机发言。' }}
         </p>

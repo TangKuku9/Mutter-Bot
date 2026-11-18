@@ -20,6 +20,7 @@ public class AppDbContext : DbContext
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<GroupInfo> GroupInfos => Set<GroupInfo>();
     public DbSet<GroupConfigEntity> GroupConfigs => Set<GroupConfigEntity>();
+    public DbSet<GroupMarkdownSettingsEntity> GroupMarkdownSettings => Set<GroupMarkdownSettingsEntity>();
     public DbSet<StickerAssetEntity> StickerAssets => Set<StickerAssetEntity>();
     public DbSet<GroupStickerEntity> GroupStickers => Set<GroupStickerEntity>();
     public DbSet<QqStickerMaterialEntity> QqStickerMaterials => Set<QqStickerMaterialEntity>();
@@ -814,6 +815,13 @@ public class AppDbContext : DbContext
         }
 
         await EnsureGroupStickerSchemaAsync(ct);
+        await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "GroupMarkdownSettings" (
+                "Id" INTEGER NOT NULL PRIMARY KEY,
+                "Mode" INTEGER NOT NULL,
+                "GroupIdsJson" TEXT NOT NULL
+            );
+            """, ct);
         await EnsureChatTimelineIndexesAsync(ct);
         await BackfillFacePlaceholdersAsync(ct);
         await Repositories.AiConnectionStore.MigrateLegacyAsync(this, _logger, ct);

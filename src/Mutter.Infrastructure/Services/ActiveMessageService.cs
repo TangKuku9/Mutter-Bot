@@ -131,7 +131,11 @@ public class ActiveMessageService : IActiveMessageService
 
                 if (msg.ForceVerifyImageResource && string.IsNullOrEmpty(sentId))
                     return new ActiveMessageSendResult { Reason = "unknown", ImageMaterialRejected = materialRejected };
-                if (attempt.UseMarkdown) _richUi.CountMarkdownSent();
+                if (attempt.UseMarkdown)
+                {
+                    if (!string.IsNullOrEmpty(sentId)) _richUi.MarkOk(RichUiCapability.CapMarkdown);
+                    _richUi.CountMarkdownSent();
+                }
                 break;
             }
             catch (QqApiException ex) when (msg.ForceVerifyImageResource && QqApiErrorCodes.IsDeliveryUncertain(ex))

@@ -18,6 +18,8 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection AddInfrastructureServices(this IServiceCollection services)
     {
         services.AddDbContext<AppDbContext>();
+        services.AddSingleton<GroupMarkdownSettingsStore>();
+        services.AddHostedService(sp => sp.GetRequiredService<GroupMarkdownSettingsStore>());
         services.AddScoped<IMessageRepository, MessageRepository>();
         services.AddScoped<IConfigRepository, ConfigRepository>();
         services.AddScoped<IGroupMemoryRepository, GroupMemoryRepository>();

@@ -2,7 +2,7 @@
 
 ## 群内 @ 联网回复
 
-打开面板「AI 设置」中的联网搜索，并在配置文件启用 `Mutter:RichUi:Enabled` 和 `Markdown`。如设置了 `GroupAllowList`，将需要配图的群加入名单。
+打开面板「AI 设置」中的联网搜索，再到「群管理 → QQ Markdown」启用全部群或选择要启用的群。也可以从「AI 设置 → 联网与检索」直接打开这项设置。
 
 群内 @ Mutter 触发检索后，有结果时会按 QQ Markdown 输出答案和检索来源。独立搜索使用 SearXNG、Tavily、博查或自定义搜索时可附一张检索图。SearXNG 实例需要启用 JSON 以及图片分类的搜索引擎。
 
@@ -27,7 +27,7 @@
 - 链接只作为展示内容处理，Mutter 不会访问或抓取它，也不会因此额外调用模型。
 - 来源行使用 QQ 的 `msg_type=2` Markdown；平台没有 Markdown 权限或明确拒绝时，自动回退为原始纯文本。
 - 网络错误、超时、5xx 或“发送结果未知”不会触发重发，保持原有投递幂等语义。
-- 只有 `Mutter:RichUi:Enabled` 打开、对应群在白名单内且 `Markdown` 未关闭时才生效。默认配置保持关闭，避免升级后改变所有部署的消息类型。
+- 面板设置默认「沿用配置文件」，继续使用 `Mutter:RichUi:Enabled`、`Markdown` 和 `GroupAllowList`。从面板选定的范围保存后即时生效，也适用于群聊联网配图和表情包。
 
 ## 验证
 
