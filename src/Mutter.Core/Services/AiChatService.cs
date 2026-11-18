@@ -215,10 +215,10 @@ public class AiChatService : IAiChatService
         }
 
         var shape = strategy.Shape ?? string.Empty;
-        var capability = config.WebSearchImageCapable
-            ?? _capabilities.GetProbeImageCapability(config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId);
+        var capability = _capabilities.GetProbeImageCapability(config.ApiBaseUrl, config.ModelName, shape,
+            config.ProviderConnectionId, config.ProviderConnectionVersion) ?? config.WebSearchImageCapable;
         var runtimeUnsupported = _capabilities.IsRuntimeUnsupported(
-            config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId);
+            config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId, config.ProviderConnectionVersion);
         var knownUnsupported = capability == false || runtimeUnsupported;
 
         // 原生通道的 JSON 约束走 responseMimeType；检索工具与 JSON 模式无法同请求保证，
@@ -253,7 +253,8 @@ public class AiChatService : IAiChatService
             _logger.LogWarning(ex,
                 "图文联网单次请求被拒，标记该形状带图不可用 url={Url} model={Model} shape={Shape} connection={Connection}",
                 config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId);
-            _capabilities.MarkRuntimeUnsupported(config.ApiBaseUrl, config.ModelName, shape, config.ProviderConnectionId);
+            _capabilities.MarkRuntimeUnsupported(config.ApiBaseUrl, config.ModelName, shape,
+                config.ProviderConnectionId, config.ProviderConnectionVersion);
 
             if (config.WebSearchImageMode == AiConfig.WebSearchImageModeTwoStage)
                 return await SendTwoStageAsync(request, config, strategy, ct);

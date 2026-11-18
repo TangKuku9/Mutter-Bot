@@ -44,6 +44,7 @@ internal static partial class RuntimeChecks
             ("单次尝试预算与健康上报", AttemptBudgetAsync),
             ("模型协议、结构化用量与错误重试政策", ModelContractsAsync),
             ("多模态搜索、配置快照和取消", ModelMultimodalAsync),
+            ("联网检测请求数、协议、流式报告与图文证据", SearchProbeContractsAsync),
             ("最终请求预算与超长当前消息", BudgetAsync),
             ("投递未知、成功历史与用量去重", DeliveryAsync),
             ("AI 回复来源链接的 Markdown 排版与安全降级", AiReplyMarkdownAsync),

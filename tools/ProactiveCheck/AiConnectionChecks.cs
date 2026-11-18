@@ -117,9 +117,11 @@ internal static class AiConnectionChecks
             var edit = Copy(b);
             edit.ApiKey = "rotated-b-secret";
             edit.Headers = new() { ["X-Tenant"] = "tenant-secret" };
-            capabilities.RecordProbe(b.ApiBaseUrl, "Model/A", "shape", true, b.Id!);
+            var oldVersion = b.Revision;
+            capabilities.RecordProbe(b.ApiBaseUrl, "Model/A", "shape", true, b.Id!, oldVersion);
             b = Saved(await connections.Update(b.Id!, edit, default));
-            Require(capabilities.GetProbeImageCapability(b.ApiBaseUrl, "Model/A", "shape", b.Id!) is null, "editing connection clears its capability cache");
+            Require(capabilities.GetProbeImageCapability(b.ApiBaseUrl, "Model/A", "shape", b.Id!, oldVersion) is null,
+                "editing connection clears its capability cache");
             Require((await configApi.ApplyAiPreset(preset.Id)).Result is OkObjectResult, "referenced preset remains usable after rotation");
             runtime = (await new ConfigRepository(db).GetAiConfigAsync())!;
             Require(runtime.ApiKey == "rotated-b-secret" && runtime.Headers["X-Tenant"] == "tenant-secret", "presets use current connection credentials and headers");
@@ -325,15 +327,15 @@ internal static class AiConnectionChecks
             keepEntity.WebSearchShape = "enable_search";
             keepEntity.WebSearchVerifiedAt = DateTime.UtcNow;
             await db.SaveChangesAsync();
-            capabilities.RecordProbe(guard.ApiBaseUrl, "X", "enable_search", true, guard.Id!);
             var keepInput = Config(guard.Id!, "X");
             keepInput.WebSearchEndpoint = "openai";
             keepInput.WebSearchShape = "enable_search";
             keepInput.ProviderConnectionVersion = (await db.AiProviderConnections.FindAsync(guard.Id))!.Revision;
+            capabilities.RecordProbe(guard.ApiBaseUrl, "X", "enable_search", null, guard.Id!, keepInput.ProviderConnectionVersion);
             Require(await configApi.UpdateAiConfig(keepInput) is NoContentResult, "probe-selected strategy save is accepted");
             var keptEntity = await db.AiConfigs.AsNoTracking().FirstAsync();
-            Require(keptEntity.WebSearchShape == "enable_search" && keptEntity.WebSearchImageCapable is true,
-                "a freshly probed strategy must survive a simultaneous target change");
+            Require(keptEntity.WebSearchShape == "enable_search" && keptEntity.WebSearchImageCapable is null,
+                "verified text search survives a target change even when image capability is still unknown");
             Console.WriteLine("PASS  刚探测选用的搜索策略不会因切换目标被静默清空");
 
             // ===== 回归：解绑连接时清空主配置里的密钥副本 =====
