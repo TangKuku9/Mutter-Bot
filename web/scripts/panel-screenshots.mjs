@@ -210,7 +210,7 @@ async function captureAiSettings (browser) {
   const { context, page, errors } = await createPage(browser, false)
   await openRoute(page, '/ai-settings')
   await page.getByText('已读取配置', { exact: true }).waitFor()
-  await page.getByText('Faro 网关', { exact: true }).first().waitFor()
+  await page.getByText('API 网关', { exact: true }).first().waitFor()
   await page.evaluate(() => document.querySelector('.panel-main')?.scrollTo(0, 0))
   await shot(page, 'ai-settings-page')
   await shot(page, 'ai-settings-top', { selector: '.ai-primary-grid' })

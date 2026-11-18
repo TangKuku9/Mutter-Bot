@@ -65,15 +65,15 @@ const characters = [
 
 const connections = [
   {
-    id: 'conn-faro', name: 'Faro 网关', templateId: 'custom', protocol: 'openai',
-    apiBaseUrl: 'https://api.faro.example/v1', apiKey: 'sk-••••••••', hasApiKey: true, headers: {},
+    id: 'conn-api', name: 'API 网关', templateId: 'custom', protocol: 'openai',
+    apiBaseUrl: 'https://api.example.com/v1', apiKey: 'sk-••••••••', hasApiKey: true, headers: {},
     timeoutSeconds: 60, defaultModel: 'gpt-6.1-terra',
     models: [
       { id: 'gpt-6.1-terra', name: 'GPT-6.1 Terra' },
       { id: 'gpt-6.1', name: 'GPT-6.1' },
       { id: 'claude-sonnet-4.6', name: 'Claude Sonnet 4.6' }
     ],
-    isCurrent: true, presetCount: 2, updatedAt: '2026-11-17T09:12:00Z', revision: 'rev-faro-7'
+    isCurrent: true, presetCount: 2, updatedAt: '2026-11-17T09:12:00Z', revision: 'rev-api-7'
   },
   {
     id: 'conn-gemini', name: 'Gemini 官方', templateId: 'gemini', protocol: 'gemini',
@@ -124,9 +124,9 @@ const providerTemplates = [
 ]
 
 const aiConfig = {
-  providerConnectionId: 'conn-faro',
-  providerConnectionVersion: 'rev-faro-7',
-  apiBaseUrl: 'https://api.faro.example/v1',
+  providerConnectionId: 'conn-api',
+  providerConnectionVersion: 'rev-api-7',
+  apiBaseUrl: 'https://api.example.com/v1',
   apiKey: '',
   modelName: 'gpt-6.1-terra',
   personality: 'mutter',
@@ -158,8 +158,8 @@ const aiConfig = {
 
 const presets = [
   {
-    id: 'preset-daily', name: '群聊日常', description: 'Faro · GPT-6.1 Terra，适合大多数闲聊群',
-    providerConnectionId: 'conn-faro', modelName: 'gpt-6.1-terra', personality: 'mutter', personalityMissing: false,
+    id: 'preset-daily', name: '群聊日常', description: 'API 网关 · GPT-6.1 Terra，适合大多数闲聊群',
+    providerConnectionId: 'conn-api', modelName: 'gpt-6.1-terra', personality: 'mutter', personalityMissing: false,
     includeApiKey: false, isValid: true, externalSearchEnabled: false, updatedAt: '2026-11-16T07:20:00Z'
   },
   {
@@ -327,7 +327,7 @@ const memoryConfig = {
   intervalMinutes: 180,
   scheduleEnabled: true,
   schedules: [{ frequency: 'daily', time: '09:30', weekday: 1 }],
-  providerConnectionId: 'conn-faro',
+  providerConnectionId: 'conn-api',
   modelName: 'gpt-6.1-terra',
   maxOutputTokens: 4096
 }
