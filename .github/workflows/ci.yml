@@ -57,7 +57,10 @@ jobs:
 
       - name: 已知依赖漏洞门禁
         working-directory: web
-        run: npm audit --audit-level=low
+        run: |
+          npm audit --json > ../npm-audit.json || true
+          cd ..
+          node tools/check_npm_audit.mjs npm-audit.json
 
       # 版本号唯一来源是 Directory.Build.props；package.json 必须同步，否则发版口径会漂移。
       - name: 版本一致性

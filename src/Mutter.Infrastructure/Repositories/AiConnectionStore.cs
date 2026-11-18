@@ -112,6 +112,7 @@ public static class AiConnectionStore
     public static void Apply(AiConfig config, AiProviderConnectionEntity connection)
     {
         config.ProviderConnectionId = connection.Id;
+        config.ProviderConnectionVersion = connection.Revision;
         config.ProviderTemplateId = connection.TemplateId;
         config.ApiBaseUrl = connection.ApiBaseUrl;
         config.ApiKey = connection.ApiKey;

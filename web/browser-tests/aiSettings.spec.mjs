@@ -104,8 +104,16 @@ async function setup(page, { failLoad = false, initialTemperature = 0.7, emptyCo
       return route.fulfill({ json: { verdict: 'verified', detail: '测试成功', hits: [{ title: '合成检索结果', url: 'https://result.example.test' }] } })
     }
     if (path === '/api/config/ai/probe-websearch/stream') {
-      state.probes.push(body())
-      return route.fulfill({ contentType: 'application/x-ndjson', body: JSON.stringify({ type: 'done', report: { reachable: true, basePromptTokens: 12, results: [{ shape: 'enable_search', description: '示例策略', status: 'verified', imageStatus: state.probeImageStatus, note: '合成验证结果' }] } }) + '\n' })
+      const target = body()
+      state.probes.push(target)
+      const results = [
+        { shape: 'enable_search', description: '示例策略', status: 'verified', imageStatus: state.probeImageStatus, note: '合成验证结果' },
+        { shape: 'web_search_options', status: target.stopOnVerified ? 'not_tested' : 'no_evidence', imageStatus: 'not_tested' }
+      ]
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body: JSON.stringify({ type: 'done', report: { reachable: true, results } }) + '\n'
+      })
     }
     if (path === '/api/config/characters' && method === 'GET') return route.fulfill({ json: [] })
     if (path === '/api/status') return route.fulfill({ json: { isConnected: false } })
@@ -128,7 +136,7 @@ async function selectModel(page, id) {
 test('当前内建策略检测成功后立即同步文字与带图状态，不需要切换面板或保存', async ({ page }) => {
   const state = await setup(page, { webSearchShape: 'enable_search' })
   const card = page.locator('.ai-builtin-search')
-  await expect(card).toContainText('文字已验证 · 带图未测')
+  await expect(card).toContainText('文字已验证 · 带图未确认')
   state.probeImageStatus = 'verified'
   await page.getByRole('button', { name: '检测联网搜索', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '联网搜索探测报告' })
@@ -494,8 +502,12 @@ test('内建搜索探测保留实测报告和选用保存功能', async ({ page 
   await page.getByRole('button', { name: '检测联网搜索', exact: true }).click()
   const report = page.getByRole('dialog', { name: '联网搜索探测报告', exact: true })
   await expect(report.getByText('合成验证结果', { exact: true })).toBeVisible()
+  expect(state.probes[0].stopOnVerified).toBe(true)
+  await report.getByRole('button', { name: '完整检测', exact: true }).click()
+  await expect(report.getByRole('row').filter({ hasText: 'web_search_options' })).toContainText('证据不足')
+  expect(state.probes[1].stopOnVerified).toBe(false)
   expect(state.writes).toHaveLength(0)
-  await report.getByRole('button', { name: '选用', exact: true }).click()
+  await report.getByRole('row').filter({ hasText: 'enable_search' }).getByRole('button', { name: '选用', exact: true }).click()
   await expect(report.getByRole('button', { name: '已选用', exact: true })).toBeVisible()
   await expect.poll(() => state.writes.length).toBe(1)
   expect(state.writes[0].body).toMatchObject({ webSearchEnabled: true, webSearchShape: 'enable_search', webSearchEndpoint: 'openai' })
