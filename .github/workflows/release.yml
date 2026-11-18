@@ -46,7 +46,10 @@ jobs:
 
       - name: 已知依赖漏洞门禁
         working-directory: web
-        run: npm audit --audit-level=low
+        run: |
+          npm audit --json > ../npm-audit.json || true
+          cd ..
+          node tools/check_npm_audit.mjs npm-audit.json
 
       # tag push 不会触发 CI，发布流水线必须自己跑面板逻辑测试与浏览器回归，
       # 否则“tag 打得出去、面板坏了”只会在用户安装后才被发现。
