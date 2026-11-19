@@ -146,7 +146,7 @@ test('请求头状态跟随所在行：删行后明文状态与值不串行，pa
 })
 
 // —— 群列表 ——
-async function setupGroups(page, { width = 1366 } = {}) {
+async function setupGroups(page, { width = 1366, extraGroups = [] } = {}) {
   await page.setViewportSize({ width, height: 844 })
   await page.route('**/hub/**', route => route.fulfill({ status: 503, body: '' }))
   await page.route('**/api/**', async route => {
@@ -155,7 +155,7 @@ async function setupGroups(page, { width = 1366 } = {}) {
     if (path === '/api/groups') return route.fulfill({ json: [{
       groupOpenId: 'group-1', name: '东楼测试群', addedAt: '2026-11-01T09:30:00Z',
       config: { isEnabled: true, triggerMode: 0, aiProactiveEnabled: true, botMentionOpenId: 'abc123def456' }
-    }] })
+    }, ...extraGroups] })
     if (path === '/api/groups/quotas') return route.fulfill({ json: [] })
     if (path === '/api/config/characters') return route.fulfill({ json: [] })
     if (path === '/api/proactive/groups/group-1/memory') return route.fulfill({ json: { summary: '合成群记忆摘要。', updatedAt: '2026-11-12T10:00:00Z' } })
@@ -196,14 +196,20 @@ test('群表情设置与图库可在窄屏使用', async ({ page }) => {
   const root = '/api/groups/group-1/stickers'
   const sticker = { hash: photo, label: '', seenCount: 2, sentCount: 0, isEnabled: true }
   let settings = {
-    autoCollectStickers: false, useStickersInReplies: true, useStickersInProactive: false,
+    autoCollectStickers: false, autoNameStickers: false, useStickersInReplies: true, useStickersInProactive: false,
     stickerReplyTendency: 1, stickerProactiveTendency: 0, stickerIntervalMinutes: 3,
     isEnabled: true, aiProactiveEnabled: true, markdownAvailable: true
   }
-  let updated, saved
+  let updated, saved, uploadSize
   await page.route(`**${root}**`, async route => {
     const path = new URL(route.request().url()).pathname
-    if (path === root) return route.fulfill({ json: [sticker] })
+    if (path === root) {
+      if (route.request().method() === 'POST') {
+        uploadSize = route.request().postDataBuffer()?.length
+        return route.fulfill({ status: 204 })
+      }
+      return route.fulfill({ json: [sticker] })
+    }
     if (path.endsWith('/settings')) {
       if (route.request().method() === 'PUT') {
         saved = route.request().postDataJSON()
@@ -215,6 +221,8 @@ test('群表情设置与图库可在窄屏使用', async ({ page }) => {
       contentType: 'image/png',
       body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aI1sAAAAASUVORK5CYII=', 'base64')
     })
+    if (path.endsWith('/ai-name') && route.request().method() === 'POST')
+      return route.fulfill({ json: { label: '萌猫鼓掌' } })
     if (route.request().method() === 'PUT') {
       updated = route.request().postDataJSON()
       Object.assign(sticker, updated)
@@ -224,8 +232,9 @@ test('群表情设置与图库可在窄屏使用', async ({ page }) => {
   await page.getByRole('button', { name: '编辑', exact: true }).click()
   await page.getByRole('link', { name: '管理本群图库与发送策略' }).click()
   await expect(page).toHaveURL(/#\/stickers\?group=group-1$/)
-  await page.locator('.collection-row .el-switch').click()
+  await page.locator('.el-switch').filter({ has: page.getByRole('switch', { name: '自动收藏表情' }) }).click()
   await expect(page.getByRole('switch', { name: '自动收藏表情' })).toHaveAttribute('aria-checked', 'true')
+  await page.locator('.el-switch').filter({ has: page.getByRole('switch', { name: 'AI 自动取名' }) }).click()
   await page.locator('.el-select').filter({ has: page.getByRole('combobox', { name: '表情发送场景' }) }).click()
   await page.getByRole('option', { name: '@ 回复和择机发言', exact: true }).click()
   await page.locator('.el-select').filter({ has: page.getByRole('combobox', { name: '择机配图倾向' }) }).click()
@@ -233,12 +242,15 @@ test('群表情设置与图库可在窄屏使用', async ({ page }) => {
   await page.getByRole('spinbutton', { name: '同群最低发送间隔（分钟）' }).fill('9')
   await page.getByRole('button', { name: '保存设置', exact: true }).click()
   await expect.poll(() => saved).toEqual({
-    autoCollectStickers: true, useStickersInReplies: true, useStickersInProactive: true,
+    autoCollectStickers: true, autoNameStickers: true, useStickersInReplies: true, useStickersInProactive: true,
     stickerReplyTendency: 1, stickerProactiveTendency: 2, stickerIntervalMinutes: 9
   })
   await page.getByRole('button', { name: '查看表情：未命名表情' }).click()
   const editor = page.getByRole('dialog', { name: '表情详情' })
   await expect(editor.getByRole('img', { name: '表情预览' })).toBeVisible()
+  await editor.getByRole('button', { name: 'AI 取名' }).click()
+  await expect(editor.getByLabel('表情描述')).toHaveValue('萌猫鼓掌')
+  expect(updated).toBeUndefined()
   await editor.getByLabel('表情描述').fill('开心鼓掌')
   await editor.getByRole('button', { name: '保存表情', exact: true }).click()
   await expect.poll(() => updated).toEqual({ label: '开心鼓掌', isEnabled: true })
@@ -246,6 +258,74 @@ test('群表情设置与图库可在窄屏使用', async ({ page }) => {
   await expect(page.getByRole('button', { name: '查看表情：开心鼓掌' })).toBeVisible()
   await page.getByRole('textbox', { name: '搜索表情描述' }).fill('不存在的标签')
   await expect(page.getByRole('button', { name: '查看表情：开心鼓掌' })).toHaveCount(0)
+  await page.getByRole('button', { name: '添加图片' }).click()
+  const importer = page.getByRole('dialog', { name: '添加图片' })
+  await importer.locator('input[type=file]').setInputFiles({
+    name: 'synthetic-large.png', mimeType: 'image/png', buffer: Buffer.alloc(1200 * 1024)
+  })
+  await importer.getByRole('button', { name: '添加到本群' }).click()
+  await expect.poll(() => uploadSize).toBeGreaterThan(1024 * 1024)
+})
+
+test('群收藏可选择目标群、全选或单张复制，容量不足时保留选择', async ({ page }) => {
+  await setupGroups(page, { width: 320, extraGroups: [{ groupOpenId: 'group-2', name: '西楼测试群' }] })
+  const first = { hash: 'a'.repeat(64), label: '开心鼓掌', isEnabled: true, seenCount: 3, sentCount: 1 }
+  const second = { hash: 'b'.repeat(64), label: '猫咪点头', isEnabled: false, seenCount: 2, sentCount: 1 }
+  const submissions = []
+  let copied = []
+  await page.route(/\/api\/groups\/group-[12]\/stickers(?:\/.*)?$/, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/settings')) return route.fulfill({ json: {
+      autoCollectStickers: false, autoNameStickers: false, useStickersInReplies: false, useStickersInProactive: false,
+      stickerReplyTendency: 1, stickerProactiveTendency: 0, stickerIntervalMinutes: 3, isEnabled: true
+    } })
+    if (path.endsWith('/image')) return route.fulfill({ status: 204 })
+    if (path.endsWith('/copy')) {
+      expect(route.request().method()).toBe('POST')
+      expect(path).toBe('/api/groups/group-1/stickers/copy')
+      const request = route.request().postDataJSON()
+      submissions.push(request)
+      if (request.hashes.length > 1) return route.fulfill({ status: 409, json: { error: '目标群图库还可添加 1 张，请减少所选表情' } })
+      copied = [{ ...first, seenCount: 0, sentCount: 0 }]
+      return route.fulfill({ json: { copied: 1, alreadyInTarget: 0 } })
+    }
+    return route.fulfill({ json: path.includes('/group-1/') ? [first, second] : copied })
+  })
+
+  await page.goto('/#/stickers?group=group-1')
+  await page.getByRole('button', { name: '复制到其他群' }).click()
+  const dialog = page.getByRole('dialog', { name: '复制到其他群' })
+  const submit = dialog.getByRole('button', { name: '复制所选表情' })
+  await expect(submit).toBeDisabled()
+  await dialog.locator('.el-select').filter({ has: page.getByRole('combobox', { name: '目标群' }) }).click()
+  await expect(page.getByRole('option', { name: '东楼测试群' })).toHaveCount(0)
+  await page.getByRole('option', { name: '西楼测试群' }).click()
+  await dialog.getByText('全选', { exact: true }).click()
+  await expect(dialog.getByText('已选 2 / 2 张')).toBeVisible()
+  await submit.click()
+  await expect(page.getByText('目标群图库还可添加 1 张，请减少所选表情')).toBeVisible()
+  await expect(dialog.getByText('已选 2 / 2 张')).toBeVisible()
+  await expect(submit).toBeEnabled()
+  await dialog.getByText('猫咪点头', { exact: true }).click()
+  await submit.click()
+  await expect(dialog).toBeHidden()
+  expect(submissions).toEqual([
+    { targetGroupId: 'group-2', hashes: [first.hash, second.hash] },
+    { targetGroupId: 'group-2', hashes: [first.hash] }
+  ])
+  await expect(page.getByText('已复制 1 张表情到「西楼测试群」')).toBeVisible()
+  await expect(page.getByRole('button', { name: '查看表情：猫咪点头' })).toBeVisible()
+  await page.getByRole('textbox', { name: '搜索表情描述' }).fill('鼓掌')
+  await page.getByRole('button', { name: '复制到其他群' }).click()
+  await expect(dialog.getByText('全选筛选结果')).toBeVisible()
+  await expect(dialog.getByText('已选 0 / 1 张')).toBeVisible()
+  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  await page.locator('.el-select').filter({ has: page.getByRole('combobox', { name: '选择表情图库的群' }) }).click()
+  await page.getByRole('option', { name: '西楼测试群' }).click()
+  await expect(page).toHaveURL(/#\/stickers\?group=group-2$/)
+  await expect(page.getByRole('button', { name: '查看表情：开心鼓掌' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '查看表情：猫咪点头' })).toHaveCount(0)
 })
 
 test('群列表窄屏隐藏加入时间、保留身份列与固定操作列，@ 识别码帮助按钮同行', async ({ page }) => {

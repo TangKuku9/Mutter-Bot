@@ -56,6 +56,10 @@ internal static partial class RuntimeChecks
             ("群聊 @ 联网图文、严格转存和降级", MentionSearchImagesAsync),
             ("群聊 @ 内建搜索配图与公网来源边界", BuiltinSearchImagesAsync),
             ("群静态表情收藏、去重、隔离与单次模型选图", GroupStickersAsync),
+            ("同一表情重发的画面去重、旧图库与手动命名", StickerVisualDeduplicationAsync),
+            ("表情群间复制、重复保护、文件引用和容量事务", CopyGroupStickersAsync),
+            ("超限表情上传与收藏压缩、透明度和去重", OversizedGroupStickersAsync),
+            ("表情 AI 取名使用当前连接、保留管理员命名与入库结果", GroupStickerNamingAsync),
             ("择机表情配置、主动图文和同群最低间隔", ProactiveStickersAsync),
             ("QQ 表情素材三步上传、鉴权隔离与缓存更新", QqStickerMaterialsAsync),
             ("发送成功后记账失败及重启恢复配额", ReceiptFailureAsync),
@@ -1095,8 +1099,9 @@ internal static partial class RuntimeChecks
                     script = System.Text.RegularExpressions.Regex.Replace(script,
                         "CREATE INDEX [^;]*ON \"(?:OutgoingReplies|ActiveMessageAttempts|AiCallRecords|GroupMemoryItems|GroupMemoryLearningStates)\"[^;]*;", "");
                     script = System.Text.RegularExpressions.Regex.Replace(script,
-                        "^.*\"(?:ContextWindowTokens|MaxInputTokens|GroupMemoryInjectionEnabled|AiOperationId)\" [^\\r\\n]*\\r?\\n", "", System.Text.RegularExpressions.RegexOptions.Multiline);
+                        "^.*\"(?:ContextWindowTokens|MaxInputTokens|GroupMemoryInjectionEnabled|AiOperationId|AutoNameStickers)\" [^\\r\\n]*\\r?\\n", "", System.Text.RegularExpressions.RegexOptions.Multiline);
                     await db.Database.ExecuteSqlRawAsync(script);
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"StickerAssets\" DROP COLUMN \"VisualFingerprint\"");
                     await db.Database.ExecuteSqlRawAsync("""
                         INSERT INTO "ChatMessages" ("MessageId", "ChatType", "UserId", "UserName", "PlainText",
                             "RawSegmentsJson", "HasImage", "HasAtBot", "IsBotMessage", "IsProactive", "CreatedAt")

@@ -860,6 +860,7 @@ public class AppDbContext : DbContext
         foreach (var sql in new[]
         {
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"AutoCollectStickers\" INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"AutoNameStickers\" INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"UseStickersInReplies\" INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"UseStickersInProactive\" INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"StickerReplyTendency\" INTEGER NOT NULL DEFAULT 1",
@@ -875,7 +876,8 @@ public class AppDbContext : DbContext
         await Database.ExecuteSqlRawAsync("""
             CREATE TABLE IF NOT EXISTS "StickerAssets" (
                 "Hash" TEXT NOT NULL PRIMARY KEY, "ContentType" TEXT NOT NULL,
-                "Width" INTEGER NOT NULL, "Height" INTEGER NOT NULL, "Bytes" INTEGER NOT NULL
+                "Width" INTEGER NOT NULL, "Height" INTEGER NOT NULL, "Bytes" INTEGER NOT NULL,
+                "VisualFingerprint" BLOB NULL
             );
             CREATE TABLE IF NOT EXISTS "GroupStickers" (
                 "GroupId" TEXT NOT NULL, "Hash" TEXT NOT NULL, "Label" TEXT NOT NULL,
@@ -889,6 +891,10 @@ public class AppDbContext : DbContext
                 "Reference" TEXT NOT NULL, "ExpiresAt" TEXT NOT NULL, PRIMARY KEY ("AppId", "Hash")
             );
             """, ct);
+
+        try { await Database.ExecuteSqlRawAsync("ALTER TABLE \"StickerAssets\" ADD COLUMN \"VisualFingerprint\" BLOB NULL", ct); }
+        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 1
+            && ex.Message.Contains("duplicate column name", StringComparison.Ordinal)) { }
     }
 
     private async Task EnsureRuntimeSchemaAsync(CancellationToken ct)

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models;
+using Mutter.Core.Models.Config;
 using Mutter.Infrastructure.Repositories;
 
 namespace Mutter.Infrastructure.Services;
@@ -21,7 +22,7 @@ public sealed class GroupStickerCollector(
 
     public void TryEnqueue(string groupId, StickerAttachment attachment)
     {
-        if (attachment.AdvertisedSize > StaticStickerImage.MaxBytes || attachment.Url.Length > 4096) return;
+        if (attachment.AdvertisedSize > StickerSettings.MaxSourceBytes || attachment.Url.Length > 4096) return;
         var url = attachment.Url.StartsWith("//", StringComparison.Ordinal) ? "https:" + attachment.Url : attachment.Url;
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !IsPublicHttps(uri)) return;
         if (!_queue.Writer.TryWrite(new Work(groupId, uri, attachment.Label, clock.GetUtcNow())))
@@ -39,13 +40,12 @@ public sealed class GroupStickerCollector(
         {
             if (clock.GetUtcNow() - work.EnqueuedAt > TimeSpan.FromMinutes(1)) continue;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            deadline.CancelAfter(TimeSpan.FromSeconds(8));
+            deadline.CancelAfter(TimeSpan.FromSeconds(15));
             try
             {
                 if (!await library.CanCollectAsync(work.GroupId, deadline.Token)) continue;
                 var data = await DownloadAsync(client, work.Url, deadline.Token);
-                if (data is not null && StaticStickerImage.Read(data) is { } image)
-                    await library.CollectAsync(work.GroupId, work.Label, image, deadline.Token);
+                if (data is not null) await library.CollectAsync(work.GroupId, work.Label, data, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex)
@@ -69,7 +69,7 @@ public sealed class GroupStickerCollector(
                 continue;
             }
 
-            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > StaticStickerImage.MaxBytes)
+            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > StickerSettings.MaxSourceBytes)
                 return null;
             await using var stream = await response.Content.ReadAsStreamAsync(ct);
             using var data = new MemoryStream();
@@ -77,7 +77,7 @@ public sealed class GroupStickerCollector(
             int read;
             while ((read = await stream.ReadAsync(buffer, ct)) > 0)
             {
-                if (data.Length + read > StaticStickerImage.MaxBytes) return null;
+                if (data.Length + read > StickerSettings.MaxSourceBytes) return null;
                 data.Write(buffer, 0, read);
             }
             return data.ToArray();

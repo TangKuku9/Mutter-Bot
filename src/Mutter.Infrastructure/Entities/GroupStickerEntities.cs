@@ -7,6 +7,7 @@ public sealed class StickerAssetEntity
     public int Width { get; set; }
     public int Height { get; set; }
     public int Bytes { get; set; }
+    public byte[]? VisualFingerprint { get; set; }
 }
 
 public sealed class GroupStickerEntity

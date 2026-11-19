@@ -68,6 +68,12 @@ server {
         proxy_pass http://127.0.0.1:5188;
     }
 
+    # 表情上传允许 16 MiB 原图，额外空间用于 multipart 表单。
+    location ~* ^/api/groups/[^/]+/stickers/?$ {
+        client_max_body_size 17m;
+        proxy_pass http://127.0.0.1:5188;
+    }
+
     location /hub/ {
         limit_conn mutter_sockets 4;
         proxy_set_header Host $host;

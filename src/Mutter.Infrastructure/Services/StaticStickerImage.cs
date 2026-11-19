@@ -1,25 +1,128 @@
 using System.Buffers.Binary;
 using Mutter.Core.Interfaces;
+using Mutter.Core.Models.Config;
+using SkiaSharp;
 
 namespace Mutter.Infrastructure.Services;
 
 internal static class StaticStickerImage
 {
-    public const int MaxBytes = 3 * 1024 * 1024;
-    private const int MaxSide = 2048;
+    private const int MaxSourceSide = 8192;
+    private const int MaxSourcePixels = 25_000_000;
+    private static readonly SemaphoreSlim DecodeSlot = new(1);
 
-    public static StickerFile? Read(byte[] bytes)
+    internal sealed record Prepared(StickerFile File, byte[] Fingerprint);
+
+    public static async Task<Prepared?> PrepareAsync(byte[] bytes, CancellationToken ct)
     {
-        ReadOnlySpan<byte> data = bytes;
-        if (data.Length is < 12 or > MaxBytes) return null;
-        var (type, size) = data[0] == 137 && data[1..].StartsWith("PNG"u8)
-            ? ("image/png", ReadPng(data))
-            : data.StartsWith("RIFF"u8) && data[8..].StartsWith("WEBP"u8)
-                ? ("image/webp", ReadWebp(data))
-                : ("image/jpeg", ReadJpeg(data));
-        return size.Width is > 0 and <= MaxSide && size.Height is > 0 and <= MaxSide
-            ? new StickerFile(bytes, type, size.Width, size.Height) : null;
+        ct.ThrowIfCancellationRequested();
+        if (bytes.Length is < 12 or > StickerSettings.MaxSourceBytes) return null;
+        var (type, (width, height), lossy) = Inspect(bytes);
+        if (width is <= 0 or > MaxSourceSide || height is <= 0 or > MaxSourceSide
+            || width * height > MaxSourcePixels) return null;
+
+        await DecodeSlot.WaitAsync(ct);
+        try { return DecodeAndPrepare(new StickerFile(bytes, type, width, height), lossy, ct); }
+        finally { DecodeSlot.Release(); }
     }
+
+    private static (string Type, (int Width, int Height) Size, bool Lossy) Inspect(ReadOnlySpan<byte> data)
+    {
+        if (data[0] == 137 && data[1..].StartsWith("PNG"u8)) return ("image/png", ReadPng(data), false);
+        if (data.StartsWith("RIFF"u8) && data[8..].StartsWith("WEBP"u8))
+            return ("image/webp", ReadWebp(data, out var lossy), lossy);
+        return ("image/jpeg", ReadJpeg(data), true);
+    }
+
+    private static Prepared? DecodeAndPrepare(StickerFile original, bool lossy, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var (bytes, _, width, height) = original;
+        var fits = bytes.Length <= StickerSettings.MaxStoredBytes
+            && width <= StickerSettings.MaxStoredSide && height <= StickerSettings.MaxStoredSide;
+        // 合规大小的旧格式仍可使用文件摘要精确去重，即使解码器无法生成画面指纹。
+        var fallback = fits ? new Prepared(original, []) : null;
+        using var input = new MemoryStream(bytes, writable: false);
+        using var codec = SKCodec.Create(input);
+        if (codec is null || codec.Info.Width != width || codec.Info.Height != height || codec.FrameCount > 1)
+            return fallback;
+
+        using var colorSpace = SKColorSpace.CreateSrgb();
+        var alpha = codec.Info.AlphaType == SKAlphaType.Opaque ? SKAlphaType.Opaque : SKAlphaType.Premul;
+        var sourceInfo = new SKImageInfo(width, height, SKColorType.Rgba8888, alpha, colorSpace);
+        using var source = new SKBitmap();
+        if (!source.TryAllocPixels(sourceInfo) || codec.GetPixels(sourceInfo, source.GetPixels()) != SKCodecResult.Success)
+            return fallback;
+        source.SetImmutable();
+        using var image = SKImage.FromBitmap(source);
+
+        var origin = codec.EncodedOrigin;
+        var rotated = origin is SKEncodedOrigin.LeftTop or SKEncodedOrigin.RightTop
+            or SKEncodedOrigin.RightBottom or SKEncodedOrigin.LeftBottom;
+        var displayed = rotated ? new SKSizeI(height, width) : new SKSizeI(width, height);
+        var transform = Orientation(origin, width, height);
+        var sampleSide = StickerVisualFingerprint.SampleSide;
+        using var sample = Render(image, displayed, transform, sourceInfo.WithSize(sampleSide, sampleSide),
+            new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear));
+        var fingerprint = StickerVisualFingerprint.Create(source.GetPixelSpan(), sample.GetPixelSpan(),
+            displayed.Width, displayed.Height, (byte)origin, lossy);
+        ct.ThrowIfCancellationRequested();
+
+        var file = fits ? original : Compress(image, displayed, transform, sourceInfo, ct);
+        return file is null ? null : new Prepared(file, fingerprint);
+    }
+
+    private static StickerFile? Compress(SKImage image, SKSizeI displayed, SKMatrix transform, SKImageInfo imageInfo,
+        CancellationToken ct)
+    {
+        var longestSide = Math.Max(displayed.Width, displayed.Height);
+        var sampling = new SKSamplingOptions(SKCubicResampler.Mitchell);
+        for (var side = Math.Min(longestSide, StickerSettings.MaxStoredSide); ; side = side * 3 / 4)
+        {
+            ct.ThrowIfCancellationRequested();
+            var targetWidth = Math.Max(1, (int)Math.Round(displayed.Width * (double)side / longestSide));
+            var targetHeight = Math.Max(1, (int)Math.Round(displayed.Height * (double)side / longestSide));
+            using var output = Render(image, displayed, transform, imageInfo.WithSize(targetWidth, targetHeight), sampling);
+            using var encoded = output.Encode(SKEncodedImageFormat.Webp, 86);
+            ct.ThrowIfCancellationRequested();
+            if (encoded is null || encoded.Size == 0) return null;
+            if (encoded.Size <= StickerSettings.MaxStoredBytes)
+                return new StickerFile(encoded.ToArray(), "image/webp", targetWidth, targetHeight);
+            if (side <= 256) return null;
+        }
+    }
+
+    private static SKBitmap Render(SKImage image, SKSizeI displayed, SKMatrix transform, SKImageInfo outputInfo,
+        SKSamplingOptions sampling)
+    {
+        var output = new SKBitmap(outputInfo);
+        try
+        {
+            using var canvas = new SKCanvas(output);
+            canvas.Clear(SKColors.Transparent);
+            canvas.Scale((float)outputInfo.Width / displayed.Width, (float)outputInfo.Height / displayed.Height);
+            canvas.Concat(transform);
+            canvas.DrawImage(image, 0, 0, sampling);
+            return output;
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
+    }
+
+    private static SKMatrix Orientation(SKEncodedOrigin origin, int width, int height) => origin switch
+    {
+        SKEncodedOrigin.TopRight => new(-1, 0, width, 0, 1, 0, 0, 0, 1),
+        SKEncodedOrigin.BottomRight => new(-1, 0, width, 0, -1, height, 0, 0, 1),
+        SKEncodedOrigin.BottomLeft => new(1, 0, 0, 0, -1, height, 0, 0, 1),
+        SKEncodedOrigin.LeftTop => new(0, 1, 0, 1, 0, 0, 0, 0, 1),
+        SKEncodedOrigin.RightTop => new(0, -1, height, 1, 0, 0, 0, 0, 1),
+        SKEncodedOrigin.RightBottom => new(0, -1, height, -1, 0, width, 0, 0, 1),
+        SKEncodedOrigin.LeftBottom => new(0, 1, 0, -1, 0, width, 0, 0, 1),
+        _ => SKMatrix.Identity
+    };
 
     private static (int Width, int Height) ReadPng(ReadOnlySpan<byte> data)
     {
@@ -45,8 +148,9 @@ internal static class StaticStickerImage
         return default;
     }
 
-    private static (int Width, int Height) ReadWebp(ReadOnlySpan<byte> data)
+    private static (int Width, int Height) ReadWebp(ReadOnlySpan<byte> data, out bool lossy)
     {
+        lossy = false;
         if (BinaryPrimitives.ReadUInt32LittleEndian(data[4..]) != data.Length - 8) return default;
         (int Width, int Height) size = default;
         (int Width, int Height) canvas = default;
@@ -71,6 +175,7 @@ internal static class StaticStickerImage
                     || !payload.Slice(3, 3).SequenceEqual(new byte[] { 0x9d, 0x01, 0x2a })) return default;
                 size = (BinaryPrimitives.ReadUInt16LittleEndian(payload[6..]) & 0x3fff,
                     BinaryPrimitives.ReadUInt16LittleEndian(payload[8..]) & 0x3fff);
+                lossy = true;
             }
             else if (type.SequenceEqual("VP8L"u8))
             {

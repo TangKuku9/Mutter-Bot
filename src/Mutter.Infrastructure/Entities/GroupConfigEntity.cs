@@ -14,6 +14,7 @@ public class GroupConfigEntity
     /// <summary>本群是否参与 AI 择机发言（仍需全局开关同时打开）。</summary>
     public bool AiProactiveEnabled { get; set; }
     public bool AutoCollectStickers { get; set; }
+    public bool AutoNameStickers { get; set; }
     public bool UseStickersInReplies { get; set; }
     public bool UseStickersInProactive { get; set; }
     public int StickerReplyTendency { get; set; } = StickerSettings.DefaultReplyTendency;

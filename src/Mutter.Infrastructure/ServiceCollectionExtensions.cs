@@ -64,6 +64,8 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<GroupStickerLibrary>>(),
             Path.Combine(AppContext.BaseDirectory, "data", "media", "stickers")));
         services.AddSingleton<IGroupStickerLibrary>(sp => sp.GetRequiredService<GroupStickerLibrary>());
+        services.AddSingleton<GroupStickerNamingService>();
+        services.AddHostedService(sp => sp.GetRequiredService<GroupStickerNamingService>());
         services.AddSingleton<GroupStickerCollector>();
         services.AddSingleton<IGroupStickerCollector>(sp => sp.GetRequiredService<GroupStickerCollector>());
         services.AddHostedService(sp => sp.GetRequiredService<GroupStickerCollector>());

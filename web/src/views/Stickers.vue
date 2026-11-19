@@ -20,6 +20,10 @@
           <el-switch v-model="settings.autoCollectStickers" aria-label="自动收藏表情" :disabled="saving" />
           <div><b>自动收藏</b><p>只保存机器人收到的 QQ 静态表情包。</p></div>
         </div>
+        <div class="collection-row">
+          <el-switch v-model="settings.autoNameStickers" aria-label="AI 自动取名" :disabled="saving" />
+          <div><b>AI 自动取名</b><p>为新增的未命名表情取名。取名时会把图片发送给 <router-link to="/ai-settings">AI 设置</router-link> 中当前保存的模型。</p></div>
+        </div>
         <el-form label-position="top" :disabled="saving" class="policy-grid" @submit.prevent="saveSettings">
           <el-form-item label="发送场景">
             <el-select v-model="sendMode" aria-label="表情发送场景">
@@ -60,7 +64,10 @@
         <template #header>
           <div class="gallery-header">
             <div><b>本群收藏</b><span class="item-count">{{ rows.length }} / 200</span></div>
-            <el-button type="primary" plain @click="openImport">添加图片</el-button>
+            <div class="gallery-actions">
+              <el-button :disabled="loading || !filtered.length || !copyTargets.length" @click="openCopy">复制到其他群</el-button>
+              <el-button type="primary" plain @click="openImport">添加图片</el-button>
+            </div>
           </div>
         </template>
         <div v-if="rows.length" class="gallery-filters">
@@ -94,18 +101,22 @@
     </template>
 
     <el-dialog v-model="editorOpen" :title="draft?.hash ? '表情详情' : '添加图片'"
-      :width="narrow ? 'calc(100% - 24px)' : '480px'" :close-on-click-modal="!busy" @closed="draft = null">
+      :width="narrow ? 'calc(100% - 24px)' : '480px'" :close-on-click-modal="!editorBusy"
+      :close-on-press-escape="!editorBusy" :show-close="!editorBusy" @closed="draft = null">
       <div v-if="draft" class="edit-sticker">
         <div v-if="draft.hash || draft.preview" class="edit-preview">
           <img :src="draft.hash ? imageUrl(draft) : draft.preview" :alt="draft.label || '表情预览'" />
         </div>
         <label v-if="!draft.hash" class="file-field">
-          <span>选择静态图片（PNG、JPEG、WebP，最大 960 KB）</span>
-          <input type="file" accept="image/png,image/jpeg,image/webp" :disabled="busy" @change="selectFile" />
+          <span>静态 PNG、JPEG 或 WebP，最大 16 MiB。超过图库限制时会自动压缩。</span>
+          <input type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" :disabled="editorBusy" @change="selectFile" />
         </label>
-        <el-form label-position="top" :disabled="busy" @submit.prevent="saveSticker">
+        <el-form label-position="top" :disabled="editorBusy" @submit.prevent="saveSticker">
           <el-form-item label="表情描述">
-            <el-input v-model="draft.label" placeholder="例如：开心鼓掌" maxlength="60" aria-label="表情描述" />
+            <div class="description-field">
+              <el-input v-model="draft.label" placeholder="例如：开心鼓掌" maxlength="60" aria-label="表情描述" />
+              <el-button v-if="draft.hash" plain :loading="naming" @click="suggestName">AI 取名</el-button>
+            </div>
             <p>已标注且启用的表情才会进入模型候选。</p>
           </el-form-item>
           <el-form-item v-if="draft.hash" label="允许模型选用">
@@ -116,13 +127,42 @@
       <template #footer>
         <div class="editor-footer">
           <el-popconfirm v-if="draft?.hash" title="从本群图库移除这张表情？" width="240" @confirm="removeSticker">
-            <template #reference><el-button type="danger" link :disabled="busy">删除表情</el-button></template>
+            <template #reference><el-button type="danger" link :disabled="editorBusy">删除表情</el-button></template>
           </el-popconfirm>
-          <el-button class="editor-cancel" :disabled="busy" @click="editorOpen = false">关闭</el-button>
-          <el-button type="primary" :loading="busy" :disabled="!draft?.hash && !draft?.file" @click="saveSticker">
+          <el-button class="editor-cancel" :disabled="editorBusy" @click="editorOpen = false">关闭</el-button>
+          <el-button type="primary" :loading="busy" :disabled="naming || (!draft?.hash && !draft?.file)" @click="saveSticker">
             {{ draft?.hash ? '保存表情' : '添加到本群' }}
           </el-button>
         </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="copyOpen" title="复制到其他群" :width="narrow ? 'calc(100% - 24px)' : '540px'"
+      :close-on-click-modal="!copying" :close-on-press-escape="!copying" :show-close="!copying" destroy-on-close>
+      <el-form label-position="top" :disabled="copying" @submit.prevent="copySelected">
+        <el-form-item label="目标群">
+          <el-select v-model="copyTargetId" filterable placeholder="选择目标群" aria-label="目标群" class="copy-target">
+            <el-option v-for="group in copyTargets" :key="group.groupOpenId" :value="group.groupOpenId"
+              :label="group.name || group.groupOpenId" />
+          </el-select>
+        </el-form-item>
+        <div class="copy-toolbar">
+          <el-checkbox :model-value="allSelectedForCopy" :indeterminate="copyHashes.length > 0 && !allSelectedForCopy"
+            @change="selectAllForCopy">{{ filter !== 'all' || query.trim() ? '全选筛选结果' : '全选' }}</el-checkbox>
+          <span aria-live="polite">已选 {{ copyHashes.length }} / {{ copyRows.length }} 张</span>
+        </div>
+        <el-checkbox-group v-model="copyHashes" aria-label="要复制的表情" class="copy-list">
+          <el-checkbox v-for="row in copyRows" :key="row.hash" :value="row.hash" class="copy-choice">
+            <img :src="imageUrl(row)" alt="" loading="lazy" />
+            <span :title="row.label">{{ row.label || '未命名表情' }}</span>
+          </el-checkbox>
+        </el-checkbox-group>
+        <p class="status-note">复制表情名称和启用状态，目标群已收藏的同一图片会跳过。</p>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="copying" @click="copyOpen = false">取消</el-button>
+        <el-button type="primary" :loading="copying" :disabled="!copyTargetId || !copyHashes.length"
+          @click="copySelected">复制所选表情</el-button>
       </template>
     </el-dialog>
   </div>
@@ -135,6 +175,7 @@ import { ElMessage } from 'element-plus'
 import api from '../api'
 import { useUnsavedChanges } from '../useUnsavedChanges'
 import { useMediaQuery } from '../useMediaQuery'
+import { useVisiblePolling } from '../useVisiblePolling'
 
 const route = useRoute()
 const router = useRouter()
@@ -153,6 +194,16 @@ const saving = ref(false)
 const draft = ref(null)
 const editorOpen = ref(false)
 const busy = ref(false)
+const naming = ref(false)
+const editorBusy = computed(() => busy.value || naming.value)
+const copyOpen = ref(false)
+const copying = ref(false)
+const copyTargetId = ref('')
+const copyRows = ref([])
+const copyHashes = ref([])
+const copyTargets = computed(() => groups.value.filter(group => group.groupOpenId !== groupId.value))
+const allSelectedForCopy = computed(() => copyRows.value.length > 0 && copyHashes.value.length === copyRows.value.length)
+const maxUploadBytes = 16 * 1024 * 1024
 const endpoint = computed(() => `/groups/${encodeURIComponent(groupId.value)}/stickers`)
 const dirty = computed(() => settings.value !== null && JSON.stringify(settings.value) !== baseline.value)
 const confirmDiscard = useUnsavedChanges(dirty)
@@ -180,6 +231,7 @@ const filtered = computed(() => {
       : (b.lastSeenAt ?? '').localeCompare(a.lastSeenAt ?? ''))
 })
 let requestId = 0
+let rowsRequestId = 0
 
 async function load() {
   if (!groupId.value) return
@@ -235,10 +287,10 @@ async function saveSettings() {
   requestId++
   loading.value = false
   try {
-    const { autoCollectStickers, useStickersInReplies, useStickersInProactive, stickerReplyTendency,
+    const { autoCollectStickers, autoNameStickers, useStickersInReplies, useStickersInProactive, stickerReplyTendency,
       stickerProactiveTendency, stickerIntervalMinutes } = settings.value
     const { data } = await api.put(endpoint.value + '/settings', {
-      autoCollectStickers, useStickersInReplies, useStickersInProactive, stickerReplyTendency,
+      autoCollectStickers, autoNameStickers, useStickersInReplies, useStickersInProactive, stickerReplyTendency,
       stickerProactiveTendency, stickerIntervalMinutes
     })
     settings.value = data
@@ -250,7 +302,7 @@ async function saveSettings() {
 }
 
 function edit(row) {
-  draft.value = { ...row }
+  draft.value = { ...row, initialLabel: row.label }
   editorOpen.value = true
 }
 
@@ -259,14 +311,40 @@ function openImport() {
   editorOpen.value = true
 }
 
+function openCopy() {
+  copyRows.value = filtered.value
+  copyHashes.value = []
+  copyTargetId.value = ''
+  copyOpen.value = true
+}
+
+function selectAllForCopy(selected) {
+  copyHashes.value = selected ? copyRows.value.map(row => row.hash) : []
+}
+
+async function copySelected() {
+  const target = copyTargets.value.find(group => group.groupOpenId === copyTargetId.value)
+  if (!target || !copyHashes.value.length || copying.value) return
+  copying.value = true
+  try {
+    const { data } = await api.post(endpoint.value + '/copy', { targetGroupId: target.groupOpenId, hashes: copyHashes.value })
+    const name = target.name || target.groupOpenId
+    const skipped = data.alreadyInTarget ? `，跳过 ${data.alreadyInTarget} 张重复图片` : ''
+    ElMessage.success(data.copied ? `已复制 ${data.copied} 张表情到「${name}」${skipped}` : `「${name}」已收藏所选表情`)
+    copyOpen.value = false
+  } catch {
+    // API 显示错误，保留当前选择。
+  } finally { copying.value = false }
+}
+
 function selectFile(event) {
   const file = event.target.files?.[0]
   const target = draft.value
   target.file = null
   target.preview = ''
   if (!file) return
-  if (file.size > 960 * 1024 || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-    ElMessage.error('请选择不超过 960 KB 的 PNG、JPEG 或 WebP')
+  if (!file.size || file.size > maxUploadBytes || (file.type && !['image/png', 'image/jpeg', 'image/webp'].includes(file.type))) {
+    ElMessage.error('请选择不超过 16 MiB 的 PNG、JPEG 或 WebP')
     event.target.value = ''
     return
   }
@@ -278,20 +356,38 @@ function selectFile(event) {
   reader.readAsDataURL(file)
 }
 
-async function refreshRows() {
-  const id = groupId.value
-  const { data } = await api.get(endpoint.value)
-  if (id === groupId.value) rows.value = data
+async function refreshRows(config) {
+  const current = ++rowsRequestId
+  const groupRequest = requestId
+  const url = endpoint.value
+  const { data } = await api.get(url, config)
+  if (current === rowsRequestId && groupRequest === requestId && url === endpoint.value) rows.value = data
+}
+
+async function suggestName() {
+  const target = draft.value
+  if (!target?.hash || editorBusy.value) return
+  const url = endpoint.value
+  naming.value = true
+  try {
+    const { data } = await api.post(url + '/' + target.hash + '/ai-name', null, { timeout: 70000 })
+    if (draft.value === target && endpoint.value === url) target.label = data.label
+  } catch {
+    // API 显示错误，保留当前描述。
+  } finally { naming.value = false }
 }
 
 async function saveSticker() {
-  if (!draft.value || busy.value) return
-  const { hash, label, isEnabled, file } = draft.value
+  if (!draft.value || editorBusy.value) return
+  const { hash, label, initialLabel, isEnabled, file } = draft.value
   if (!hash && !file) return
   busy.value = true
   try {
-    if (hash) await api.put(endpoint.value + '/' + hash, { label, isEnabled })
-    else {
+    if (hash) {
+      const update = { label, isEnabled }
+      if (label === initialLabel) update.preserveLabel = true
+      await api.put(endpoint.value + '/' + hash, update)
+    } else {
       const body = new FormData()
       body.append('file', file)
       body.append('label', label)
@@ -305,11 +401,12 @@ async function saveSticker() {
 }
 
 async function removeSticker() {
-  if (!draft.value?.hash || busy.value) return
+  if (!draft.value?.hash || editorBusy.value) return
   busy.value = true
   const hash = draft.value.hash
   try {
     await api.delete(endpoint.value + '/' + hash)
+    rowsRequestId++
     rows.value = rows.value.filter(row => row.hash !== hash)
     editorOpen.value = false
   } catch {
@@ -318,6 +415,11 @@ async function removeSticker() {
 }
 
 onMounted(loadGroups)
+useVisiblePolling(signal => {
+  if (settings.value?.autoNameStickers && !dirty.value && !loading.value && !failed.value
+    && !editorOpen.value && !editorBusy.value && !copyOpen.value)
+    return refreshRows({ signal, skipErrorMessage: true })
+}, 8000)
 </script>
 
 <style scoped>
@@ -332,6 +434,9 @@ onMounted(loadGroups)
 .minutes { margin-left: 6px; }
 .status-note { margin: 8px 0; color: var(--el-text-color-secondary); font-size: 13px; }
 .gallery-header, .settings-footer { justify-content: space-between; }
+.gallery-header, .gallery-actions { flex-wrap: wrap; }
+.gallery-actions, .copy-toolbar { display: flex; align-items: center; gap: 8px; }
+.gallery-actions .el-button + .el-button { margin-left: 0; }
 .settings-footer { border-top: 1px solid var(--el-border-color-lighter); padding-top: 12px; margin-top: 12px; font-size: 13px; color: var(--el-text-color-secondary); }
 .item-count { margin-left: 8px; font-size: 12px; color: var(--el-text-color-secondary); }
 .gallery-filters { display: grid; grid-template-columns: minmax(0, 1fr) 132px 132px; gap: 10px; margin-bottom: 14px; }
@@ -346,7 +451,17 @@ onMounted(loadGroups)
 .edit-preview { display: grid; place-items: center; min-height: 160px; background: var(--el-fill-color-light); border-radius: 8px; margin-bottom: 16px; }
 .edit-preview img { max-width: 100%; max-height: 320px; object-fit: contain; }
 .file-field { display: grid; gap: 8px; font-size: 13px; margin-bottom: 12px; }
+.description-field { display: flex; width: 100%; gap: 8px; }
+.description-field .el-input { flex: 1; min-width: 0; }
 .editor-cancel { margin-left: auto; }
+.copy-target { width: 100%; }
+.copy-toolbar { justify-content: space-between; color: var(--el-text-color-secondary); font-size: 13px; }
+.copy-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 4px 12px;
+  max-height: min(42vh, 320px); overflow-y: auto; padding: 6px 10px; border: 1px solid var(--el-border-color); border-radius: 8px; }
+.copy-choice { min-width: 0; height: 44px; margin: 0; }
+.copy-choice :deep(.el-checkbox__label) { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.copy-choice img { width: 36px; height: 36px; flex: none; object-fit: contain; }
+.copy-choice span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 1050px) { .policy-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) {
   .policy-grid { grid-template-columns: minmax(0, 1fr); gap: 6px; }
