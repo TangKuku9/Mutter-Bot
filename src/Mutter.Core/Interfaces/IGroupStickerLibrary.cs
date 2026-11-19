@@ -9,7 +9,7 @@ public sealed record StickerFile(byte[] Bytes, string ContentType, int Width, in
 public enum StickerCopyStatus { Success, InvalidSelection, UnknownGroup, StickerUnavailable, TargetFull }
 public sealed record StickerCopyResult(StickerCopyStatus Status, int Copied = 0, int AlreadyInTarget = 0, int Available = 0);
 
-public sealed record StickerChoices(IReadOnlyList<GroupSticker> Items, int Tendency)
+public sealed record StickerChoices(IReadOnlyList<GroupSticker> Items, int Tendency, bool SearchOnline = false)
 {
     public static StickerChoices Empty { get; } = new([], 0);
 }
@@ -24,6 +24,7 @@ public interface IGroupStickerLibrary
     Task<IReadOnlyList<GroupSticker>> ListAsync(string groupId, CancellationToken ct);
     Task<StickerChoices> ChoicesAsync(string groupId, bool proactive, CancellationToken ct);
     Task<bool> CanSendAsync(string groupId, string hash, bool proactive, CancellationToken ct);
+    Task<bool> CanSendOnlineAsync(string groupId, bool proactive, CancellationToken ct);
     Task<string?> ImportAsync(string groupId, string? label, byte[] bytes, CancellationToken ct);
     Task<StickerCopyResult> CopyAsync(string sourceGroupId, string? targetGroupId, IReadOnlyList<string>? hashes,
         CancellationToken ct);
@@ -32,6 +33,12 @@ public interface IGroupStickerLibrary
         bool preserveLabel = false);
     Task<bool> DeleteAsync(string groupId, string hash, CancellationToken ct);
     Task RecordSentAsync(string groupId, string hash, CancellationToken ct);
+    Task RecordOnlineSentAsync(string groupId, CancellationToken ct);
+}
+
+public interface IOnlineStickerSearch
+{
+    Task<StickerFile?> FindAsync(string query, CancellationToken ct);
 }
 
 public interface IStickerMaterialService

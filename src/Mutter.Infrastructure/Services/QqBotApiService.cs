@@ -185,7 +185,7 @@ public class QqBotApiService : IQqBotApiService
         var uploadId = ticket.GetProperty("upload_id").GetString();
         if (string.IsNullOrEmpty(uploadId)
             || !Uri.TryCreate(ticket.GetProperty("presigned_url").GetString(), UriKind.Absolute, out var url)
-            || !GroupStickerCollector.IsPublicHttps(url))
+            || !StickerImageDownload.IsPublicHttps(url))
             throw new InvalidOperationException("QQ 素材上传凭证无效");
 
         // 对象存储请求使用预签名 URL，QQ 通用鉴权只用于 prepare 和 complete。

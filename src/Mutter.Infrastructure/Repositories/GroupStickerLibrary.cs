@@ -44,10 +44,11 @@ public sealed class GroupStickerLibrary(
         var now = clock.GetUtcNow().UtcDateTime;
         var policy = await ReadAvailablePolicyAsync(db, groupId, proactive, now, ct);
         if (policy is null) return StickerChoices.Empty;
-        var items = await Project(Eligible(db, groupId, now)
-            .OrderBy(row => row.SentCount).ThenByDescending(row => row.LastSeenAt).ThenBy(row => row.Hash))
+        var items = policy.StickerSource == StickerSettings.OnlineSource ? [] : await Project(Eligible(db, groupId, now)
+                .OrderBy(row => row.SentCount).ThenByDescending(row => row.LastSeenAt).ThenBy(row => row.Hash))
             .Take(8).ToListAsync(ct);
-        return new StickerChoices(items, proactive ? policy.StickerProactiveTendency : policy.StickerReplyTendency);
+        return new StickerChoices(items, proactive ? policy.StickerProactiveTendency : policy.StickerReplyTendency,
+            StickerSettings.AllowsOnline(policy.StickerSource));
     }
 
     internal async Task<bool> CanCollectAsync(string groupId, CancellationToken ct)
@@ -61,8 +62,16 @@ public sealed class GroupStickerLibrary(
         using var scope = scopes.CreateScope();
         var db = Db(scope);
         var now = clock.GetUtcNow().UtcDateTime;
-        return await ReadAvailablePolicyAsync(db, groupId, proactive, now, ct) is not null
+        return await ReadAvailablePolicyAsync(db, groupId, proactive, now, ct) is { } policy
+            && policy.StickerSource != StickerSettings.OnlineSource
             && await Eligible(db, groupId, now).AnyAsync(row => row.Hash == hash, ct);
+    }
+
+    public async Task<bool> CanSendOnlineAsync(string groupId, bool proactive, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        var policy = await ReadAvailablePolicyAsync(Db(scope), groupId, proactive, clock.GetUtcNow().UtcDateTime, ct);
+        return policy is not null && StickerSettings.AllowsOnline(policy.StickerSource);
     }
 
     public async Task<string?> ImportAsync(string groupId, string? label, byte[] bytes, CancellationToken ct)
@@ -310,6 +319,14 @@ public sealed class GroupStickerLibrary(
                 .SetProperty(row => row.LastSentAt, now), ct);
     }
 
+    public async Task RecordOnlineSentAsync(string groupId, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        var now = clock.GetUtcNow().UtcDateTime;
+        await Db(scope).GroupConfigs.Where(row => row.GroupId == groupId)
+            .ExecuteUpdateAsync(set => set.SetProperty(row => row.LastOnlineStickerSentAt, now), ct);
+    }
+
     internal async Task ReconcileFilesAsync(CancellationToken ct)
     {
         if (!Directory.Exists(directory)) return;
@@ -366,6 +383,7 @@ public sealed class GroupStickerLibrary(
         var interval = StickerSettings.NormalizeInterval(policy.StickerIntervalMinutes);
         if (interval == 0) return policy;
         var since = now.AddMinutes(-interval);
+        if (policy.LastOnlineStickerSentAt > since) return null;
         return await db.GroupStickers.AnyAsync(row => row.GroupId == groupId && row.LastSentAt > since, ct)
             ? null : policy;
     }

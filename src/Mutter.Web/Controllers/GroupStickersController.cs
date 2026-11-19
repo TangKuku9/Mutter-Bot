@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Mutter.Core.Interfaces;
 using Mutter.Core.Models.Config;
 using Mutter.Core.Services;
+using Mutter.Core.Services.WebSearch;
 using Mutter.Infrastructure.Data;
 using Mutter.Infrastructure.Entities;
 using Mutter.Infrastructure.Services;
@@ -13,20 +14,21 @@ namespace Mutter.Web.Controllers;
 [ApiController]
 [Route("api/groups/{groupId}/stickers")]
 public sealed class GroupStickersController(IGroupStickerLibrary library, AppDbContext db, RichUiCapability richUi,
-    GroupStickerNamingService naming)
+    GroupStickerNamingService naming, IConfigRepository configs)
     : ControllerBase
 {
     private const int MaxUploadRequestBytes = StickerSettings.MaxSourceBytes + 1024 * 1024;
 
     public sealed record SettingsRequest(bool AutoCollectStickers, bool UseStickersInReplies, bool UseStickersInProactive,
-        int StickerReplyTendency, int StickerProactiveTendency, int StickerIntervalMinutes, bool? AutoNameStickers = null);
+        int StickerReplyTendency, int StickerProactiveTendency, int StickerIntervalMinutes, bool? AutoNameStickers = null,
+        string? StickerSource = null);
 
     [HttpGet("settings")]
     public async Task<IActionResult> Settings(string groupId, CancellationToken ct)
     {
         if (!await IsKnownAsync(groupId, ct)) return NotFound();
         var group = await db.GroupConfigs.AsNoTracking().SingleOrDefaultAsync(row => row.GroupId == groupId, ct);
-        return Ok(SettingsDto(groupId, group ?? new GroupConfigEntity()));
+        return Ok(await SettingsDtoAsync(groupId, group ?? new GroupConfigEntity(), ct));
     }
 
     [HttpPut("settings")]
@@ -43,11 +45,12 @@ public sealed class GroupStickersController(IGroupStickerLibrary library, AppDbC
         if (request.AutoNameStickers is { } autoName) group.AutoNameStickers = autoName;
         group.UseStickersInReplies = request.UseStickersInReplies;
         group.UseStickersInProactive = request.UseStickersInProactive;
+        if (request.StickerSource is { } source) group.StickerSource = StickerSettings.NormalizeSource(source);
         group.StickerReplyTendency = StickerSettings.NormalizeTendency(request.StickerReplyTendency);
         group.StickerProactiveTendency = StickerSettings.NormalizeTendency(request.StickerProactiveTendency);
         group.StickerIntervalMinutes = StickerSettings.NormalizeInterval(request.StickerIntervalMinutes);
         await db.SaveChangesAsync(ct);
-        return Ok(SettingsDto(groupId, group));
+        return Ok(await SettingsDtoAsync(groupId, group, ct));
     }
 
     [HttpGet]
@@ -126,10 +129,12 @@ public sealed class GroupStickersController(IGroupStickerLibrary library, AppDbC
     private Task<bool> IsKnownAsync(string groupId, CancellationToken ct) =>
         db.KnownGroups.AnyAsync(row => row.GroupOpenId == groupId, ct);
 
-    private object SettingsDto(string groupId, GroupConfigEntity group) => new
+    private async Task<object> SettingsDtoAsync(string groupId, GroupConfigEntity group, CancellationToken ct) => new
     {
         group.AutoCollectStickers, group.AutoNameStickers, group.UseStickersInReplies, group.UseStickersInProactive,
         group.StickerReplyTendency, group.StickerProactiveTendency, group.StickerIntervalMinutes,
+        StickerSource = StickerSettings.NormalizeSource(group.StickerSource),
+        OnlineSearchAvailable = ExternalSearchService.CanSearchImages(await configs.GetAiConfigAsync(ct)),
         group.IsEnabled, group.AiProactiveEnabled, MarkdownAvailable = richUi.UseMarkdown(groupId)
     };
 }

@@ -863,6 +863,8 @@ public class AppDbContext : DbContext
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"AutoNameStickers\" INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"UseStickersInReplies\" INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"UseStickersInProactive\" INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"StickerSource\" TEXT NOT NULL DEFAULT 'library'",
+            "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"LastOnlineStickerSentAt\" TEXT NULL",
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"StickerReplyTendency\" INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"StickerProactiveTendency\" INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE \"GroupConfigs\" ADD COLUMN \"StickerIntervalMinutes\" INTEGER NOT NULL DEFAULT 3"

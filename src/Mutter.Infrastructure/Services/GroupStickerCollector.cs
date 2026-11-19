@@ -24,7 +24,7 @@ public sealed class GroupStickerCollector(
     {
         if (attachment.AdvertisedSize > StickerSettings.MaxSourceBytes || attachment.Url.Length > 4096) return;
         var url = attachment.Url.StartsWith("//", StringComparison.Ordinal) ? "https:" + attachment.Url : attachment.Url;
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !IsPublicHttps(uri)) return;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !StickerImageDownload.IsPublicHttps(uri)) return;
         if (!_queue.Writer.TryWrite(new Work(groupId, uri, attachment.Label, clock.GetUtcNow())))
             logger.LogDebug("表情收藏队列已满，跳过本次附件");
     }
@@ -44,7 +44,7 @@ public sealed class GroupStickerCollector(
             try
             {
                 if (!await library.CanCollectAsync(work.GroupId, deadline.Token)) continue;
-                var data = await DownloadAsync(client, work.Url, deadline.Token);
+                var data = await StickerImageDownload.ReadAsync(client, work.Url, deadline.Token);
                 if (data is not null) await library.CollectAsync(work.GroupId, work.Label, data, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
@@ -56,8 +56,13 @@ public sealed class GroupStickerCollector(
         }
     }
 
-    private static async Task<byte[]?> DownloadAsync(HttpClient client, Uri url, CancellationToken ct)
+}
+
+internal static class StickerImageDownload
+{
+    public static async Task<byte[]?> ReadAsync(HttpClient client, Uri url, CancellationToken ct)
     {
+        if (!IsPublicHttps(url)) return null;
         for (var redirects = 0; ; redirects++)
         {
             using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
@@ -84,6 +89,6 @@ public sealed class GroupStickerCollector(
         }
     }
 
-    internal static bool IsPublicHttps(Uri uri) => uri.Scheme == Uri.UriSchemeHttps && uri.IsDefaultPort
+    public static bool IsPublicHttps(Uri uri) => uri.Scheme == Uri.UriSchemeHttps && uri.IsDefaultPort
         && uri.UserInfo.Length == 0 && uri.HostNameType == UriHostNameType.Dns && uri.IdnHost.Contains('.') && !uri.IsLoopback;
 }

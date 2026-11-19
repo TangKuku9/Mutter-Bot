@@ -25,6 +25,17 @@
           <div><b>AI 自动取名</b><p>为新增的未命名表情取名。取名时会把图片发送给 <router-link to="/ai-settings">AI 设置</router-link> 中当前保存的模型。</p></div>
         </div>
         <el-form label-position="top" :disabled="saving" class="policy-grid" @submit.prevent="saveSettings">
+          <el-form-item label="表情来源" class="sticker-source">
+            <el-select v-model="settings.stickerSource" aria-label="表情来源">
+              <el-option label="仅图库" value="library" />
+              <el-option label="仅网络" value="online" />
+              <el-option label="图库优先，网络补充" value="library_online" />
+            </el-select>
+            <p v-if="settings.stickerSource && settings.stickerSource !== 'library'">
+              <template v-if="settings.onlineSearchAvailable">按对话临时搜图，随回复或择机发言发送。</template>
+              <template v-else>请在 <router-link to="/ai-settings">AI 设置</router-link> 中启用支持图片结果的独立搜索服务，如 SearXNG、Tavily 或博查。</template>
+            </p>
+          </el-form-item>
           <el-form-item label="发送场景">
             <el-select v-model="sendMode" aria-label="表情发送场景">
               <el-option v-for="mode in sendModes" :key="mode.value" :label="mode.label" :value="mode.value" />
@@ -44,7 +55,7 @@
             <el-input-number v-model="settings.stickerIntervalMinutes" :min="0" :max="60" :step="1"
               step-strictly aria-label="同群最低发送间隔（分钟）" />
             <span class="minutes">分钟</span>
-            <p>0 表示不限。相同表情仍间隔至少 5 分钟。</p>
+            <p>0 表示不限。相同图库表情仍间隔至少 5 分钟。</p>
           </el-form-item>
         </el-form>
         <p v-if="!settings.isEnabled && (settings.autoCollectStickers || sendMode !== 'off')" class="status-note">请先在群管理里启用本群，收藏与发送设置才会生效。</p>
@@ -287,10 +298,10 @@ async function saveSettings() {
   requestId++
   loading.value = false
   try {
-    const { autoCollectStickers, autoNameStickers, useStickersInReplies, useStickersInProactive, stickerReplyTendency,
+    const { autoCollectStickers, autoNameStickers, useStickersInReplies, useStickersInProactive, stickerSource, stickerReplyTendency,
       stickerProactiveTendency, stickerIntervalMinutes } = settings.value
     const { data } = await api.put(endpoint.value + '/settings', {
-      autoCollectStickers, autoNameStickers, useStickersInReplies, useStickersInProactive, stickerReplyTendency,
+      autoCollectStickers, autoNameStickers, useStickersInReplies, useStickersInProactive, stickerSource, stickerReplyTendency,
       stickerProactiveTendency, stickerIntervalMinutes
     })
     settings.value = data
@@ -431,6 +442,9 @@ useVisiblePolling(signal => {
 .policy-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .policy-grid .el-select { width: 100%; }
 .policy-grid :deep(.el-form-item) { margin-bottom: 6px; }
+.sticker-source { grid-column: 1 / -1; }
+.sticker-source .el-select { width: min(100%, 280px); }
+.sticker-source p { flex-basis: 100%; }
 .minutes { margin-left: 6px; }
 .status-note { margin: 8px 0; color: var(--el-text-color-secondary); font-size: 13px; }
 .gallery-header, .settings-footer { justify-content: space-between; }

@@ -17,6 +17,9 @@ public class ProactiveVerdict
     [JsonPropertyName("sticker_id")]
     public JsonElement? StickerId { get; set; }
 
+    [JsonPropertyName("sticker_query")]
+    public JsonElement? StickerQuery { get; set; }
+
     /// <summary>接的是哪个话题，仅用于面板留痕。</summary>
     [JsonPropertyName("topic")]
     public string? Topic { get; set; }

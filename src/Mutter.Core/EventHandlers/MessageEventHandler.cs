@@ -563,7 +563,8 @@ public class MessageEventHandler
         RuntimeActivity.Current?.Mark("context");
         ct = operation.Token;
         AiChatResponse response;
-        IReadOnlyList<GroupSticker> candidates = [];
+        var stickerChoices = StickerChoices.Empty;
+        GroupStickerSelection? requestedSticker = null;
         var useMarkdown = groupOpenId is not null && _richUi.UseMarkdown(groupOpenId);
         try
         {
@@ -584,23 +585,24 @@ public class MessageEventHandler
             var imageUrls = aiConfig.CapAttachedImages(parsed.ImageUrls);
             if (useMarkdown && _stickerReplies is not null)
             {
-                var choices = await _stickerReplies.ChoicesAsync(groupOpenId!, proactive: false, ct);
-                candidates = choices.Items;
-                if (candidates.Count > 0)
+                var choices = await _stickerReplies.ChoicesAsync(groupOpenId!, proactive: false, aiConfig, ct);
+                requestedSticker = GroupStickerReplies.RequestedOnlineSticker(parsed.PlainText, choices);
+                var suffix = GroupStickerReplies.Prompt(choices);
+                if (suffix.Length > 0)
                 {
-                    var suffix = GroupStickerReplies.Prompt(choices);
                     var currentSize = systemPrompt.Length + 8 + context.Messages.Sum(message => message.Content.Length + 8)
                         + imageUrls.Count * AiRequestBudget.ImageTokens;
                     var budget = AiRequestBudget.InputBudget(aiConfig.MaxTokens,
                         aiConfig.ContextWindowTokens, aiConfig.MaxInputTokens);
                     if (currentSize + suffix.Length <= budget)
+                    {
                         systemPrompt += suffix;
-                    else
-                        candidates = [];
+                        stickerChoices = choices;
+                    }
                 }
             }
             response = await _aiService.ChatReplyAsync(systemPrompt, context.Messages,
-                imageUrls, aiConfig, useMarkdown, ct);
+                imageUrls, requestedSticker is null ? aiConfig : aiConfig with { WebSearchEnabled = false }, useMarkdown, ct);
         }
         catch (OperationCanceledException)
         {
@@ -630,7 +632,8 @@ public class MessageEventHandler
         using var deliveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
         deliveryDeadline.CancelAfter(TimeSpan.FromSeconds(30));
         DeliveryResult delivery;
-        var stickerHash = GroupStickerReplies.TakeChoice(response, candidates);
+        var sticker = GroupStickerReplies.TakeChoice(response, stickerChoices) ?? requestedSticker;
+        if (requestedSticker is not null && string.IsNullOrWhiteSpace(response.Content)) response.Content = "我找找看。";
         try
         {
             delivery = await _dispatcher.SendAsync(new OutgoingReply
@@ -638,7 +641,7 @@ public class MessageEventHandler
                 GroupId = groupOpenId, PeerUserId = userOpenId, BotId = _botId,
                 ReplyToMessageId = msgId, Content = response.Content, Model = response.Model,
                 PromptTokens = response.PromptTokens, CompletionTokens = response.CompletionTokens
-            }, allowActive: true, deliveryDeadline.Token, response.SearchMarkdown, stickerHash);
+            }, allowActive: true, deliveryDeadline.Token, response.SearchMarkdown, sticker);
         }
         catch (OperationCanceledException) when (!hostToken.IsCancellationRequested)
         {

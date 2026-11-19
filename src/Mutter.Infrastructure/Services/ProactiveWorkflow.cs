@@ -166,7 +166,7 @@ public sealed class ProactiveWorkflow
         var stickerChoices = StickerChoices.Empty;
         if (_stickerReplies is not null && _richUi?.UseMarkdown(window.GroupId) == true)
         {
-            stickerChoices = await _stickerReplies.ChoicesAsync(window.GroupId, proactive: true, aiToken);
+            stickerChoices = await _stickerReplies.ChoicesAsync(window.GroupId, proactive: true, context.EffectiveConfig, aiToken);
             var suffix = GroupStickerReplies.Prompt(stickerChoices, proactive: true);
             var inputSize = judgePrompt.Length + userPrompt.Length + images.Count * AiRequestBudget.ImageTokens + 144;
             if (inputSize + suffix.Length <= AiRequestBudget.InputBudget(
@@ -272,10 +272,11 @@ public sealed class ProactiveWorkflow
         // 判定/改写成功后，投递不能再受模型 120 秒期限约束；给平台发送独立的 30 秒窗口。
         using var deliveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deliveryDeadline.CancelAfter(TimeSpan.FromSeconds(30));
-        var stickerHash = !searchUsed && data.StickerId is { ValueKind: JsonValueKind.Number } choice
-            && choice.TryGetInt32(out var stickerId) && stickerId >= 1 && stickerId <= stickerChoices.Items.Count
-            ? stickerChoices.Items[stickerId - 1].Hash : null;
-        var result = await _speaker.SpeakAsync(window, line, config, deliveryDeadline.Token, usage, stickerHash);
+        var localId = data.StickerId is { ValueKind: JsonValueKind.Number } choice && choice.TryGetInt32(out var stickerId)
+            ? (int?)stickerId : null;
+        var onlineQuery = data.StickerQuery is { ValueKind: JsonValueKind.String } query ? query.GetString() : null;
+        var sticker = searchUsed ? null : GroupStickerReplies.Select(stickerChoices, localId, onlineQuery);
+        var result = await _speaker.SpeakAsync(window, line, config, deliveryDeadline.Token, usage, sticker);
         if (result.Outcome is ProactiveOutcomes.SentPassive or ProactiveOutcomes.SentActive)
             _observe.MarkSent(window.GroupId, _clock.GetUtcNow().UtcDateTime);
         var logDetail = string.IsNullOrWhiteSpace(searchDetail)

@@ -60,6 +60,7 @@ internal static partial class RuntimeChecks
             ("表情群间复制、重复保护、文件引用和容量事务", CopyGroupStickersAsync),
             ("超限表情上传与收藏压缩、透明度和去重", OversizedGroupStickersAsync),
             ("表情 AI 取名使用当前连接、保留管理员命名与入库结果", GroupStickerNamingAsync),
+            ("空图库在线表情、共享发送间隔与搜索失败降级", OnlineStickersAsync),
             ("择机表情配置、主动图文和同群最低间隔", ProactiveStickersAsync),
             ("QQ 表情素材三步上传、鉴权隔离与缓存更新", QqStickerMaterialsAsync),
             ("发送成功后记账失败及重启恢复配额", ReceiptFailureAsync),
@@ -1102,6 +1103,8 @@ internal static partial class RuntimeChecks
                         "^.*\"(?:ContextWindowTokens|MaxInputTokens|GroupMemoryInjectionEnabled|AiOperationId|AutoNameStickers)\" [^\\r\\n]*\\r?\\n", "", System.Text.RegularExpressions.RegexOptions.Multiline);
                     await db.Database.ExecuteSqlRawAsync(script);
                     await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"StickerAssets\" DROP COLUMN \"VisualFingerprint\"");
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"GroupConfigs\" DROP COLUMN \"StickerSource\"");
+                    await db.Database.ExecuteSqlRawAsync("ALTER TABLE \"GroupConfigs\" DROP COLUMN \"LastOnlineStickerSentAt\"");
                     await db.Database.ExecuteSqlRawAsync("""
                         INSERT INTO "ChatMessages" ("MessageId", "ChatType", "UserId", "UserName", "PlainText",
                             "RawSegmentsJson", "HasImage", "HasAtBot", "IsBotMessage", "IsProactive", "CreatedAt")

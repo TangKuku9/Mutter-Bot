@@ -21,7 +21,7 @@ public sealed class ReplyDispatcher(
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recent = new();
 
     public async Task<DeliveryResult> SendAsync(OutgoingReply reply, bool allowActive, CancellationToken ct = default,
-        SearchReplyMarkdown? searchMarkdown = null, string? stickerHash = null)
+        SearchReplyMarkdown? searchMarkdown = null, GroupStickerSelection? stickerSelection = null)
     {
         if (ct.IsCancellationRequested)
             return new DeliveryResult(DeliveryStates.Skipped, Detail: ProactiveOutcomes.SkippedCancelled);
@@ -54,13 +54,17 @@ public sealed class ReplyDispatcher(
             || !richUi.UseMarkdown(reply.GroupId))
             searchMarkdown = null;
         PreparedGroupSticker? sticker = null;
-        if (searchMarkdown is null && stickerHash is not null && stickerReplies is not null
+        if (searchMarkdown is null && stickerSelection is not null && stickerReplies is not null
             && reply.GroupId is not null && (reply.ReplyToMessageId is not null || reply.IsProactive && allowActive)
             && richUi.UseMarkdown(reply.GroupId))
         {
-            sticker = await stickerReplies.PrepareAsync(reply.GroupId, stickerHash, reply.Content, reply.IsProactive,
+            var prepared = await stickerReplies.PrepareAsync(reply.GroupId, stickerSelection, reply.Content, reply.IsProactive,
                 richUi.Options.MaxMarkdownChars, ct);
-            searchMarkdown = sticker?.Message;
+            if (prepared is not null && richUi.UseMarkdown(reply.GroupId))
+            {
+                sticker = prepared;
+                searchMarkdown = sticker.Message;
+            }
         }
         var conversation = reply.GroupId is null ? $"u:{reply.PeerUserId}" : $"g:{reply.GroupId}";
         var dedupContent = searchMarkdown?.Image is { } image ? $"{reply.Content}\0{image}" : reply.Content;
@@ -93,7 +97,7 @@ public sealed class ReplyDispatcher(
             result = result with { Detail = $"{result.Detail}；投递回执暂未写入，待发送记录保留供核查" };
         }
         if (sticker is not null)
-            await stickerReplies!.CompleteAsync(reply.GroupId!, stickerHash!, sticker, result);
+            await stickerReplies!.CompleteAsync(reply.GroupId!, sticker, result);
         RuntimeActivity.Current?.Outcome(result.State, result.Detail);
         return result;
     }

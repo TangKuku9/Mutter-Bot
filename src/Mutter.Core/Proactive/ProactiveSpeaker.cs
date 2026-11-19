@@ -11,7 +11,7 @@ public sealed record ProactiveSendResult(string Outcome, string? MessageId = nul
 public sealed class ProactiveSpeaker(ReplyDispatcher dispatcher, IQqBotApiService api, TimeProvider clock)
 {
     public async Task<ProactiveSendResult> SpeakAsync(ProactiveWindow window, string line,
-        ProactiveChatConfig config, CancellationToken ct = default, AiChatResponse? usage = null, string? stickerHash = null)
+        ProactiveChatConfig config, CancellationToken ct = default, AiChatResponse? usage = null, GroupStickerSelection? sticker = null)
     {
         DeliveryResult result;
         try
@@ -22,7 +22,7 @@ public sealed class ProactiveSpeaker(ReplyDispatcher dispatcher, IQqBotApiServic
                 ReplyToMessageId = window.PassiveSlotAlive(clock.GetUtcNow().UtcDateTime) ? window.LastMessageId : null,
                 Content = line, Model = usage?.Model,
                 PromptTokens = usage?.PromptTokens ?? 0, CompletionTokens = usage?.CompletionTokens ?? 0
-            }, config.AllowActiveChannel, ct, stickerHash: stickerHash);
+            }, config.AllowActiveChannel, ct, stickerSelection: sticker);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

@@ -116,7 +116,7 @@ internal static partial class RuntimeChecks
             "收藏不落下普通聊天，成功发送后记录真实图片与使用次数");
 
         var bad = new AiChatResponse { Content = "好消息\n[mutter_sticker:8]" };
-        Require(GroupStickerReplies.TakeChoice(bad, group) is null && bad.Content == "好消息", "无效候选编号被清理");
+        Require(GroupStickerReplies.TakeChoice(bad, new StickerChoices(group, 1)) is null && bad.Content == "好消息", "无效候选编号被清理");
         Require(await library.DeleteAsync("GROUP", hash, timeout.Token)
             && await library.ReadAsync("OTHER", hash, false, timeout.Token) is not null
             && await library.DeleteAsync("OTHER", hash, timeout.Token)
@@ -519,6 +519,118 @@ internal static partial class RuntimeChecks
         else bitmap.Erase(new SKColor(255, 100, 40, 128));
         using var png = bitmap.Encode(SKEncodedImageFormat.Png, 100);
         return png.ToArray();
+    }
+
+    private static async Task OnlineStickersAsync()
+    {
+        await using var env = await TestEnvironment.CreateAsync(legacy: true);
+        using var scope = env.Services.CreateScope();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(16));
+        var ct = timeout.Token;
+        var configs = scope.ServiceProvider.GetRequiredService<IConfigRepository>();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await configs.AddKnownGroupAsync("GROUP", null, ct);
+        await configs.SaveGroupConfigAsync(new GroupConfig
+        {
+            GroupId = "GROUP", IsEnabled = true, AiProactiveEnabled = true, UseStickersInReplies = true,
+            UseStickersInProactive = true, StickerIntervalMinutes = 3
+        }, ct);
+        var group = await db.GroupConfigs.SingleAsync(row => row.GroupId == "GROUP", ct);
+        Require(group.StickerSource == StickerSettings.LibrarySource, "旧群默认使用图库表情");
+        group.StickerSource = StickerSettings.OnlineSource;
+        await db.SaveChangesAsync(ct);
+        await configs.SaveAiConfigAsync(env.Config() with
+        {
+            WebSearchEnabled = true,
+            ExternalSearch = new() { Enabled = true, Provider = "tavily", ApiKey = "synthetic-search-key" }
+        }, ct);
+        await configs.SaveProactiveConfigAsync(new ProactiveChatConfig
+        {
+            Enabled = true, AllowActiveChannel = true, CooldownMinutes = 1, QuietStartHour = 0, QuietEndHour = 0
+        }, ct);
+
+        var file = TestStickerPng(80, 80);
+        const string searchResult = """
+            {"results":[],"images":["https://127.0.0.1/ignore.png","https://images.example.org/redirect.png",
+             "https://images.example.org/sticker.png"]}
+            """;
+        env.SearchHttp.Handler = (_, _, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(searchResult)
+        });
+        env.StickerHttp.Handler = (request, _, _) => Task.FromResult(request.RequestUri!.AbsolutePath == "/redirect.png"
+            ? new HttpResponseMessage(HttpStatusCode.Redirect) { Headers = { Location = new Uri("https://127.0.0.1/deny.png") } }
+            : new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(file) });
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("懂你现在的心情。"));
+
+        var library = env.Services.GetRequiredService<IGroupStickerLibrary>();
+        var choices = await library.ChoicesAsync("GROUP", proactive: false, ct);
+        Require(choices is { SearchOnline: true, Items.Count: 0 }
+            && GroupStickerReplies.Select(choices, null, "https://example.org/invalid") is null,
+            "空图库也可选网络来源，查询只接收主题关键词");
+        var modelReply = new AiChatResponse { Content = "好耶！\n[mutter_web_sticker:鼓掌猫]" };
+        Require(GroupStickerReplies.TakeChoice(modelReply, choices)?.SearchQuery == "鼓掌猫 表情包"
+            && modelReply.Content == "好耶！", "普通 @ 回复可由模型选择联网配图，控制标记不进入正文");
+        var handler = env.Services.GetRequiredService<MessageEventHandler>();
+        var queue = env.Services.GetRequiredService<ConversationWorkQueue>();
+        await queue.StartAsync(ct);
+        await handler.HandleDispatchAsync(new QqDispatch("GROUP_AT_MESSAGE_CREATE", "online-at", 1,
+            JsonSerializer.SerializeToElement(new GroupMessageEvent
+            {
+                Id = "online-at", GroupOpenid = "GROUP", Content = "给我来张无语猫猫表情包",
+                Author = new AuthorMember { MemberOpenid = "USER", Username = "虚拟用户" }
+            })), ct);
+        await queue.StopAsync(ct);
+
+        using var searchRequest = JsonDocument.Parse(env.SearchHttp.Requests.Single().Body);
+        Require(searchRequest.RootElement.GetProperty("query").GetString() == "无语猫猫 表情包"
+            && searchRequest.RootElement.GetProperty("include_images").GetBoolean()
+            && env.StickerHttp.Requests.Select(request => request.Url.AbsolutePath)
+                .SequenceEqual(["/redirect.png", "/sticker.png"]),
+            "明确的找表情请求只执行一次图片检索，跳过内网网址和重定向");
+        var passive = SendMessageRequest.From(env.Api.RichMessages.Single());
+        Require(passive.MsgId == "online-at" && passive.MsgType == 2
+            && passive.Markdown is { ForceVerifyImageResource: true } markdown
+            && markdown.Content.Contains("![网络表情") && markdown.Content.Contains("qqbot-media://image/v1/synthetic-sticker")
+            && env.StickerMaterials.Hashes.SequenceEqual([Convert.ToHexStringLower(SHA256.HashData(file))])
+            && !Directory.Exists(env.StickerDirectory) && await db.StickerAssets.CountAsync(ct) == 0
+            && await db.ChatMessages.AnyAsync(row => row.IsBotMessage && row.HasImage, ct),
+            "网络图按实际内容上传 QQ 并确认送达，图库和本机图片目录保持空白");
+        Require(!await library.CanSendOnlineAsync("GROUP", proactive: true, ct), "网络表情确认送达后进入同群发送间隔");
+        env.Clock.Advance(TimeSpan.FromMinutes(3));
+
+        var workflow = env.Services.GetRequiredService<ProactiveWorkflow>();
+        ProactiveWindow Window(string id) => new()
+        {
+            GroupId = "GROUP", LastMessageId = "", LastMessageUtcAt = env.Clock.GetUtcNow().UtcDateTime,
+            Messages = [new ObservedMessage("虚拟用户", "终于搞定了", id, env.Clock.GetUtcNow().UtcDateTime)]
+        };
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("""{"line":"","sticker_query":"庆祝猫"}"""));
+        await workflow.RunAsync(Window("online-no-line"), ct);
+        Require(env.SearchHttp.Requests.Count == 1 && env.Api.ActiveCalls == 0, "无正文的择机判定不搜索也不发图");
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("""{"line":"值得庆祝一下！","sticker_query":"庆祝猫"}"""));
+        await workflow.RunAsync(Window("online-line"), ct);
+        Require(env.SearchHttp.Requests.Count == 2 && env.Api.RichMessages.Last() is { IsActive: true, ForceVerifyImageResource: true },
+            "择机正常取得发言资格后可从网络配表情");
+        env.Clock.Advance(TimeSpan.FromMinutes(3));
+        env.SearchHttp.Handler = (_, _, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"results":[],"images":[]}""")
+        });
+        env.Http.Handler = (_, _, _) => Task.FromResult(JsonReply("""{"line":"辛苦了！","sticker_query":"鼓掌狗狗"}"""));
+        await workflow.RunAsync(Window("online-no-image"), ct);
+        Require(env.SearchHttp.Requests.Count == 3 && env.Api.ActiveCalls == 2 && env.StickerMaterials.Hashes.Count == 2
+            && await library.CanSendOnlineAsync("GROUP", proactive: false, ct),
+            "没有可用图片时继续发送正文，发送失败的图片不占用表情间隔");
+        Require(await library.ImportAsync("GROUP", "图库庆祝表情", file, ct) is null
+            && (await library.ChoicesAsync("GROUP", false, ct)) is { Items.Count: 0, SearchOnline: true },
+            "仅网络模式不选用本群库存");
+        group.StickerSource = StickerSettings.LibraryAndOnlineSource;
+        await db.SaveChangesAsync(ct);
+        var mixed = await library.ChoicesAsync("GROUP", false, ct);
+        Require(mixed is { Items.Count: 1, SearchOnline: true }
+            && GroupStickerReplies.Select(mixed, 1, "庆祝猫")?.Hash == mixed.Items[0].Hash,
+            "混合模式优先使用已选中的图库表情");
     }
 
     private static async Task QqStickerMaterialsAsync()

@@ -73,6 +73,7 @@ public static class ServiceCollectionExtensions
             .ConfigurePrimaryHttpMessageHandler(OutboundAddressPolicy.CreatePublicWebHandler)
             .RemoveAllLoggers();
         services.AddSingleton<IStickerMaterialService, QqStickerMaterialService>();
+        services.AddSingleton<IOnlineStickerSearch, OnlineStickerSearch>();
         services.AddSingleton<GroupStickerReplies>();
 
         services.AddHostedService(sp => sp.GetRequiredService<ConversationWorkQueue>());

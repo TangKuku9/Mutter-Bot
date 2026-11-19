@@ -53,6 +53,9 @@ public sealed class ExternalSearchService
         && (aiConfig.ExternalSearch?.Enabled ?? false)
         && ExternalSearchConfig.IsConfigured(aiConfig.ExternalSearch.Normalized());
 
+    public static bool CanSearchImages(AiConfig? config) => config is not null && IsActive(config)
+        && config.ExternalSearch.Provider is "searxng" or "tavily" or "bocha" or "custom";
+
     /// <summary>
     /// 执行一次检索（成功路径）。缓存与合流对调用方透明；失败时 Outcome 为空并返回 Failure，
     /// 但绝不抛异常——聊天回复永远优先于搜索。

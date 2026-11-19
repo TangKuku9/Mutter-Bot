@@ -17,6 +17,8 @@ public class GroupConfigEntity
     public bool AutoNameStickers { get; set; }
     public bool UseStickersInReplies { get; set; }
     public bool UseStickersInProactive { get; set; }
+    public string StickerSource { get; set; } = StickerSettings.LibrarySource;
+    public DateTime? LastOnlineStickerSentAt { get; set; }
     public int StickerReplyTendency { get; set; } = StickerSettings.DefaultReplyTendency;
     public int StickerProactiveTendency { get; set; } = StickerSettings.DefaultProactiveTendency;
     public int StickerIntervalMinutes { get; set; } = StickerSettings.DefaultIntervalMinutes;

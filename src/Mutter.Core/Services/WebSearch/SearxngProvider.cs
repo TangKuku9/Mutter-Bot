@@ -42,14 +42,15 @@ public sealed class SearxngProvider(HttpClient httpClient, ILogger<SearxngProvid
             if (item.ValueKind != JsonValueKind.Object) continue;
             if (ReadString(item, "template") == "images.html")
             {
-                if (config.IncludeReplyImages && images.Count == 0
-                    && SearchReplyMarkdown.PublicUrl(ReadString(item, "img_src"), httpsOnly: true) is { } imageUrl)
+                if (config.IncludeReplyImages && images.Count < 4
+                    && SearchReplyMarkdown.PublicUrl(ReadString(item, "img_src"), httpsOnly: true) is { } imageUrl
+                    && images.All(image => image.Url != imageUrl))
                     images.Add(new WebSearchImage(imageUrl, ReadString(item, "url")));
                 continue;
             }
             if (hits.Count < config.MaxResults && ParseHit(item) is { } hit)
                 hits.Add(hit);
-            if (hits.Count >= config.MaxResults && (!config.IncludeReplyImages || images.Count > 0)) break;
+            if (hits.Count >= config.MaxResults && (!config.IncludeReplyImages || images.Count >= 4)) break;
         }
         return new WebSearchOutcome { Hits = hits, Images = images };
     }

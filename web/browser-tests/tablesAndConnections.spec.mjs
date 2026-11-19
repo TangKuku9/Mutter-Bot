@@ -197,6 +197,7 @@ test('群表情设置与图库可在窄屏使用', async ({ page }) => {
   const sticker = { hash: photo, label: '', seenCount: 2, sentCount: 0, isEnabled: true }
   let settings = {
     autoCollectStickers: false, autoNameStickers: false, useStickersInReplies: true, useStickersInProactive: false,
+    stickerSource: 'library', onlineSearchAvailable: false,
     stickerReplyTendency: 1, stickerProactiveTendency: 0, stickerIntervalMinutes: 3,
     isEnabled: true, aiProactiveEnabled: true, markdownAvailable: true
   }
@@ -235,6 +236,9 @@ test('群表情设置与图库可在窄屏使用', async ({ page }) => {
   await page.locator('.el-switch').filter({ has: page.getByRole('switch', { name: '自动收藏表情' }) }).click()
   await expect(page.getByRole('switch', { name: '自动收藏表情' })).toHaveAttribute('aria-checked', 'true')
   await page.locator('.el-switch').filter({ has: page.getByRole('switch', { name: 'AI 自动取名' }) }).click()
+  await page.locator('.el-select').filter({ has: page.getByRole('combobox', { name: '表情来源' }) }).click()
+  await page.getByRole('option', { name: '仅网络', exact: true }).click()
+  await expect(page.locator('.sticker-source')).toContainText('启用支持图片结果的独立搜索服务')
   await page.locator('.el-select').filter({ has: page.getByRole('combobox', { name: '表情发送场景' }) }).click()
   await page.getByRole('option', { name: '@ 回复和择机发言', exact: true }).click()
   await page.locator('.el-select').filter({ has: page.getByRole('combobox', { name: '择机配图倾向' }) }).click()
@@ -243,7 +247,7 @@ test('群表情设置与图库可在窄屏使用', async ({ page }) => {
   await page.getByRole('button', { name: '保存设置', exact: true }).click()
   await expect.poll(() => saved).toEqual({
     autoCollectStickers: true, autoNameStickers: true, useStickersInReplies: true, useStickersInProactive: true,
-    stickerReplyTendency: 1, stickerProactiveTendency: 2, stickerIntervalMinutes: 9
+    stickerSource: 'online', stickerReplyTendency: 1, stickerProactiveTendency: 2, stickerIntervalMinutes: 9
   })
   await page.getByRole('button', { name: '查看表情：未命名表情' }).click()
   const editor = page.getByRole('dialog', { name: '表情详情' })
